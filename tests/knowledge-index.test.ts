@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { generateVaultIndex } from '../src/knowledge-index.js'
 import { createHafez } from '../src/index.js'
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import matter from 'gray-matter'
 import { tmpdir } from 'os'
@@ -238,6 +238,33 @@ describe('vault index regeneration on writes', () => {
     expect(readIndex()).toContain('<!-- sentinel -->')
   })
 
+  // Mutations render index.md from the SQLite rows they just refreshed rather
+  // than re-parsing the vault. These pin the two renderings together.
+  it('the index-derived rendering is byte-identical to the disk-scan rendering', async () => {
+    await os.create('entity', 'Alpha Project', { type: 'project', description: 'The alpha', domain: ['ops'] })
+    await os.create('entity', 'Beta Work', { type: 'entity', brief: 'Brief line for beta' })
+    await os.capture('Gamma Thought')
+    await os.create('knowledge', 'Delta Insight', { domain: ['ops', 'ai'], synthesis: 'Synthesis line.' })
+    await os.create('knowledge', 'Epsilon Plan', { subtype: 'plan' })
+    await os.update('beta-work', { status: 'paused' })
+
+    const derived = readIndex()
+    // Re-render the same vault straight off disk (no rows passed)
+    generateVaultIndex(vault)
+    expect(readIndex()).toBe(derived)
+  })
+
+  it('picks up a file edited outside hafez on the next mutation', async () => {
+    await os.create('entity', 'Externally Edited', { type: 'entity' })
+    await os.create('entity', 'Unrelated Trigger', { type: 'entity' })
+    const path = join(vault, 'entities/externally-edited.md')
+    const raw = readFileSync(path, 'utf-8')
+    writeFileSync(path, raw.replace('name: Externally Edited', 'name: Externally Edited\ndescription: Edited by hand'))
+    // A mutation on a *different* entity must still refresh the hand edit
+    await os.update('unrelated-trigger', { brief: 'touch' })
+    expect(readIndex()).toContain('[[externally-edited]] — Edited by hand (entity)')
+  })
+
   it('adds /index.md to .git/info/exclude so the index never dirties the worktree', async () => {
     await os.capture('Exclude Check')
     const exclude = readFileSync(join(vault, '.git', 'info', 'exclude'), 'utf-8')
@@ -262,5 +289,43 @@ describe('vault index regeneration on writes', () => {
     const slug = await os.create('entity', 'Healthy Entity', { type: 'entity' })
     expect(slug).toBe('healthy-entity')
     expect(readIndex()).toContain('[[healthy-entity]]')
+  })
+})
+
+describe('local excludes in a gitfile vault (git worktree)', () => {
+  let base: string
+  let main: string
+  let vault: string
+
+  beforeEach(() => {
+    base = join(tmpdir(), `hafez-wt-${randomUUID()}`)
+    main = join(base, 'main')
+    vault = join(base, 'vault-worktree')
+    mkdirSync(main, { recursive: true })
+    execSync('git init', { cwd: main })
+    execSync('git config user.email "test@test.com"', { cwd: main })
+    execSync('git config user.name "Test"', { cwd: main })
+    writeFileSync(join(main, 'seed.md'), 'seed\n')
+    execSync('git add seed.md', { cwd: main })
+    execSync('git commit -m seed', { cwd: main })
+    execSync(`git worktree add "${vault}" -b vault-branch`, { cwd: main })
+    mkdirSync(join(vault, 'entities'), { recursive: true })
+  })
+
+  afterEach(() => rmSync(base, { recursive: true, force: true }))
+
+  it('keeps index.md and the index DB out of git status when .git is a gitfile', async () => {
+    // The vault's .git is a file pointing at the real git dir, not a directory
+    expect(statSync(join(vault, '.git')).isFile()).toBe(true)
+
+    const os = createHafez({ vaultPath: vault, git: { push: false } })
+    await os.create('entity', 'Worktree Vault Entity', { type: 'project' })
+    await os.query({ filter: 'active' })
+
+    expect(existsSync(join(vault, 'index.md'))).toBe(true)
+    expect(existsSync(join(vault, '.hafez.db'))).toBe(true)
+    const status = execSync('git status --porcelain', { cwd: vault, encoding: 'utf-8' })
+    expect(status).not.toContain('index.md')
+    expect(status).not.toContain('.hafez.db')
   })
 })

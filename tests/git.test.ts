@@ -769,3 +769,196 @@ describe('createGitJournal fileTimes (recents tiebreak source)', () => {
     expect(times.get('entities/newer.md')!.startsWith('2026-01-01T10:01:00')).toBe(true)
   })
 })
+
+describe('createGitJournal commit staging (in-batch create+delete)', () => {
+  // A batch that creates a file and then deletes it (capture then cross-kind
+  // promote) hands the Journal a deleted path that git never tracked. `git add`
+  // is fatal on a pathspec matching nothing, so the whole valid batch used to
+  // die at the commit stage. Dedicated local-only repo — no remote needed.
+  const REPO = join(tmpdir(), 'hafez-test-stage-' + Date.now())
+
+  beforeEach(async () => {
+    rmSync(REPO, { recursive: true, force: true })
+    mkdirSync(join(REPO, 'entities'), { recursive: true })
+    mkdirSync(join(REPO, 'knowledge'), { recursive: true })
+    const git = simpleGit(REPO)
+    await git.init()
+    await git.addConfig('user.email', 'test@test.com')
+    await git.addConfig('user.name', 'Test')
+    writeFileSync(join(REPO, 'init.md'), 'init')
+    await git.add('init.md')
+    await git.commit('init')
+  })
+
+  afterAll(() => rmSync(REPO, { recursive: true, force: true }))
+
+  it('commits when a deleted path was never git-tracked', async () => {
+    writeFileSync(join(REPO, 'knowledge', 'quick-idea.md'), 'promoted')
+    const journal = createGitJournal(REPO, { push: false })
+
+    await journal.commit(['knowledge/quick-idea.md'], ['entities/quick-idea.md'], 'batch: 2 operations')
+
+    const git = simpleGit(REPO)
+    expect((await git.log()).latest?.message).toBe('batch: 2 operations')
+    expect((await git.status()).isClean()).toBe(true)
+    expect((await git.raw(['ls-files'])).split('\n')).toContain('knowledge/quick-idea.md')
+  })
+
+  it('still stages the removal of a deleted path that git does track', async () => {
+    const git = simpleGit(REPO)
+    writeFileSync(join(REPO, 'entities', 'tracked.md'), 'v1')
+    await git.add('entities/tracked.md')
+    await git.commit('add tracked')
+
+    rmSync(join(REPO, 'entities', 'tracked.md'))
+    writeFileSync(join(REPO, 'knowledge', 'tracked.md'), 'moved')
+    const journal = createGitJournal(REPO, { push: false })
+    await journal.commit(['knowledge/tracked.md'], ['entities/tracked.md'], 'promote: tracked')
+
+    expect((await git.status()).isClean()).toBe(true)
+    const files = (await git.raw(['ls-files'])).split('\n')
+    expect(files).not.toContain('entities/tracked.md')
+    expect(files).toContain('knowledge/tracked.md')
+  })
+
+  it('commits a move git reports as a rename', async () => {
+    // Identical content on both sides, so git stages one `R100` entry instead
+    // of an add + a delete. simple-git's status keeps renames out of `staged`,
+    // so the "nothing to commit" guard used to fire and the promote was
+    // silently dropped — left staged, never committed, absent from changelog.
+    const git = simpleGit(REPO)
+    const body = '---\nname: Moving\ncreated: "2026-01-01"\n---\n\nIdentical body, so git calls this a rename.\n'
+    writeFileSync(join(REPO, 'entities', 'moving.md'), body)
+    await git.add('entities/moving.md')
+    await git.commit('capture: moving')
+
+    rmSync(join(REPO, 'entities', 'moving.md'))
+    writeFileSync(join(REPO, 'knowledge', 'moving.md'), body)
+    const journal = createGitJournal(REPO, { push: false })
+    await journal.commit(['knowledge/moving.md'], ['entities/moving.md'], 'promote: moving')
+
+    expect((await git.log()).latest?.message).toBe('promote: moving')
+    expect((await git.status()).isClean()).toBe(true)
+  })
+
+  it('is a no-op when every path is an untracked deletion', async () => {
+    const git = simpleGit(REPO)
+    const before = (await git.log()).latest?.hash
+    const journal = createGitJournal(REPO, { push: false })
+
+    await journal.commit([], ['entities/never-existed.md'], 'batch: 1 operations')
+
+    expect((await git.log()).latest?.hash).toBe(before)
+    expect((await git.status()).isClean()).toBe(true)
+  })
+
+  it('surfaces commit-stage git failures as mapped HafezErrors', async () => {
+    writeFileSync(join(REPO, 'entities', 'probe.md'), 'body')
+    // A raced git process holding the index lock makes `git add` fail with a
+    // raw GitError — the Journal must map it, not leak it (exit-code contract).
+    writeFileSync(join(REPO, '.git', 'index.lock'), '')
+    const journal = createGitJournal(REPO, { push: false })
+    try {
+      await expect(journal.commit(['entities/probe.md'], [], 'add probe'))
+        .rejects.toMatchObject({ name: 'HafezError', code: 'GIT_COMMIT_FAILED' })
+    } finally {
+      rmSync(join(REPO, '.git', 'index.lock'), { force: true })
+    }
+  })
+
+  it('leaves push-stage HafezErrors unmapped', async () => {
+    const git = simpleGit(REPO)
+    await git.addRemote('origin', join(tmpdir(), 'hafez-no-such-remote-' + Date.now() + '.git'))
+    writeFileSync(join(REPO, 'entities', 'pushy.md'), 'body')
+    const journal = createGitJournal(REPO)
+    await expect(journal.commit(['entities/pushy.md'], [], 'add pushy'))
+      .rejects.toMatchObject({ code: 'GIT_PUSH_FAILED' })
+    // The commit still landed locally
+    expect((await git.log()).latest?.message).toBe('add pushy')
+  }, 30_000)
+})
+
+describe('fresh remote bootstrap (origin added to a local-only vault)', () => {
+  // `git remote add origin …` on a vault that has only ever been local leaves
+  // the branch unpublished and untracked. Plain `git pull`, `git push` and
+  // `@{u}` are all fatal in that state, so every mutation after the remote was
+  // added died at the push stage (exit 4). Sync/push must bootstrap instead:
+  // publish the branch and set its upstream on the first push.
+  const ROOT = join(tmpdir(), 'hafez-test-bootstrap-' + Date.now())
+  const BARE2 = join(ROOT, 'remote.git')
+  const VAULT = join(ROOT, 'vault')
+  let branch: string
+
+  beforeEach(async () => {
+    rmSync(ROOT, { recursive: true, force: true })
+    mkdirSync(join(VAULT, 'entities'), { recursive: true })
+    mkdirSync(BARE2, { recursive: true })
+    await simpleGit(BARE2).init(true)
+
+    // A purely local vault: init + commits, no remote at any point.
+    const git = simpleGit(VAULT)
+    await git.init()
+    await git.addConfig('user.email', 'test@test.com')
+    await git.addConfig('user.name', 'Test')
+    writeFileSync(join(VAULT, 'entities', 'init.md'), 'local history')
+    await git.add('entities/init.md')
+    await git.commit('init vault')
+    branch = (await git.branchLocal()).current
+
+    // Only now does the user wire up a remote.
+    await git.addRemote('origin', BARE2)
+  })
+
+  afterAll(() => rmSync(ROOT, { recursive: true, force: true }))
+
+  it('gitSync publishes the branch and sets its upstream', async () => {
+    const result = await gitSync(VAULT)
+    expect(result).toEqual({ pulled: false, pushed: true, remote: true })
+
+    const git = simpleGit(VAULT)
+    const upstream = (await git.raw(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])).trim()
+    expect(upstream).toBe(`origin/${branch}`)
+    expect((await simpleGit(BARE2).log()).latest?.message).toBe('init vault')
+  }, 30_000)
+
+  it('a mutation right after the remote is added commits and pushes', async () => {
+    writeFileSync(join(VAULT, 'entities', 'first-after-remote.md'), 'body')
+    await gitCommitAndPush(VAULT, ['entities/first-after-remote.md'], 'create: first-after-remote')
+
+    const remoteFiles = (await simpleGit(BARE2).raw(['ls-tree', '-r', '--name-only', branch])).split('\n')
+    expect(remoteFiles).toContain('entities/first-after-remote.md')
+  }, 30_000)
+
+  it('subsequent mutations and syncs stay clean once bootstrapped', async () => {
+    await gitSync(VAULT)
+
+    writeFileSync(join(VAULT, 'entities', 'second.md'), 'body')
+    await gitCommitAndPush(VAULT, ['entities/second.md'], 'create: second')
+
+    const after = await gitSync(VAULT)
+    expect(after).toEqual({ pulled: false, pushed: false, remote: true })
+    expect((await simpleGit(BARE2).log()).latest?.message).toBe('create: second')
+  }, 30_000)
+
+  it('adopts an origin that already carries the branch', async () => {
+    // Someone else published the branch first: the local vault has no upstream
+    // configured but the remote ref exists, so sync must track it and rebase
+    // onto it rather than dying on `git pull`.
+    const seeder = join(ROOT, 'seeder')
+    await simpleGit().clone(BARE2, seeder)
+    const gitS = simpleGit(seeder)
+    await gitS.addConfig('user.email', 'test@test.com')
+    await gitS.addConfig('user.name', 'Test')
+    mkdirSync(join(seeder, 'entities'), { recursive: true })
+    writeFileSync(join(seeder, 'entities', 'init.md'), 'local history')
+    writeFileSync(join(seeder, 'entities', 'from-remote.md'), 'remote body')
+    await gitS.add(['entities/init.md', 'entities/from-remote.md'])
+    await gitS.commit('seed remote')
+    await gitS.push(['--set-upstream', 'origin', branch])
+
+    const result = await gitSync(VAULT)
+    expect(result.remote).toBe(true)
+    expect(result.pulled).toBe(true)
+    expect(existsSync(join(VAULT, 'entities', 'from-remote.md'))).toBe(true)
+  }, 30_000)
+})

@@ -1,16 +1,15 @@
 // src/merge.ts
-import { parseContent, serializeFile } from './vault.js'
-import { parseSessionLogHeading, splitStructural, type DocSection } from './document.js'
+import { parseContent, serializeFile, ARRAY_FIELDS } from './vault.js'
+import { parseSessionLogHeading, splitLogEntries, documentFor, type DocSection, type Doc } from './document.js'
 import { APPEND_ONLY_SECTIONS } from './contracts.js'
 
 // Fields that are ISO date strings — latest date wins
 const DATE_FIELDS = ['last-touched', 'last-reinforced', 'created']
 // Fields that are numeric counters — max wins
 const COUNT_FIELDS = ['reinforcement-count', 'staleness-days']
-// Fields that are always arrays — union with dedup
-const ARRAY_FIELDS_UNCAPPED = ['tags', 'domain', 'related']
+// Array fields (vault.ARRAY_FIELDS — the same set parsing coerces) union with dedup
 
-export function mergeVaultContent(remote: string, local: string): string {
+export function mergeVaultContent(remote: string, local: string, kind: 'entity' | 'knowledge' | 'session'): string {
   const r = parseContent(remote)
   const l = parseContent(local)
 
@@ -21,7 +20,18 @@ export function mergeVaultContent(remote: string, local: string): string {
     String(l.frontmatter?.['last-touched'] ?? '') >= String(r.frontmatter?.['last-touched'] ?? '')
 
   const fm = mergeFrontmatter(r.frontmatter, l.frontmatter, localWins)
-  const body = mergeBody(r.body, l.body, localWins)
+  // The Document binds by kind — the same binding every write path uses (see
+  // DocContext), so a section this merge preserves stays structural for the
+  // next update too. The two sides come from divergent histories whose type
+  // may differ (a promote race leaves one side 'capture' and the other
+  // 'project'); the kind-level set keeps every same-kind section structural,
+  // while cross-KIND headings (a session-only ## Decisions quoted in an
+  // entity Brief) are not boundaries. Known residual: a same-kind heading
+  // quoted at line start in one side's section splits at that false boundary
+  // and can survive the merge as its own section — the fix is fence/quote
+  // awareness in Document's splitter, not a narrower binding here.
+  const doc = documentFor({ kind })
+  const body = mergeBody(doc, r.body, l.body, localWins)
 
   return serializeFile(fm, body)
 }
@@ -49,7 +59,7 @@ function mergeFrontmatter(
   }
 
   // Array fields: union
-  for (const key of ARRAY_FIELDS_UNCAPPED) {
+  for (const key of ARRAY_FIELDS) {
     merged[key] = unionArrays(remote[key], local[key])
     if (merged[key].length === 0) delete merged[key]
   }
@@ -57,7 +67,8 @@ function mergeFrontmatter(
 }
 
 function unionArrays(a: any, b: any): string[] {
-  // Local (b) items first so they survive cap truncation
+  // Local (b) items first: nothing is truncated, but the local side's order is
+  // the one the user last saw, so it stays the order they get back.
   const arrA = Array.isArray(a) ? a : a ? [a] : []
   const arrB = Array.isArray(b) ? b : b ? [b] : []
   return [...new Set([...arrB, ...arrA])]
@@ -65,14 +76,14 @@ function unionArrays(a: any, b: any): string[] {
 
 // --- Body merge ---
 
-function mergeBody(remoteBody: string, localBody: string, localWins: boolean): string {
+function mergeBody(doc: Doc, remoteBody: string, localBody: string, localWins: boolean): string {
   if (remoteBody === localBody) return localBody
 
   // Structural split (see document.ts): sections are atomic — a user ##
   // heading inside a Brief or a session-log entry body stays with its
   // section instead of being split out and merged under its own policy.
-  const remote = splitStructural(remoteBody)
-  const local = splitStructural(localBody)
+  const remote = doc.splitStructural(remoteBody)
+  const local = doc.splitStructural(localBody)
 
   // Build merged sections starting from local (local section order is canonical)
   const localHeadings = new Set(local.sections.map(s => s.heading))
@@ -102,10 +113,17 @@ function mergeBody(remoteBody: string, localBody: string, localWins: boolean): s
     }
   }
 
-  // Reassemble
-  const preamble = localWins
-    ? (local.preamble || remote.preamble)
-    : (remote.preamble || local.preamble)
+  // Reassemble. A preamble that is itself a session-log entry stream is
+  // append-only content living outside any heading — the archive-log files
+  // under entities/archive/ are exactly this shape. Merging those by the
+  // scalar wins policy drops one machine's archived entries wholesale, so
+  // union them by the same entry policy the Session Log section uses.
+  const preamble =
+    isLogEntryStream(remote.preamble) && isLogEntryStream(local.preamble)
+      ? mergeSessionLogs(remote.preamble, local.preamble)
+      : localWins
+        ? (local.preamble || remote.preamble)
+        : (remote.preamble || local.preamble)
   const parts = [preamble, ...mergedSections.map(s => `## ${s.heading}\n\n${s.content}`)].filter(Boolean)
   return parts.join('\n\n')
 }
@@ -121,6 +139,13 @@ function mergeAppendOnlyLines(remoteContent: string, localContent: string): stri
     .filter(l => l.trim() && !seen.has(l.trim()))
   if (remoteOnly.length === 0) return localContent
   return [...localLines, ...remoteOnly].join('\n')
+}
+
+/** True when a block is nothing but session-log entries — it starts with an
+ *  entry heading, so splitLogEntries drops no leading prose. */
+function isLogEntryStream(text: string): boolean {
+  const first = text.trim().split('\n')[0]
+  return first !== '' && parseSessionLogHeading(first) !== null
 }
 
 function mergeSessionLogs(remoteContent: string, localContent: string): string {
@@ -147,64 +172,78 @@ function mergeSessionLogs(remoteContent: string, localContent: string): string {
 interface LogEntry { key: string; date: string; raw: string }
 
 function parseLogEntries(content: string): LogEntry[] {
-  const entries: LogEntry[] = []
-  const blocks = content.split(/\n(?=### \d{4}-\d{2}-\d{2})/)
-
-  for (const block of blocks) {
-    const trimmed = block.trim()
-    if (!trimmed) continue
-    const firstLine = trimmed.split('\n')[0]
-    const parsed = parseSessionLogHeading(firstLine)
-    if (parsed) {
-      entries.push({
-        key: `${parsed.date}|${parsed.agent}|${parsed.type}`,
-        date: parsed.date,
-        raw: trimmed,
-      })
-    }
-  }
-
-  return entries
+  // Document owns entry block splitting; the identity key and dedup/sort
+  // policy stay here — merge semantics, not document structure.
+  //
+  // Identity is the entry's whole content. Date+agent+type is not an identity:
+  // two machines each running a digest on the same day produce two entries with
+  // the same heading and different bodies, and keying on the heading collapses
+  // them to one — the other machine's session history is gone. Entries the two
+  // sides share came from the same commit, so they are byte-identical and still
+  // dedup.
+  return splitLogEntries(content).map(raw => {
+    const parsed = parseSessionLogHeading(raw.split('\n')[0])!
+    return { key: raw, date: parsed.date, raw }
+  })
 }
 
 function mergeNextActions(remoteContent: string, localContent: string): string {
-  const remoteItems = parseActionItems(remoteContent)
-  const localItems = parseActionItems(localContent)
+  const remote = parseActionItems(remoteContent)
+  const local = parseActionItems(localContent)
 
-  // Build merged set: start with local items
-  const seen = new Set<string>()
-  const merged: { checked: boolean; text: string }[] = []
+  // Start with local items; index by action text for the remote pass
+  const merged = local.items.map(i => ({ ...i, notes: [...i.notes] }))
+  const byText = new Map(merged.map(i => [i.text, i]))
 
-  // Add all local items
-  for (const item of localItems) {
-    seen.add(item.text)
-    merged.push(item)
-  }
-
-  // Add remote items not in local
-  for (const item of remoteItems) {
-    if (!seen.has(item.text)) {
-      seen.add(item.text)
-      merged.push(item)
-    } else {
-      // If remote has it checked but local has it unchecked, upgrade to checked
-      const existing = merged.find(m => m.text === item.text)
-      if (existing && item.checked && !existing.checked) {
-        existing.checked = true
-      }
+  for (const item of remote.items) {
+    const existing = byText.get(item.text)
+    if (!existing) {
+      merged.push({ ...item, notes: [...item.notes] })
+      byText.set(item.text, merged[merged.length - 1])
+      continue
     }
+    // Checked on either side means done
+    if (item.checked) existing.checked = true
+    // Union the item's own notes/sub-bullets — they are authored content, not
+    // re-derivable from the checkbox line
+    existing.notes.push(...unionLines(item.notes, existing.notes))
   }
 
-  return merged.map(i => `- [${i.checked ? 'x' : ' '}] ${i.text}`).join('\n')
+  const lines = [...local.preamble, ...unionLines(remote.preamble, local.preamble)]
+  for (const item of merged) {
+    lines.push(`- [${item.checked ? 'x' : ' '}] ${item.text}`)
+    lines.push(...item.notes)
+  }
+  return lines.join('\n').replace(/\n+$/, '')
 }
 
-function parseActionItems(content: string): { checked: boolean; text: string }[] {
-  const items: { checked: boolean; text: string }[] = []
+interface ActionItem { checked: boolean; text: string; notes: string[] }
+
+/** Lines of `from` not already present in `into` (blank lines only from `into`). */
+function unionLines(from: string[], into: string[]): string[] {
+  const seen = new Set(into.map(l => l.trim()).filter(Boolean))
+  return from.filter(l => l.trim() && !seen.has(l.trim()))
+}
+
+/**
+ * Split a Next Actions section into its leading non-item lines and its items,
+ * each item carrying the lines that follow it (indented sub-bullets, notes)
+ * until the next checkbox. Non-checkbox lines are authored content — parsing
+ * checkbox lines alone and re-rendering from them deletes everything else.
+ * `- [X]` is the same as `- [x]`: a completed action, not an unknown line.
+ */
+function parseActionItems(content: string): { preamble: string[]; items: ActionItem[] } {
+  const preamble: string[] = []
+  const items: ActionItem[] = []
   for (const line of content.split('\n')) {
-    const unchecked = line.match(/^- \[ \] (.+)$/)
-    if (unchecked) { items.push({ checked: false, text: unchecked[1] }); continue }
-    const checked = line.match(/^- \[x\] (.+)$/)
-    if (checked) { items.push({ checked: true, text: checked[1] }); continue }
+    const match = line.match(/^- \[([ xX])\] (.+)$/)
+    if (match) {
+      items.push({ checked: match[1].toLowerCase() === 'x', text: match[2], notes: [] })
+    } else if (items.length === 0) {
+      preamble.push(line)
+    } else {
+      items[items.length - 1].notes.push(line)
+    }
   }
-  return items
+  return { preamble, items }
 }

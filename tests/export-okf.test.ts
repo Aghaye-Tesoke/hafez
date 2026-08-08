@@ -79,11 +79,11 @@ describe('exportOkf frontmatter mapping', () => {
     expect(ses.description).toBe('Session summary line.')
   })
 
-  it('falls back to knowledge without subtype as type knowledge and Synthesis description', () => {
+  it('exports knowledge without subtype under the insight default, matching the index', () => {
     writeKnowledge('bare-note', { name: 'Bare Note', created: '2026-01-01' })
     exportOkf(vault, out)
     const kn = parseFilePath(join(out, 'knowledge', 'bare-note.md')).frontmatter
-    expect(kn.type).toBe('knowledge')
+    expect(kn.type).toBe('knowledge/insight')
     expect(kn.description).toBe('Insight line.')
     expect(kn.timestamp).toBe('2026-01-01')
   })
@@ -191,6 +191,43 @@ describe('exportOkf guards and edge cases', () => {
     expect(report.skipped.some(s => s.file === 'entities/broken.md')).toBe(true)
     expect(report.skipped.some(s => s.file === 'knowledge/nameless.md' && s.reason === 'missing name')).toBe(true)
     expect(existsSync(join(out, 'entities', 'broken.md'))).toBe(false)
+  })
+
+  it('keeps a doc slugged index and the generated dir index side by side', () => {
+    writeEntity('index', { name: 'Index Entity', type: 'entity', status: 'active', created: '2026-01-01', 'last-touched': '2026-01-01' },
+      'Real content that must survive.\n\n## Session Log\n')
+    writeEntity('pointer', { name: 'Pointer', type: 'entity', status: 'active', created: '2026-01-01', 'last-touched': '2026-01-01' },
+      'Points at [[index]].\n\n## Session Log\n')
+
+    const report = exportOkf(vault, out)
+    expect(report.entities).toBe(2)
+
+    // The generated dir index stays the reserved, frontmatter-free file
+    const dirIndex = readFileSync(join(out, 'entities', 'index.md'), 'utf-8')
+    expect(dirIndex.startsWith('# Entities')).toBe(true)
+    expect(dirIndex).toContain('Index Entity')
+
+    // The vault doc lands under a disambiguated name, content intact
+    const docPath = join(out, 'entities', 'index-doc.md')
+    expect(existsSync(docPath)).toBe(true)
+    const doc = parseFilePath(docPath)
+    expect(doc.frontmatter.title).toBe('Index Entity')
+    expect(doc.body).toContain('Real content that must survive.')
+
+    // Both the dir index and inbound links point at the renamed file
+    expect(dirIndex).toContain('(/entities/index-doc.md)')
+    const pointer = parseFilePath(join(out, 'entities', 'pointer.md')).body
+    expect(pointer).toContain('[index](/entities/index-doc.md)')
+    expect(report.unresolvedLinks).toBe(0)
+  })
+
+  it('steps past an occupied disambiguation name', () => {
+    writeKnowledge('index', { name: 'Index Note', created: '2026-01-01' })
+    writeKnowledge('index-doc', { name: 'Index Doc Note', created: '2026-01-01' })
+
+    exportOkf(vault, out)
+    expect(parseFilePath(join(out, 'knowledge', 'index-doc.md')).frontmatter.title).toBe('Index Doc Note')
+    expect(parseFilePath(join(out, 'knowledge', 'index-doc-2.md')).frontmatter.title).toBe('Index Note')
   })
 
   it('exports an empty vault as root index.md only with zero counts', () => {

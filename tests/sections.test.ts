@@ -1,8 +1,12 @@
 // tests/sections.test.ts
 import { describe, it, expect } from 'vitest'
-import { getBrief, setBrief, removeBrief, getNextActions, addNextAction, completeNextAction, removeNextAction, clearNextActions, findSection, findNextStructuralHeading, STRUCTURAL_SECTIONS } from '../src/document.js'
+import { documentFor, documentForFile, structuralSectionsFor, parseSessionLog } from '../src/document.js'
 import { ALL_CONTRACTS, SUBTYPE_SECTIONS } from '../src/contracts.js'
-import { parseSessionLog } from '../src/document.js'
+
+// Entity-union binding: these suites exercise entity-side sections (Brief,
+// Next Actions, Session Log, Current State). Knowledge-flavored tests bind
+// their own doc below.
+const { getBrief, setBrief, removeBrief, getNextActions, addNextAction, completeNextAction, removeNextAction, clearNextActions, findSection, findNextStructuralHeading } = documentFor({ kind: 'entity' })
 
 describe('Brief', () => {
   const bodyWithBrief = `## Purpose\n\nSome purpose.\n\n## Brief\n\nThis is the brief content.\nMultiple lines here.\n\n## Session Log\n\n### 2026-03-20 — claude [progress]\nSummary: Did something`
@@ -172,27 +176,118 @@ describe('Next Actions', () => {
   })
 })
 
-// --- Structural section boundary tests ---
+describe('Next Actions edits stay inside the section', () => {
+  // A Brief that quotes an action line verbatim. Matching was already
+  // section-scoped; editing was not — complete flipped the quoted line and
+  // remove deleted every copy body-wide.
+  const bodyQuotingBrief = `## Brief\n\nHandoff: the blocker is\n- [ ] Deploy fix to VPS @dev\nwhich nobody has picked up.\n\n## Next Actions\n\n- [ ] Deploy fix to VPS @dev\n- [ ] Test /start command @simorgh\n\n## Session Log\n\n### 2026-03-20 — claude [progress]\nSummary: Did something`
 
-describe('STRUCTURAL_SECTIONS', () => {
-  it('contains all known section headings', () => {
-    expect(STRUCTURAL_SECTIONS.has('Brief')).toBe(true)
-    expect(STRUCTURAL_SECTIONS.has('Next Actions')).toBe(true)
-    expect(STRUCTURAL_SECTIONS.has('Session Log')).toBe(true)
-    expect(STRUCTURAL_SECTIONS.has('Synthesis')).toBe(true)
+  it('completeNextAction checks the real action and leaves a quoting Brief untouched', () => {
+    const result = completeNextAction(bodyQuotingBrief, 'Deploy fix')
+    expect(result.matched).toBe('Deploy fix to VPS @dev')
+    expect(getBrief(result.body)).toBe(getBrief(bodyQuotingBrief))
+    expect(findSection(result.body, 'Next Actions')!.content).toContain('- [x] Deploy fix to VPS @dev')
+    expect(findSection(result.body, 'Next Actions')!.content).not.toContain('- [ ] Deploy fix to VPS @dev')
+    expect(getNextActions(result.body)).toEqual(['Test /start command @simorgh'])
   })
 
-  it('includes every section from contracts.ts', () => {
-    for (const contract of ALL_CONTRACTS) {
+  it('removeNextAction removes only the matching line inside Next Actions', () => {
+    const result = removeNextAction(bodyQuotingBrief, 'Deploy fix')
+    expect(result.matched).toBe('Deploy fix to VPS @dev')
+    expect(getBrief(result.body)).toBe(getBrief(bodyQuotingBrief))
+    expect(findSection(result.body, 'Next Actions')!.content).not.toContain('Deploy fix to VPS @dev')
+    expect(getNextActions(result.body)).toEqual(['Test /start command @simorgh'])
+  })
+
+  // Action text is data, not a replacement pattern: $&, $', $1 must survive.
+  const bodyPatternChars = `## Purpose\n\nSome purpose.\n\n## Next Actions\n\n- [ ] pay $& bill and refund $' plus $1 @dev\n- [ ] Keep me @dev\n\n## Session Log\n`
+
+  it('completeNextAction treats $& / $’ / $1 in action text literally', () => {
+    const result = completeNextAction(bodyPatternChars, 'pay')
+    expect(result.matched).toBe("pay $& bill and refund $' plus $1 @dev")
+    expect(result.body).toBe(
+      `## Purpose\n\nSome purpose.\n\n## Next Actions\n\n- [x] pay $& bill and refund $' plus $1 @dev\n- [ ] Keep me @dev\n\n## Session Log\n`
+    )
+  })
+
+  it('removeNextAction treats $& / $’ / $1 in action text literally', () => {
+    const result = removeNextAction(bodyPatternChars, 'pay')
+    expect(result.matched).toBe("pay $& bill and refund $' plus $1 @dev")
+    expect(result.body).toBe(
+      `## Purpose\n\nSome purpose.\n\n## Next Actions\n\n- [ ] Keep me @dev\n\n## Session Log\n`
+    )
+  })
+})
+
+// --- Structural section boundary tests ---
+
+describe('structural section sets (per kind)', () => {
+  it('entity union contains the entity-side headings', () => {
+    const s = structuralSectionsFor({ kind: 'entity' })
+    expect(s.has('Brief')).toBe(true)
+    expect(s.has('Next Actions')).toBe(true)
+    expect(s.has('Session Log')).toBe(true)
+    expect(s.has('Related')).toBe(true)
+  })
+
+  it('every contract section is structural under its kind binding', () => {
+    const entitySet = structuralSectionsFor({ kind: 'entity' })
+    for (const contract of ALL_CONTRACTS.filter(c => c.kind === 'item')) {
       for (const section of [...contract.defaultSections, ...contract.optionalSections]) {
-        expect(STRUCTURAL_SECTIONS.has(section), `missing "${section}" from ${contract.type}`).toBe(true)
+        expect(entitySet.has(section), `missing "${section}" from ${contract.type}`).toBe(true)
       }
     }
-    for (const sections of Object.values(SUBTYPE_SECTIONS)) {
+    const knowledgeSet = structuralSectionsFor({ kind: 'knowledge' })
+    for (const [subtype, sections] of Object.entries(SUBTYPE_SECTIONS)) {
       for (const section of sections) {
-        expect(STRUCTURAL_SECTIONS.has(section), `missing "${section}" from SUBTYPE_SECTIONS`).toBe(true)
+        expect(knowledgeSet.has(section), `missing "${section}" from subtype ${subtype}`).toBe(true)
       }
     }
+  })
+
+  it('Current State is structural on captures — update writes it type-ungated, so a Brief rewrite must not swallow it', () => {
+    const s = structuralSectionsFor({ kind: 'entity' })
+    expect(s.has('Current State')).toBe(true)
+    const cdoc = documentFor({ kind: 'entity' })
+    const body = '## Notes\n\nraw\n\n## Brief\n\nfirst\n\n## Current State\n\nwaiting on X\n'
+    expect(cdoc.getBrief(body)).toBe('first')
+    const rewritten = cdoc.setBrief(body, 'second')
+    expect(rewritten).toContain('## Current State')
+    expect(rewritten).toContain('waiting on X')
+  })
+
+  it('plan sections survive a synthesis rewrite on any knowledge file — same-kind headings are always boundaries', () => {
+    // A plan-shaped note whose subtype was never persisted (create only
+    // writes subtype when given; hand edits never do) must not lose its
+    // sections to an adjacent rewrite — deletion-safety outranks the
+    // stranding a quoted same-kind heading can cause.
+    const doc = documentForFile({ kind: 'knowledge' })
+    const body = '## Synthesis\n\nintro\n\n## Goal\n\nship it\n\n## Steps\n\n- step one\n'
+    const rewritten = doc.setSection(body, 'Synthesis', 'NEW')
+    expect(doc.findSection(rewritten, 'Synthesis')!.content).toBe('NEW')
+    expect(rewritten).toContain('## Goal')
+    expect(rewritten).toContain('ship it')
+    expect(rewritten).toContain('- step one')
+  })
+
+  it('a session-only heading inside a Brief no longer ends the section (the reported collision)', () => {
+    const body = '## Brief\n\nintro\n\n## Decisions\n\nwe decided things\n\n## Session Log\n'
+    expect(getBrief(body)).toBe('intro\n\n## Decisions\n\nwe decided things')
+    // The same heading IS a boundary inside a session file
+    const sdoc = documentFor({ kind: 'session' })
+    const sessionBody = '## Summary\n\nintro\n\n## Decisions\n\npicked option B\n'
+    expect(sdoc.findSection(sessionBody, 'Summary')!.content).toBe('intro')
+    expect(sdoc.findSection(sessionBody, 'Decisions')!.content).toBe('picked option B')
+  })
+
+  it('cross-KIND headings are NOT boundaries; same-kind headings always are', () => {
+    const entity = structuralSectionsFor({ kind: 'entity' })
+    expect(entity.has('Decisions')).toBe(false)  // session-only
+    expect(entity.has('Goal')).toBe(false)       // knowledge-only (plan)
+    expect(entity.has('Synthesis')).toBe(false)  // knowledge-only
+    const knowledge = structuralSectionsFor({ kind: 'knowledge' })
+    expect(knowledge.has('Steps')).toBe(true)    // same-kind: a plan heading bounds every knowledge file
+    expect(knowledge.has('Brief')).toBe(false)   // entity-only
   })
 })
 
@@ -269,7 +364,8 @@ describe('findSection with structural boundaries', () => {
       '## Evidence', '', '- First evidence point',
     ].join('\n')
 
-    const section = findSection(body, 'Synthesis')
+    const kdoc = documentFor({ kind: 'knowledge' })
+    const section = kdoc.findSection(body, 'Synthesis')
     expect(section).not.toBeNull()
     expect(section!.content).toContain('## Background Research')
     expect(section!.content).not.toContain('Evidence')

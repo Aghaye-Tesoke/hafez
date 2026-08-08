@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { createIndex, SCHEMA_VERSION } from '../src/db.js'
 import { serializeFile } from '../src/vault.js'
-import { writeFileSync, mkdirSync, rmSync, existsSync, unlinkSync } from 'fs'
+import { writeFileSync, mkdirSync, rmSync, existsSync, unlinkSync, utimesSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 
@@ -542,6 +542,25 @@ describe('wiki link harvesting and parent links', () => {
     db.close()
   })
 
+  it('harvests [[ links ]] written with inner spacing', () => {
+    writeFileSync(join(VAULT2, 'entities/spaced-target.md'), serializeFile({
+      name: 'Spaced Target', type: 'entity', status: 'active',
+      created: '2026-01-01', 'last-touched': '2026-01-01'
+    }, '## Purpose\n\nTest\n'))
+    writeFileSync(join(VAULT2, 'knowledge/spaced-source.md'), serializeFile({
+      name: 'Spaced Source', created: '2026-01-01'
+    }, '## Synthesis\n\nThis references [[ spaced-target ]] in prose.\n\n## Evidence\n\n## Sources\n'))
+
+    const idx = createIndex(VAULT2)
+    idx.close()
+
+    const Database = require('better-sqlite3')
+    const db = new Database(join(VAULT2, '.hafez.db'), { readonly: true })
+    const links = db.prepare("SELECT * FROM links WHERE source = 'spaced-source' AND target = 'spaced-target' AND relation = 'mention'").all()
+    expect(links).toHaveLength(1)
+    db.close()
+  })
+
   it('excludes [[links]] inside ## Related section from mention harvesting', () => {
     writeFileSync(join(VAULT2, 'entities/mention-excl-target.md'), serializeFile({
       name: 'Mention Excl Target', type: 'entity', status: 'active',
@@ -653,5 +672,142 @@ describe('corrupt DB recovery (COR-3)', () => {
     // Heal for subsequent test files' sake
     const db = createIndex(TMP)
     db.close()
+  })
+})
+
+// --- FTS integrity across externally-changed files ---
+//
+// These exercise the re-sync path taken when a vault file changes *outside*
+// hafez (hand edit, git pull), i.e. syncIfStale -> indexFile, not the
+// mutation path (upsertFromFile).
+
+/** The schema version the FTS ghost-row bug shipped under. Indexes stamped
+ *  with it may be corrupt and must be rebuilt, not reused. */
+const PRE_GHOST_FIX_SCHEMA_VERSION = '9'
+
+let ftsVaultCounter = 0
+function makeFtsVault(): string {
+  const dir = join(tmpdir(), `hafez-test-fts-${Date.now()}-${ftsVaultCounter++}`)
+  mkdirSync(join(dir, 'entities'), { recursive: true })
+  mkdirSync(join(dir, 'knowledge'), { recursive: true })
+  return dir
+}
+
+function writeEntityAt(vault: string, slug: string, name: string, body: string) {
+  writeFileSync(join(vault, 'entities', `${slug}.md`), serializeFile({
+    name, type: 'project', status: 'active',
+    created: '2026-01-01', 'last-touched': '2026-01-01',
+  }, body))
+}
+
+/** Push mtime past the index's last_sync stamp so syncIfStale sees the file. */
+function touchAhead(file: string) {
+  const t = new Date(Date.now() + 5000)
+  utimesSync(file, t, t)
+}
+
+/** FTS5's own consistency check. The `rank = 1` argument is the external-content
+ *  variant: it compares the FTS index against the `items` content table, which
+ *  is what catches ghost rows (the bare form only checks internal consistency).
+ *  Returns the error message when malformed, null when clean. */
+function ftsIntegrityError(vault: string): string | null {
+  const raw = new Database(join(vault, '.hafez.db'))
+  try {
+    raw.prepare("INSERT INTO items_fts(items_fts, rank) VALUES('integrity-check', 1)").run()
+    return null
+  } catch (err) {
+    return (err as Error).message
+  } finally {
+    raw.close()
+  }
+}
+
+describe('FTS integrity on external re-index', () => {
+  it('re-syncing a hand-edited file leaves the FTS index consistent', () => {
+    const vault = makeFtsVault()
+    const file = join(vault, 'entities', 'alpha.md')
+    writeEntityAt(vault, 'alpha', 'Alpha', '## Purpose\n\nquokka lives here\n')
+
+    const idx = createIndex(vault)
+    expect(idx.search('quokka').map(r => r.slug)).toEqual(['alpha'])
+
+    // Hand edit outside hafez, then let the index re-sync
+    writeEntityAt(vault, 'alpha', 'Alpha', '## Purpose\n\nwombat lives here\n')
+    touchAhead(file)
+    idx.syncIfStale()
+
+    expect(idx.search('wombat').map(r => r.slug)).toEqual(['alpha'])
+    expect(idx.search('quokka')).toEqual([])
+    idx.close()
+
+    expect(ftsIntegrityError(vault)).toBeNull()
+    rmSync(vault, { recursive: true, force: true })
+  })
+
+  it('deleting a file then creating another does not resurrect the old terms on the reused rowid', () => {
+    const vault = makeFtsVault()
+    const alpha = join(vault, 'entities', 'alpha.md')
+    writeEntityAt(vault, 'alpha', 'Alpha', '## Purpose\n\nquokka lives here\n')
+
+    const idx = createIndex(vault)
+    expect(idx.search('quokka').map(r => r.slug)).toEqual(['alpha'])
+
+    // External edit, then external delete, then a different file takes the
+    // freed rowid.
+    writeEntityAt(vault, 'alpha', 'Alpha', '## Purpose\n\nwombat lives here\n')
+    touchAhead(alpha)
+    idx.syncIfStale()
+
+    unlinkSync(alpha)
+    idx.syncIfStale()
+
+    const beta = join(vault, 'entities', 'beta.md')
+    writeEntityAt(vault, 'beta', 'Beta', '## Purpose\n\nplatypus lives here\n')
+    touchAhead(beta)
+    idx.syncIfStale()
+
+    expect(idx.search('platypus').map(r => r.slug)).toEqual(['beta'])
+    expect(idx.search('quokka')).toEqual([])
+    expect(idx.search('wombat')).toEqual([])
+    idx.close()
+
+    expect(ftsIntegrityError(vault)).toBeNull()
+    rmSync(vault, { recursive: true, force: true })
+  })
+
+  it('an index stamped with the pre-fix schema version is rebuilt, healing existing ghost rows', () => {
+    // The bump is what makes already-corrupted indexes self-heal.
+    expect(SCHEMA_VERSION).not.toBe(PRE_GHOST_FIX_SCHEMA_VERSION)
+
+    const vault = makeFtsVault()
+    writeEntityAt(vault, 'alpha', 'Alpha', '## Purpose\n\nquokka lives here\n')
+
+    let idx = createIndex(vault)
+    idx.close()
+
+    // Reproduce exactly what the pre-fix indexer did: INSERT OR REPLACE into
+    // the FTS external-content table, whose implicit delete never fires the
+    // AFTER DELETE trigger — the old row's terms linger as ghosts.
+    const raw = new Database(join(vault, '.hafez.db'))
+    const row = raw.prepare('SELECT * FROM items WHERE slug = ?').get('alpha') as Record<string, any>
+    const cols = Object.keys(row)
+    raw.prepare(
+      `INSERT OR REPLACE INTO items (${cols.join(', ')}) VALUES (${cols.map(c => '@' + c).join(', ')})`
+    ).run({ ...row, body: '## Purpose\n\nwombat lives here\n', file_hash: 'stale-hash' })
+    raw.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)")
+      .run(PRE_GHOST_FIX_SCHEMA_VERSION)
+    raw.close()
+
+    // Sanity: the seeded index really is corrupt
+    expect(ftsIntegrityError(vault)).not.toBeNull()
+
+    idx = createIndex(vault)
+    // Rebuilt from disk: the file says quokka, the ghost wombat is gone
+    expect(idx.search('quokka').map(r => r.slug)).toEqual(['alpha'])
+    expect(idx.search('wombat')).toEqual([])
+    idx.close()
+
+    expect(ftsIntegrityError(vault)).toBeNull()
+    rmSync(vault, { recursive: true, force: true })
   })
 })

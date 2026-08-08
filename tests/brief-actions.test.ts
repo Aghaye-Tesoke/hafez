@@ -6,6 +6,7 @@ import { mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
+import { getBrief, getNextActions } from '../src/document.js'
 
 const TMP = join(tmpdir(), 'hafez-test-brief-actions-' + Date.now())
 const VAULT = join(TMP, 'vault')
@@ -90,6 +91,31 @@ describe('Next Actions via update()', () => {
     expect(result.matched_action).toBe('Test /start command @simorgh')
     const { body } = await os.read('actions-test-project', 'full')
     expect(body).not.toContain('## Next Actions') // last item removed, section gone
+  })
+
+  it('complete_action leaves an action line quoted in the Brief untouched', async () => {
+    const os = makeOS()
+    await os.create('entity', 'Quoted Action Project', { type: 'project' })
+    await os.update('quoted-action-project', { add_action: 'Ship the release @dev' })
+    await os.update('quoted-action-project', { add_action: 'Keep me @dev' })
+    await os.update('quoted-action-project', { brief: 'Blocked on:\n- [ ] Ship the release @dev' })
+
+    const result = await os.update('quoted-action-project', { complete_action: 'Ship the release' })
+    expect(result.matched_action).toBe('Ship the release @dev')
+
+    const { body } = await os.read('quoted-action-project', 'full')
+    expect(getBrief(body)).toBe('Blocked on:\n- [ ] Ship the release @dev')
+    expect(getNextActions(body)).toEqual(['Keep me @dev'])
+    expect(body).toContain('- [x] Ship the release @dev')
+  })
+
+  it('remove_action deletes only the Next Actions line, not the Brief copy', async () => {
+    const os = makeOS()
+    const result = await os.update('quoted-action-project', { remove_action: 'Keep me' })
+    expect(result.matched_action).toBe('Keep me @dev')
+
+    const { body } = await os.read('quoted-action-project', 'full')
+    expect(getBrief(body)).toBe('Blocked on:\n- [ ] Ship the release @dev')
   })
 
   it('clear_actions removes entire section', async () => {

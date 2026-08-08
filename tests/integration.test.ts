@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createHafez } from '../src/index.js'
 import { parseFilePath } from '../src/vault.js'
 import { knowledgeBodyTemplate } from '../src/templates.js'
+import type { BatchOperation } from '../src/types.js'
 import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -388,14 +389,55 @@ describe('knowledge compiler — gap coverage', () => {
       .toThrow(/no longer supported/)
   })
 
-  it('session batch rejects slug that collides with existing entity', async () => {
+  it('session batch skips slug that collides with existing entity', async () => {
     const os = makeOS()
     await os.create('entity', 'Collision Target', { type: 'project' })
     const results = await os.batch([
       { op: 'create', kind: 'session', name: 'Collision Target' },
     ])
-    expect(results[0].status).toBe('error')
-    expect(results[0].error).toContain('already exists in the vault')
+    expect(results[0].status).toBe('skipped')
+    expect(results[0].warning).toContain('already exists')
+  })
+
+  it('dry-run and apply report the same disposition for a duplicate session', async () => {
+    const os = makeOS()
+    const ops: BatchOperation[] = [{ op: 'create', kind: 'session', name: 'Dup Session 2026-08-07' }]
+    await os.batch(ops)
+
+    const report = await os.validateBatch(ops)
+    expect(report.valid).toBe(true)
+    expect(report.operations[0].created).toBeUndefined()
+    expect(report.operations[0].warning).toBeDefined()
+
+    const results = await os.batch(ops)
+    expect(results[0].status).toBe('skipped')
+    expect(results[0].created).toBeUndefined()
+    // Same phrasing from the same source — dry-run and apply cannot drift.
+    expect(results[0].warning).toBe(report.operations[0].warning)
+  })
+
+  // The skip is synthesized by the Spine from the validate phase's warning,
+  // so both dispositions of one rule are pinned: a batch records the skip and
+  // runs on (above), a single op has nothing to return and throws under the
+  // target-exists class. `create` has no session overload — the single path is
+  // reachable only by cast, but its error class is still contract.
+  it('a lone duplicate-session create throws under its own error class', async () => {
+    const os = makeOS()
+    await os.batch([{ op: 'create', kind: 'session', name: 'Lone Dup Session' }])
+    await expect(os.create('session' as 'knowledge', 'Lone Dup Session'))
+      .rejects.toMatchObject({ code: 'SLUG_EXISTS', message: expect.stringContaining('already exists') })
+  })
+
+  it('a skipped session op does not stop the rest of the batch', async () => {
+    const os = makeOS()
+    await os.batch([{ op: 'create', kind: 'session', name: 'Partial Batch Session' }])
+    const results = await os.batch([
+      { op: 'create', kind: 'session', name: 'Partial Batch Session' },
+      { op: 'capture', name: 'Survives The Skip' },
+    ])
+    expect(results[0].status).toBe('skipped')
+    expect(results[1].status).toBe('ok')
+    expect(existsSync(join(VAULT, 'entities', 'survives-the-skip.md'))).toBe(true)
   })
 })
 

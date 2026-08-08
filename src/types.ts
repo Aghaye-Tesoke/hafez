@@ -1,15 +1,31 @@
 // src/types.ts
 
-// --- Enums ---
+// Type-only import: erased at compile time, so contracts.ts importing back
+// from here stays a types-only cycle with no runtime edge.
+import type {
+  ENTITY_TYPES,
+  ENTITY_STATUSES,
+  CONFIDENCE_LEVELS,
+  SESSION_LOG_TYPES,
+  VALID_SUBTYPES,
+  PLAN_STATUSES,
+} from './contracts.js'
 
-export type EntityType = 'capture' | 'entity' | 'project'
-export type EntityStatus = 'active' | 'paused' | 'done'
-export type ConfidenceLevel = 'observation' | 'pattern' | 'principle'
-export type SessionLogType = 'progress' | 'decision' | 'blocker' | 'research'
+// --- Enums ---
+// Derived from the canonical tuples in contracts.ts — contracts is the single
+// source of truth for enum membership, so a value added there widens the type
+// here instead of needing a matching hand-edit that can drift.
+
+export type EntityType = typeof ENTITY_TYPES[number]
+export type EntityStatus = typeof ENTITY_STATUSES[number]
+export type ConfidenceLevel = typeof CONFIDENCE_LEVELS[number]
+export type SessionLogType = typeof SESSION_LOG_TYPES[number]
 export type ReadDepth = 'frontmatter' | 'summary' | 'full'
-export type QueryFilter = 'active' | 'paused' | 'done' | 'all' | 'stale' | 'capture'
+export type QueryFilter = EntityStatus | 'all' | 'stale' | 'capture'
 export type LinkRelation = 'parent' | 'related'
-export type KnowledgeSubtype = 'insight' | 'plan'
+export type KnowledgeSubtype = typeof VALID_SUBTYPES[number]
+/** Plans are the one knowledge subtype with a lifecycle (see PLAN_STATUSES). */
+export type PlanStatus = typeof PLAN_STATUSES[number]
 
 // --- Query Options ---
 
@@ -34,11 +50,23 @@ export interface KnowledgeQueryOpts {
   domain?: string
   confidence?: ConfidenceLevel
   subtype?: KnowledgeSubtype
+  since?: string          // ISO date — last_touched >= since (plan subtype only carries last-touched)
+  before?: string         // ISO date — last_touched <= before
+  createdSince?: string   // ISO date — created >= createdSince
+  createdBefore?: string  // ISO date — created <= createdBefore
   tags?: string[]
   sort_by?: 'last_touched' | 'created' | 'name' | 'staleness' | 'last_reinforced' | 'reinforcement_count'
   sort_order?: 'asc' | 'desc'
   limit?: number
   offset?: number
+}
+
+/** The unified (`kind: 'all'`) query takes the entity filter set plus the
+ * knowledge-only narrowing flags. Status filters apply to the entity side
+ * only — knowledge notes carry no status and are never excluded by one. */
+export interface UnifiedQueryOpts extends EntityQueryOpts {
+  kind?: 'entity' | 'knowledge' | 'all'
+  subtype?: KnowledgeSubtype
 }
 
 // --- Frontmatter ---
@@ -70,7 +98,7 @@ export interface KnowledgeFrontmatter {
   'reinforcement-count'?: number
   tags?: string[]
   'session-date'?: string
-  status?: 'active' | 'done'     // plan subtype only
+  status?: PlanStatus            // plan subtype only
   'last-touched'?: string         // plan subtype only
 }
 
@@ -134,6 +162,7 @@ export interface UpdateFields {
   tags?: string[]
   related?: string[]
   synthesis?: string        // replaces insight — rewrites ## Synthesis section
+  insight?: string          // alias for synthesis (knowledge-only); synthesis wins when both are set
   add_evidence?: string     // appends to ## Evidence section
   add_source?: string       // appends to ## Sources section
 }
@@ -158,7 +187,9 @@ export interface CreateEntityFields {
 
 export interface CreateKnowledgeFields {
   subtype?: KnowledgeSubtype
+  status?: PlanStatus       // plan subtype only — insights have no lifecycle
   synthesis?: string        // replaces insight
+  insight?: string          // alias for synthesis; synthesis wins when both are set
   description?: string
   domain?: string[]
   related?: string[]
@@ -258,8 +289,16 @@ export interface ChangelogEntry {
 export interface BatchResult {
   op: string
   slug: string
-  status: 'ok' | 'error'
+  /** 'skipped' = the Op Spec green-lit the op but there was nothing to do
+   * (today: a duplicate session note) — no write, no error, batch continues.
+   * Dry-run reports the same disposition as a warning. */
+  status: 'ok' | 'error' | 'skipped'
   error?: string
+  /** Why an op was skipped — same text the dry-run warning carries. */
+  warning?: string
+  /** Error class when the failure — or the skip — maps to a specific HafezError
+   * code, so a single-op caller unwrapping this result keeps the right exit code. */
+  code?: 'SLUG_EXISTS'
   created?: boolean
 }
 
@@ -282,6 +321,10 @@ export interface BatchOpValidation {
   created?: boolean
   errors: string[]
   warning?: string
+  /** Error class of the primary failure (NOT_FOUND / SLUG_EXISTS) when it
+   * maps to a specific HafezError code; single-op callers surface it as that
+   * code, batch-level failures stay VALIDATION_FAILED. */
+  primaryCode?: 'NOT_FOUND' | 'SLUG_EXISTS'
 }
 
 export interface BatchValidationReport {
@@ -340,7 +383,7 @@ export interface Hafez {
   read(slug: string, depth?: ReadDepth): Promise<ParsedFile>
   update(slug: string, fields: UpdateFields): Promise<UpdateResult>
   query(opts?: EntityQueryOpts): Promise<{ items: QueryResult[], total: number }>
-  queryUnified(opts?: EntityQueryOpts & { kind?: 'entity' | 'knowledge' | 'all' }): Promise<{ items: UnifiedResult[], total: number }>
+  queryUnified(opts?: UnifiedQueryOpts): Promise<{ items: UnifiedResult[], total: number }>
   create(kind: 'entity', name: string, fields: CreateEntityFields): Promise<string>
   create(kind: 'knowledge', name: string, fields?: CreateKnowledgeFields): Promise<string>
   capture(name: string, notes?: string): Promise<string>

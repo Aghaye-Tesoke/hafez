@@ -4,12 +4,17 @@
 // (src/batch-ops.ts), the only drift left to guard is coverage — every op in
 // the table must surface through introspection, help, and a valid example.
 import { describe, it, expect } from 'vitest'
-import { OP_SPECS, BatchOperationSchema } from '../src/batch-ops.js'
+import { OP_SPECS, BatchOperationSchema, slugBearingOpNames } from '../src/batch-ops.js'
 import { listOps, getOpSchema, getOpExample, DIGEST_EXAMPLE, type FieldSchema } from '../src/cli/schema-introspect.js'
 import { DigestInputSchema, parseDigestInput } from '../src/digest.js'
 import { ALIAS_KEYS } from '../src/contracts.js'
 
 describe('Op Spec table coverage', () => {
+  it('slugBearingOpNames derives exactly the slug-addressing ops from the Zod shapes', () => {
+    expect([...slugBearingOpNames()].sort()).toEqual(['link', 'promote', 'unlink', 'update'])
+  })
+
+
   it('every spec has a description and appears in the op catalog', () => {
     const catalog = new Map(listOps().map(o => [o.name, o]))
     for (const spec of OP_SPECS) {

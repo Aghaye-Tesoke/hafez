@@ -18,10 +18,12 @@ Claude Code (or any agent with shell access):
 ```text
 Set up Hafez, an agent-native knowledge vault (github.com/shrvn-r/hafez):
 
-1. Install the CLI (needs Node.js 22+ and git): npm install -g hafez
-   On npm 11+, append --allow-scripts=better-sqlite3 (npm 11 blocks install
-   scripts by default; the SQLite bindings need theirs, and the install
-   reports success even when they were skipped).
+1. Install the CLI (needs Node.js 22+ and git):
+   npm install -g hafez --allow-scripts=better-sqlite3
+   Always include that flag: npm 11+ blocks install scripts by default, the
+   SQLite bindings need theirs, and the install reports success even when
+   they were skipped. npm majors predating the flag print
+   "npm warn Unknown cli config" and proceed.
 2. Check git identity is configured (git config user.name and user.email);
    if not, ask me for a name and email and set them with git config --global.
 3. Create my vault — a git repo with entities/ and knowledge/ directories and an
@@ -50,9 +52,10 @@ triggers compete for the same invocations.
 The same thing by hand:
 
 ```bash
-# Install (Node.js 22+ and git required).
-# On npm 11+, append: --allow-scripts=better-sqlite3
-npm install -g hafez
+# Install (Node.js 22+ and git required). Always include the flag: npm 11+
+# blocks install scripts by default and the SQLite bindings need theirs;
+# older npm majors print "npm warn Unknown cli config" and proceed.
+npm install -g hafez --allow-scripts=better-sqlite3
 
 # One-time, if you've never used git on this machine:
 #   git config --global user.name "Your Name"
@@ -74,8 +77,63 @@ cp "$(npm root -g)/hafez/skill/SKILL.md" ~/.claude/skills/hafez/SKILL.md
 ```
 
 Prefer installing without the npm registry? The GitHub release tarball is the
-same artifact: `npm install -g https://github.com/shrvn-r/hafez/releases/latest/download/hafez.tgz`
-(npm 12+ additionally needs `--allow-remote=root`).
+same artifact, running the same install scripts, so it takes the same flag —
+plus `--allow-remote=root`, which npm 12+ requires for a remote URL:
+
+```bash
+npm install -g https://github.com/shrvn-r/hafez/releases/latest/download/hafez.tgz --allow-scripts=better-sqlite3 --allow-remote=root
+```
+
+## Updating
+
+Tell your agent: **update hafez**. Or paste: "Run `hafez upgrade` and follow
+what it prints."
+
+`hafez upgrade` checks and prints — it never installs. The steps it prints
+install code and overwrite your agent instructions file, so **you** approve
+them; don't let an agent run them unattended. Re-run `hafez upgrade`
+afterwards to verify.
+
+If `hafez upgrade` fails with `Unknown command:`, your installed hafez
+predates the command — run the manual steps below once, then use it.
+
+### Updating by hand
+
+```bash
+# 1. Install. Same flag rule as a fresh install; <version> is the version you
+#    are moving to (npm view hafez version).
+npm install -g hafez@<version> --allow-scripts=better-sqlite3
+
+#    From the GitHub release tarball instead (npm 12+ needs --allow-remote):
+npm install -g https://github.com/shrvn-r/hafez/releases/download/v<version>/hafez.tgz --allow-scripts=better-sqlite3 --allow-remote=root
+
+# 2. Claude Code only: re-copy the bundled skill. It ships inside the package,
+#    so an upgraded package leaves the installed copy stale.
+mkdir -p ~/.claude/skills/hafez
+cp "$(npm root -g)/hafez/skill/SKILL.md" ~/.claude/skills/hafez/SKILL.md
+
+#    Under nvm, or for a symlinked dev install, `npm root -g` points at the
+#    wrong tree. Resolve it from the binary you actually run instead:
+cp "$(dirname "$(dirname "$(readlink -f "$(which hafez)")")")/skill/SKILL.md" ~/.claude/skills/hafez/SKILL.md
+
+# 3. Rebuild the read index. A schema bump invalidates it rather than
+#    rebuilding it, so the first query after an upgrade can answer empty.
+hafez index rebuild
+```
+
+The prose above always includes every install flag, because static text cannot
+probe your npm — `hafez upgrade` does probe it and prints the exact form your
+npm accepts. Same instruction, two renderings; the extra flags are harmless
+(`npm warn Unknown cli config`, then it proceeds).
+
+Also compare the Hafez block in your global agent instructions against the one
+`hafez upgrade` prints, and reconcile any differences.
+
+Your vault is untouched by an upgrade: the files, the git history, and the
+registered vault path all survive. Only the read index is invalidated.
+
+If any command reports unbuilt SQLite bindings, reinstall with
+`--allow-scripts=better-sqlite3` — the CLI prints this itself when it happens.
 
 ## Quick start
 

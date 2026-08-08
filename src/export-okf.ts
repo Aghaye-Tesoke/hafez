@@ -8,6 +8,7 @@
 import { readdirSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join, resolve, sep, basename } from 'path'
 import { parseFilePath, serializeFile, scanVaultDir, kindDir } from './vault.js'
+import { DEFAULT_KNOWLEDGE_SUBTYPE } from './contracts.js'
 import { deriveSummary, WIKI_LINK_RE } from './document.js'
 
 export interface OkfExportReport {
@@ -33,6 +34,33 @@ interface ParsedDoc {
   kind: SourceKind
   fm: Record<string, any>
   body: string
+  /** Bundle file base name — the slug, unless it hit the reserved index name. */
+  file: string
+}
+
+/** `index.md` is reserved in every bundle directory for the generated index, so
+ * a vault doc slugged `index` cannot keep its name — before this it was silently
+ * overwritten by the index that ran after it. Deterministic rule: rename to
+ * `index-doc`, then `index-doc-2`, `index-doc-3`, … until the name is free among
+ * that directory's real slugs (a vault may legitimately hold both `index` and
+ * `index-doc`). Same vault contents always produce the same bundle names, and
+ * every link/index reference is written against the renamed file. */
+const RESERVED_INDEX = 'index'
+
+function assignBundleNames(docs: ParsedDoc[]): void {
+  const slugsByDir = new Map<string, Set<string>>()
+  for (const doc of docs) {
+    const slugs = slugsByDir.get(doc.dir) ?? new Set<string>()
+    slugs.add(doc.slug)
+    slugsByDir.set(doc.dir, slugs)
+  }
+  for (const doc of docs) {
+    if (doc.slug !== RESERVED_INDEX) continue
+    const taken = slugsByDir.get(doc.dir)!
+    let candidate = `${RESERVED_INDEX}-doc`
+    for (let n = 2; taken.has(candidate); n++) candidate = `${RESERVED_INDEX}-doc-${n}`
+    doc.file = candidate
+  }
 }
 
 function mapFrontmatter(doc: ParsedDoc): Record<string, any> {
@@ -40,7 +68,7 @@ function mapFrontmatter(doc: ParsedDoc): Record<string, any> {
   const mapped: Record<string, any> = {}
 
   if (kind === 'entity') mapped.type = fm.type ?? 'entity'
-  else if (kind === 'knowledge') mapped.type = fm.subtype ? `knowledge/${fm.subtype}` : 'knowledge'
+  else if (kind === 'knowledge') mapped.type = `knowledge/${fm.subtype ?? DEFAULT_KNOWLEDGE_SUBTYPE}`
   else mapped.type = 'session'
 
   mapped.title = fm.name
@@ -112,47 +140,48 @@ export function exportOkf(vaultPath: string, outDir: string): OkfExportReport {
         process.stderr.write(`Warning: skipping ${relFile}: missing name\n`)
         continue
       }
-      docs.push({ slug, dir, kind, fm, body })
+      docs.push({ slug, dir, kind, fm, body, file: slug })
     }
   }
 
-  // Slug→dir map: insertion order entities/knowledge/sessions, first write wins,
-  // giving entity precedence on cross-kind slug collisions.
-  const slugDirs = new Map<string, string>()
+  assignBundleNames(docs)
+
+  // Slug→bundle path map: insertion order entities/knowledge/sessions, first write
+  // wins, giving entity precedence on cross-kind slug collisions. Paths are
+  // bundle-root-absolute with hardcoded '/' separators.
+  const slugPaths = new Map<string, string>()
   for (const doc of docs) {
-    if (!slugDirs.has(doc.slug)) slugDirs.set(doc.slug, doc.dir)
+    if (!slugPaths.has(doc.slug)) slugPaths.set(doc.slug, `/${doc.dir}/${doc.file}.md`)
   }
 
   function transformBody(body: string): string {
     return body.replace(OKF_LINK_RE, (_m, rawSlug: string, rawDisplay?: string) => {
-      // Trim: Obsidian-idiomatic [[ foo ]] / [[foo | Label]] carry whitespace in the captures
       const slug = rawSlug.trim()
       const label = rawDisplay?.trim() || slug
-      const dir = slugDirs.get(slug)
-      if (!dir) {
+      const path = slugPaths.get(slug)
+      if (!path) {
         report.unresolvedLinks++
         return label
       }
-      // Bundle-root-absolute path, hardcoded '/' separators
-      return `[${label}](/${dir}/${slug}.md)`
+      return `[${label}](${path})`
     })
   }
 
   mkdirSync(resolvedOut, { recursive: true })
 
-  const byDir = new Map<string, Array<{ slug: string; title: string; description: string }>>()
+  const byDir = new Map<string, Array<{ file: string; title: string; description: string }>>()
   for (const doc of docs) {
     const mapped = mapFrontmatter(doc)
     const outSubdir = join(resolvedOut, doc.dir)
     mkdirSync(outSubdir, { recursive: true })
-    writeFileSync(join(outSubdir, `${doc.slug}.md`), serializeFile(mapped, transformBody(doc.body)))
+    writeFileSync(join(outSubdir, `${doc.file}.md`), serializeFile(mapped, transformBody(doc.body)))
 
     if (doc.kind === 'entity') report.entities++
     else if (doc.kind === 'knowledge') report.knowledge++
     else report.sessions++
 
     const list = byDir.get(doc.dir) ?? []
-    list.push({ slug: doc.slug, title: mapped.title, description: mapped.description ?? '' })
+    list.push({ file: doc.file, title: mapped.title, description: mapped.description ?? '' })
     byDir.set(doc.dir, list)
   }
 
@@ -162,7 +191,7 @@ export function exportOkf(vaultPath: string, outDir: string): OkfExportReport {
     const lines = [`# ${heading}`, '']
     for (const item of items.sort((a, b) => a.title.localeCompare(b.title))) {
       const desc = item.description ? ` — ${item.description}` : ''
-      lines.push(`- [${item.title}](/${dir}/${item.slug}.md)${desc}`)
+      lines.push(`- [${item.title}](/${dir}/${item.file}.md)${desc}`)
     }
     writeFileSync(join(resolvedOut, dir, 'index.md'), lines.join('\n') + '\n')
   }

@@ -1,5 +1,141 @@
 # Changelog
 
+## 1.4.0 — 2026-08-08
+
+An update path that finally exists, a much faster CLI, and the largest
+correctness sweep so far: a full-codebase review turned up roughly
+twenty user-visible defects, several of them silently destroying vault
+content.
+
+### Highlights
+
+- **`hafez upgrade`** — new command. Checks whether the installed hafez
+  is behind the npm registry and whether the installed skill copy has
+  drifted, then prints the exact update steps. It never installs: those
+  steps install code and overwrite your agent instructions, so the
+  privileged step stays yours. Runs pre-vault, so it still answers when
+  the vault is unresolvable or the native binding is unbuilt — exactly
+  when someone is upgrading. `--json` for machine consumption; every
+  check outcome exits 0.
+- **Plan lifecycle is reachable.** `status` on the `plan` knowledge
+  subtype was documented and schema-validated but had no path to set it
+  — only hand-edited files could carry one. Now settable at create
+  (`--subtype plan --status active`) and via `update <slug> --status
+  done`, across CLI, batch and library. `active | done`, no `paused`.
+  Insights still reject it.
+- **Non-vault CLI commands start ~5× faster.** Dispatch used to
+  statically import the core factory on every invocation — and with it
+  the SQLite native binding, git, and YAML parsing. Measured medians:
+  `--version` 120ms → 23ms, `help` 123ms → 23ms, `init` 126ms → 52ms.
+  Vault commands cost the same as before.
+- **Writes stop paying for a full-vault re-parse.** `index.md` now
+  renders from the index rows the mutation just updated: 300 entities
+  9.0ms → 4.2ms, 1500 entities 30.9ms → 18.3ms, and the gap widens with
+  vault size.
+
+### Fixed
+
+- **Section rewrites no longer delete sections.** Structural boundaries
+  were derived too narrowly, so any file legitimately carrying a section
+  outside its current type's contract — a merged capture's Notes, a
+  plan-shaped note with no persisted subtype, a hand edit — had those
+  headings demoted to plain text, and the next write silently dropped
+  them. Boundaries now bind per file kind: every same-kind heading is a
+  boundary. Captures also regain `Current State`, which adjacent
+  rewrites had been deleting.
+- **An empty flag value can no longer wipe the section it targets.**
+  `--synthesis "$VAR"` with `$VAR` unset printed "Updated", exited 0,
+  and left an empty section where a paragraph had been. Every
+  non-nullable field that writes body text now rejects empty and
+  whitespace-only values by name; `--brief ""` still clears, since null
+  is its documented clear signal.
+- **Conflict merge preserves what both sides wrote.** Three loss paths
+  closed: same-day session-log entries from two machines, indented
+  sub-bullets and notes under Next Actions, and heading-less archive log
+  files that previously merged wholesale with one side winning.
+- **Next Action edits stay inside Next Actions.** Completing or removing
+  an action matched section-scoped but edited body-wide, so a Brief
+  quoting an action got checked while the real action stayed open — and
+  `$` patterns in action text were expanded during the replace.
+- **Concurrent edits from outside hafez read as races, not bugs.** A
+  vault file created or deleted by Obsidian, a hand `rm`, or a git
+  checkout between validation and apply used to report "unreachable, file
+  a bug" or silently overwrite the intruding file. Both directions now
+  raise actionable `NOT_FOUND` / `SLUG_EXISTS`, and nothing is
+  overwritten.
+- **One calendar-day convention — the local day.** Stamps came from the
+  UTC day while comparisons used the local one, so west of UTC after
+  ~13:00 local a fresh entity was stamped tomorrow, `query --before
+  <today>` excluded it, and `query --since` disagreed with `changelog
+  --since` about the same mutation.
+- **Search and query apply what you asked for.** Search dropped
+  non-Latin queries entirely and crashed on a bare uppercase
+  `NOT`/`OR`/`AND`; `query --kind all` silently returned entities only;
+  the knowledge and related-to branches dropped `--filter/--type/
+  --parent` and the time flags; typo'd `--filter` values ran unfiltered
+  at exit 0. Every branch now honours or loudly rejects each flag, and
+  enum, sort and paging values are validated for library callers too.
+- **The index survives external change.** Re-indexing a hand-edited or
+  pulled file left ghost terms behind (integrity-check reported the
+  index malformed) and could make search return the wrong document;
+  `index rebuild` ran outside the vault lock; and the change-detection
+  watermark was stamped late enough that a file written mid-scan was
+  skipped by every later sync, permanently stale.
+- **Git operations that used to be dead ends.** Adding a remote to a
+  previously local-only vault left the branch unpublished and untracked,
+  so every subsequent mutation exited 4. Standalone promotes never
+  committed at all and vanished from `changelog`. A batch creating then
+  cross-kind-promoting the same slug rolled back entirely. `promote …
+  knowledge` had no collision check and no mkdir. And `update` swept
+  unrelated hand-edits of `entities/archive/` into its commits.
+- **Input is applied or rejected, never quietly discarded.** `create`
+  dropped whichever flags its kind branch didn't name; empty values to
+  the action, evidence and source flags reported success and wrote
+  nothing; the `insight` alias worked only through the CLI's batch
+  parsing and was dropped on every library path; comma lists went
+  untrimmed, so `--domain "ai, ml"` stored `" ml"` where `--domain ml`
+  would never match it.
+- **Smaller losses swept up:** wiki-links written `[[ with spacing ]]`
+  were invisible to link parsing (Related coverage, mention harvesting);
+  OKF export wrote a doc slugged `index` over the bundle's own
+  `index.md`; worktree vaults skipped local-exclude setup, so the
+  generated `index.md` wasn't kept out of git; a duplicate session op
+  was a skip in `batch --dry-run` and an error in apply; and the
+  better-sqlite3 "reinstall the bindings" hint matched the stack of
+  *every* SQLite error, printing build advice over the real message.
+
+### Changed
+
+- **Unknown fields on the public library API are rejected** with the
+  batch error shape instead of being silently dropped. Every mutation —
+  single-op method or batch — now validates through the same strict
+  table.
+- **All six single-op methods adopt batch's failure policy**: a commit
+  failure rolls files back, a push failure keeps the local commit.
+  Previously five had no commit/push failure handling at all, so a
+  commit failure left written-but-uncommitted files with a stale index.
+- **A create field whose section the chosen template lacks rejects the
+  whole op**, naming the available sections, instead of discarding the
+  text — `--purpose` with `--type entity`, `--synthesis` on a plan. The
+  text is never dropped and never redirected.
+- `""` to an enum flag (`--status`, `--confidence`) rejects by name
+  instead of no-opping; empty-string clearing extends from `--brief` to
+  `--description` and `--resource`.
+- `--vault --json` and a trailing `--vault` exit 2 with a usage error
+  instead of consuming the next token as the vault path; a duplicate
+  `--vault` is a usage error, not last-wins.
+- An invalid `subtype` on the direct create path exits 2 instead of
+  crashing with a raw TypeError.
+- `index.md` membership follows the index: an entity carrying `name` but
+  no `created` is skipped by the indexer and no longer appears. It was
+  already absent from query, search and stats.
+- `findSection` is no longer re-exported from the library API — it is
+  Document-internal.
+- The shipped skill was rewritten for clarity, and its broken
+  stale-knowledge lint replaced with one that works.
+- The index schema version bumped, so existing indexes rebuild once on
+  first access.
+
 ## 1.3.0 — 2026-08-06
 
 The CLI's error surface is now a documented contract — every command

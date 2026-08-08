@@ -1,6 +1,6 @@
 // tests/vault.test.ts
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { parseFilePath, parseContent, serializeFile, slugify, resolveFilePath, kindFromPath, vaultKindFromPath } from '../src/vault.js'
+import { parseFilePath, parseContent, serializeFile, slugify, resolveFilePath, kindFromPath, vaultKindFromPath, vaultKindFromRelPath } from '../src/vault.js'
 import { writeFileSync, mkdirSync, rmSync } from 'fs'
 import { join, posix, win32 } from 'path'
 import { tmpdir } from 'os'
@@ -78,6 +78,26 @@ describe('kindFromPath', () => {
   it('does not match "entities" as a filename or slug substring', () => {
     expect(kindFromPath(win32.join('C:\\vault', 'knowledge', 'entities.md'))).toBe('knowledge')
     expect(kindFromPath(posix.join('/vault', 'knowledge', 'legal-entities-note.md'))).toBe('knowledge')
+  })
+
+  it('a vault living under a directory named "entities" is not misclassified — the deepest kind dir wins', () => {
+    expect(kindFromPath(posix.join('/data/entities/myvault', 'knowledge', 'note.md'))).toBe('knowledge')
+    expect(kindFromPath(posix.join('/data/knowledge/myvault', 'entities', 'foo.md'))).toBe('entity')
+    expect(kindFromPath(win32.join('C:\\data\\entities\\vault', 'knowledge', 'note.md'))).toBe('knowledge')
+  })
+})
+
+describe('vaultKindFromRelPath', () => {
+  it('is total over vault-relative content paths, derived from the kind dirs', () => {
+    expect(vaultKindFromRelPath('entities/foo.md')).toBe('entity')
+    expect(vaultKindFromRelPath('entities/archive/foo-log.md')).toBe('entity')
+    expect(vaultKindFromRelPath('knowledge/bar.md')).toBe('knowledge')
+    expect(vaultKindFromRelPath('sessions/2026-08-07.md')).toBe('session')
+  })
+
+  it('throws on paths outside the vault dirs instead of guessing a kind', () => {
+    expect(() => vaultKindFromRelPath('scripts/x.md')).toThrow()
+    expect(() => vaultKindFromRelPath('/abs/entities/foo.md')).toThrow()
   })
 })
 

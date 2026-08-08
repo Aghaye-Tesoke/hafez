@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { gitChangelog } from '../src/git.js'
+import { createHafez } from '../src/index.js'
 import { mkdirSync, writeFileSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -81,5 +82,94 @@ describe('gitChangelog', () => {
   it('returns empty for future date', async () => {
     const entries = await gitChangelog(TMP, '2099-01-01')
     expect(entries.length).toBe(0)
+  })
+})
+
+describe('gitChangelog rename lines (promote crosses directories)', () => {
+  // A promote moves the file entities/<slug>.md -> knowledge/<slug>.md, which
+  // git reports as a rename ("R100\told\tnew") rather than A/M/D. The parser
+  // used to require a tab straight after the status letter, so every rename
+  // line was dropped and promotes were invisible in `hafez changelog`.
+  const REPO = join(tmpdir(), 'hafez-test-changelog-rename-' + Date.now())
+  const since = new Date(Date.now() - 120000).toISOString()
+
+  beforeAll(async () => {
+    mkdirSync(join(REPO, 'entities'), { recursive: true })
+    mkdirSync(join(REPO, 'knowledge'), { recursive: true })
+    const git = simpleGit(REPO)
+    await git.init()
+    await git.addConfig('user.email', 'test@test.com')
+    await git.addConfig('user.name', 'Test')
+
+    const body = '---\nname: Promoted Note\ncreated: "2026-01-01"\n---\n\nBody long enough for rename detection.\n'
+    writeFileSync(join(REPO, 'entities', 'promoted-note.md'), body)
+    await git.add('entities/promoted-note.md')
+    await git.commit('capture: promoted-note')
+
+    await git.raw(['mv', 'entities/promoted-note.md', 'knowledge/promoted-note.md'])
+    await git.commit('promote: promoted-note -> knowledge')
+
+    // A within-directory rename (slug rename) must be reported too.
+    await git.raw(['mv', 'knowledge/promoted-note.md', 'knowledge/renamed-note.md'])
+    await git.commit('rename: promoted-note -> renamed-note')
+  })
+
+  afterAll(() => rmSync(REPO, { recursive: true, force: true }))
+
+  it('reports the promote destination as a created knowledge entry', async () => {
+    const entries = await gitChangelog(REPO, since)
+    expect(entries).toContainEqual(expect.objectContaining({
+      slug: 'promoted-note',
+      kind: 'knowledge',
+      operation: 'created',
+      commit_message: 'promote: promoted-note -> knowledge',
+    }))
+  })
+
+  it('reports the promote source as a deleted entity entry', async () => {
+    const entries = await gitChangelog(REPO, since)
+    expect(entries).toContainEqual(expect.objectContaining({
+      slug: 'promoted-note',
+      kind: 'entity',
+      operation: 'deleted',
+      commit_message: 'promote: promoted-note -> knowledge',
+    }))
+  })
+
+  it('reports a same-directory rename as delete + create', async () => {
+    const entries = await gitChangelog(REPO, since)
+    const renameCommit = entries.filter(e => e.commit_message.startsWith('rename:'))
+    expect(renameCommit).toHaveLength(2)
+    expect(renameCommit).toContainEqual(expect.objectContaining({ slug: 'renamed-note', operation: 'created' }))
+    expect(renameCommit).toContainEqual(expect.objectContaining({ slug: 'promoted-note', operation: 'deleted' }))
+  })
+})
+
+describe('changelog surfaces a real promote', () => {
+  // End-to-end: the acceptance case — a promote made through the operations
+  // API shows up in changelog output for its date range.
+  const VAULT = join(tmpdir(), 'hafez-test-changelog-promote-' + Date.now())
+
+  beforeAll(async () => {
+    mkdirSync(join(VAULT, 'entities'), { recursive: true })
+    mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
+    const git = simpleGit(VAULT)
+    await git.init()
+    await git.addConfig('user.email', 'test@test.com')
+    await git.addConfig('user.name', 'Test')
+    writeFileSync(join(VAULT, '.gitkeep'), '')
+    await git.add('.gitkeep')
+    await git.commit('init')
+  })
+
+  afterAll(() => rmSync(VAULT, { recursive: true, force: true }))
+
+  it('lists the promoted slug under its new kind', async () => {
+    const os = createHafez({ vaultPath: VAULT, git: { push: false } })
+    const slug = await os.capture('Changelog Promote Probe', 'Enough body text to keep the two blobs similar.')
+    await os.promote(slug, 'knowledge')
+
+    const entries = await os.changelog(new Date(Date.now() - 120000).toISOString())
+    expect(entries.some(e => e.slug === slug && e.kind === 'knowledge')).toBe(true)
   })
 })

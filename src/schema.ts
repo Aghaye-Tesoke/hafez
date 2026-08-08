@@ -6,6 +6,7 @@ import {
   CONFIDENCE_LEVELS,
   SESSION_LOG_TYPES,
   VALID_SUBTYPES,
+  PLAN_STATUSES,
 } from './contracts.js'
 
 export function validateEntityFrontmatter(fm: Record<string, any>): string[] {
@@ -36,9 +37,9 @@ export function validateKnowledgeSubtype(fm: Record<string, any>): string[] {
   if (fm.subtype && !VALID_SUBTYPES.includes(fm.subtype)) {
     errors.push(`invalid subtype: ${fm.subtype} (expected: ${VALID_SUBTYPES.join(', ')})`)
   }
-  // Plan-specific: status must be active or done
-  if (fm.subtype === 'plan' && fm.status && !['active', 'done'].includes(fm.status)) {
-    errors.push(`invalid plan status: ${fm.status} (expected: active, done)`)
+  // Plan-specific: status must be one of the plan lifecycle statuses
+  if (fm.subtype === 'plan' && fm.status && !PLAN_STATUSES.includes(fm.status)) {
+    errors.push(`invalid plan status: ${fm.status} (expected: ${PLAN_STATUSES.join(', ')})`)
   }
   return errors
 }

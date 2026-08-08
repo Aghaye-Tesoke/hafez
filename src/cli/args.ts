@@ -50,10 +50,14 @@ export function parseArgs(args: string[], spec: FlagSpec, usage: string): Parsed
   return { flags, positionals }
 }
 
-/** Comma-separated list flag → trimmed array (undefined stays undefined). */
+/** The one comma-list parser — every list flag on every command goes through
+ * it. Trims each segment and drops the empty ones, so `"ai, ml"` is two
+ * domains (not `ai` and ` ml`, which no query matches) and `"eng,"` is one
+ * (not one plus an empty string persisted to frontmatter and the index).
+ * undefined stays undefined; an all-empty list is an empty array (a clear). */
 export function splitList(value: string | boolean | undefined): string[] | undefined {
   if (typeof value !== 'string') return undefined
-  return value.split(',').map(s => s.trim())
+  return value.split(',').map(s => s.trim()).filter(Boolean)
 }
 
 export function str(value: string | boolean | undefined): string | undefined {

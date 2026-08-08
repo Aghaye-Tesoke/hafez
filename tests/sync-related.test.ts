@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { syncRelatedSection } from '../src/document.js'
+import { documentFor } from '../src/document.js'
+
+// Fixtures here are knowledge-shaped (Synthesis bodies); Related handling
+// itself is identical across kinds.
+const { syncRelatedSection } = documentFor({ kind: 'knowledge' })
 
 describe('syncRelatedSection', () => {
   it('adds Related section for uncovered frontmatter links', () => {
@@ -15,6 +19,19 @@ describe('syncRelatedSection', () => {
     const result = syncRelatedSection(body, { related: ['foo', 'bar'] })
     expect(result).toContain('- [[bar]]')
     expect(result).not.toMatch(/## Related[\s\S]*\[\[foo\]\]/)
+  })
+
+  it('skips links mentioned inline with inner spacing — [[ slug ]]', () => {
+    const body = '## Synthesis\n\nThis references [[ foo ]] already.'
+    const result = syncRelatedSection(body, { related: ['foo', 'bar'] })
+    expect(result).toContain('- [[bar]]')
+    expect(result).not.toMatch(/## Related[\s\S]*\[\[foo\]\]/)
+  })
+
+  it('treats [[ slug | Label ]] with spacing as coverage', () => {
+    const body = '## Synthesis\n\nSee [[ foo | The Foo ]].'
+    const result = syncRelatedSection(body, { related: ['foo'] })
+    expect(result).not.toContain('## Related')
   })
 
   it('removes Related section when all links covered inline', () => {

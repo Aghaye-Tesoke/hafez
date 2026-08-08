@@ -3,17 +3,25 @@ import { createHash } from 'crypto'
 import { readFileSync, statSync, existsSync, unlinkSync } from 'fs'
 import { join, basename } from 'path'
 import { parseFilePath, scanVaultDir, kindDir, INDEXED_KINDS } from './vault.js'
-import { ensureLocalExclude } from './knowledge-index.js'
-import { getNextActions, getBrief, WIKI_LINK_RE, findSection } from './document.js'
-import { parseSessionLog } from './document.js'
-import type { SearchResult, VaultStats, EntityStatus, EntityType } from './types.js'
+import { ensureLocalExclude, type VaultIndexRow } from './knowledge-index.js'
+import { WIKI_LINK_RE, documentForFile } from './document.js'
+import { ENTITY_STATUSES, ENTITY_TYPES, CONFIDENCE_LEVELS, VALID_SUBTYPES, DEFAULT_KNOWLEDGE_SUBTYPE } from './contracts.js'
+import type { SearchResult, VaultStats, EntityStatus, EntityType, QueryResult, KnowledgeQueryResult, UnifiedResult, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts } from './types.js'
+import { HafezError } from './types.js'
 
 // Bump this when indexing logic changes to force a full rebuild.
 // v5: wiki link harvesting (mention relations), parent link indexing, relation filter on queries.
 // v6: description column on items.
 // v7: resource column on items (entities only).
+// v8: per-kind structural section binding (documentFor) changes how brief,
+//     next-action, and session-log columns are derived from bodies.
+// v9: Document binds the kind-level section union (no type/subtype
+//     narrowing), changing section boundaries body columns derive from.
+// v10: re-indexing an externally changed file is delete-then-insert instead of
+//     INSERT OR REPLACE. Indexes written by v9 and earlier may hold ghost FTS
+//     rows (REPLACE never fired the delete trigger) and must be rebuilt, not reused.
 // Existing instances will fully rebuild the index on first access after upgrade.
-export const SCHEMA_VERSION = '7'
+export const SCHEMA_VERSION = '10'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS items (
@@ -132,7 +140,17 @@ export interface HafezIndex {
   queryItems(opts: QueryOpts): IndexQueryResult
   search(query: string, kind?: 'entity' | 'knowledge' | 'all'): SearchResult[]
   getStats(): VaultStats
+  /** Every indexed document, in the shape index.md is rendered from. */
+  indexEntries(): VaultIndexRow[]
   close(): void
+  // The public read surface (S5): the index's interface IS the query
+  // interface — staleness sync, opts mapping, and row shaping live behind
+  // these instead of in a pass-through module.
+  queryEntities(opts?: EntityQueryOpts): { items: QueryResult[]; total: number }
+  queryChildren(parentSlug: string): { items: QueryResult[]; total: number }
+  queryRelatedTo(slug: string, relation?: string): { items: UnifiedResult[]; total: number }
+  queryKnowledge(opts?: KnowledgeQueryOpts): { items: KnowledgeQueryResult[]; total: number }
+  queryUnified(opts?: UnifiedQueryOpts): { items: UnifiedResult[]; total: number }
 }
 
 export interface QueryOpts {
@@ -157,14 +175,81 @@ export interface QueryOpts {
   offset?: number
 }
 
+// --- Query input validation ---
+//
+// Every enum-ish query opt is checked before it can influence (or fail to
+// influence) SQL. The mappers below only forward values they recognise, so an
+// unchecked typo used to be *dropped*: `--filter actvie` ran unfiltered and
+// exited 0. Validating here covers the CLI and library callers at once.
+
+const SORT_COL_MAP: Record<string, string> = {
+  name: 'i.name',
+  created: 'i.created',
+  last_touched: 'i.last_touched',
+  staleness: 'i.staleness_days',
+  reinforcement_count: 'i.reinforcement_count',
+  last_reinforced: 'i.last_reinforced',
+}
+const KNOWLEDGE_ONLY_SORTS = new Set(['reinforcement_count', 'last_reinforced'])
+const SORT_FIELDS = Object.keys(SORT_COL_MAP)
+const SORT_ORDERS = ['asc', 'desc'] as const
+const QUERY_FILTERS = [...ENTITY_STATUSES, 'all', 'stale', 'capture'] as const
+
+function assertEnum(value: unknown, valid: readonly string[], label: string): void {
+  if (value === undefined || value === null) return
+  if (typeof value !== 'string' || !valid.includes(value)) {
+    throw new HafezError('VALIDATION_FAILED', `Invalid ${label}: "${String(value)}". Valid values: ${valid.join(', ')}.`)
+  }
+}
+
+function assertSortOrder(value: unknown): void {
+  if (value === undefined || value === null) return
+  if (typeof value !== 'string' || !SORT_ORDERS.includes(value.toLowerCase() as 'asc' | 'desc')) {
+    throw new HafezError('VALIDATION_FAILED', `Invalid sort_order: "${String(value)}". Valid values: asc, desc.`)
+  }
+}
+
+function assertCount(value: unknown, label: 'limit' | 'offset'): void {
+  if (value === undefined || value === null) return
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new HafezError('VALIDATION_FAILED', `Invalid ${label}: "${String(value)}". Must be a non-negative integer.`)
+  }
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+type TimeOpts = Pick<EntityQueryOpts, 'since' | 'before' | 'createdSince' | 'createdBefore'>
+
+function validateTimeOpts(opts?: TimeOpts): void {
+  const fields = ['since', 'before', 'createdSince', 'createdBefore'] as const
+  for (const f of fields) {
+    if (opts?.[f] !== undefined && !ISO_DATE.test(opts[f]!)) {
+      throw new HafezError('VALIDATION_FAILED', `Invalid date format for ${f}: "${opts[f]}". Must be YYYY-MM-DD.`)
+    }
+  }
+}
+
+function validateListOpts(opts?: ListOpts): void {
+  assertEnum(opts?.sort_by, SORT_FIELDS, 'sort_by')
+  assertSortOrder(opts?.sort_order)
+  assertCount(opts?.limit, 'limit')
+  assertCount(opts?.offset, 'offset')
+}
+
 // --- Shared query functions (used by both write and readonly paths) ---
 
 function sanitizeFtsQuery(raw: string): { fts: string; terms: string[] } {
-  const cleaned = raw.replace(/[^\w\s]/g, ' ')
+  // Unicode-aware: keep letters/digits/underscore in ANY script, strip
+  // punctuation. `[^\w\s]` was ASCII-only, so it erased whole non-Latin
+  // queries (日本語 → '') and the vault's non-Latin notes were unfindable.
+  // For ASCII input this class is identical to the old one.
+  const cleaned = raw.replace(/[^\p{L}\p{N}_\s]/gu, ' ')
   const tokens = cleaned.split(/\s+/).filter(t => t.length > 0)
   const filtered = tokens.filter(t => !STOPWORDS.has(t.toLowerCase()))
+  // All-stopword queries fall back to the raw tokens — which is how bare
+  // AND/OR/NOT reach fts5. Quoting makes every term a literal string, never
+  // an operator, and a trailing `*` still gives prefix matching.
   const terms = filtered.length === 0 ? tokens : filtered
-  return { fts: terms.map(t => `${t}*`).join(' OR '), terms }
+  return { fts: terms.map(t => `"${t.replace(/"/g, '""')}"*`).join(' OR '), terms }
 }
 
 function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): IndexQueryResult {
@@ -176,7 +261,11 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
     params.kind = opts.kind
   }
   if (opts.status) {
-    conditions.push('i.status = @status')
+    // Status is an entity attribute — knowledge rows are indexed with a NULL
+    // status. In a kind-unset (unified) query the status filter narrows the
+    // entity side only; applying it to every row is what made `query --kind
+    // all` (filter defaults to active) return entities and nothing else.
+    conditions.push(opts.kind === 'entity' ? 'i.status = @status' : "(i.kind = 'knowledge' OR i.status = @status)")
     params.status = opts.status
   }
   if (opts.type) {
@@ -254,24 +343,21 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
 
   const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : ''
 
-  const knowledgeOnlySorts = new Set(['reinforcement_count', 'last_reinforced'])
-  const sortColMap: Record<string, string> = {
-    name: 'i.name',
-    created: 'i.created',
-    last_touched: 'i.last_touched',
-    staleness: 'i.staleness_days',
-    reinforcement_count: 'i.reinforcement_count',
-    last_reinforced: 'i.last_reinforced',
-  }
+  // sort_order / limit / offset are the three opts that reach SQL as text
+  // rather than bound params — check them at the interpolation site, so a
+  // caller that skips the read surface can't hand raw SQL to prepare().
+  assertSortOrder(opts.sort_order)
+  assertCount(opts.limit, 'limit')
+  assertCount(opts.offset, 'offset')
 
   let sortCol = 'i.last_touched'
   if (opts.sort_by) {
-    const isKnowledgeOnly = knowledgeOnlySorts.has(opts.sort_by)
+    const isKnowledgeOnly = KNOWLEDGE_ONLY_SORTS.has(opts.sort_by)
     const isEntityQuery = opts.kind === 'entity'
     if (isKnowledgeOnly && isEntityQuery) {
       sortCol = 'i.last_touched'
-    } else if (sortColMap[opts.sort_by]) {
-      sortCol = sortColMap[opts.sort_by]
+    } else if (SORT_COL_MAP[opts.sort_by]) {
+      sortCol = SORT_COL_MAP[opts.sort_by]
     }
   }
 
@@ -319,6 +405,21 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
   }
 
   return { items: rows, total }
+}
+
+/** Every indexed document, in the shape index.md renders from. The vault-root
+ * index needs name/status/type/confidence/description/domain and the body (for
+ * the derived summary) — all of it already indexed, so regenerating index.md
+ * after a mutation costs one query instead of a second full-vault parse. */
+function indexEntriesFn(db: InstanceType<typeof Database>): VaultIndexRow[] {
+  const rows = db.prepare(
+    'SELECT slug, kind, name, type, status, confidence, description, body FROM items'
+  ).all() as Array<Omit<VaultIndexRow, 'domain'>>
+  const getDomains = db.prepare("SELECT target FROM links WHERE source = ? AND relation = 'domain'")
+  return rows.map(row => ({
+    ...row,
+    domain: (getDomains.all(row.slug) as Array<{ target: string }>).map(d => d.target),
+  }))
 }
 
 function searchFn(db: InstanceType<typeof Database>, query: string, kind?: 'entity' | 'knowledge' | 'all'): SearchResult[] {
@@ -431,6 +532,19 @@ function getStatsFn(db: InstanceType<typeof Database>): VaultStats {
   }
 }
 
+// Internal test seam — NOT public API (createHafez never exposes it). Fires
+// inside syncIfStale after the scan has read the vault and before the new
+// watermark is recorded, so the mid-scan-write race can be injected
+// deterministically instead of raced against the clock.
+// Recorded sync watermarks sit this far behind the scan-start instant: FS
+// timestamps and Date.now() are read from the same kernel clock but round
+// differently, and a write landing in that rounding gap must stay dirty.
+const WATERMARK_SLACK_MS = 10
+
+let afterScanHook: (() => void) | null = null
+/** @internal */
+export function __setAfterScanHook(fn: (() => void) | null): void { afterScanHook = fn }
+
 // --- createIndex: overloaded for write and readonly modes ---
 
 export function createIndex(vaultPath: string): HafezIndex
@@ -473,7 +587,7 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       } catch { /* DB may have been temporarily deleted during rebuild */ }
     }
 
-    return {
+    return withReadSurface({
       rebuild: () => { throw new Error('Index is read-only') },
       syncIfStale,
       upsertFromFile: () => { throw new Error('Index is read-only') },
@@ -481,8 +595,9 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       queryItems: (qopts) => queryItemsFn(db, qopts),
       search: (q, k) => searchFn(db, q, k),
       getStats: () => getStatsFn(db),
+      indexEntries: () => indexEntriesFn(db),
       close: () => { try { db.close() } catch {} },
-    }
+    })
   }
 
   // --- Write-capable path ---
@@ -558,8 +673,12 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
   }
 
   // Prepared statements
-  const upsertStmt = db.prepare(`
-    INSERT OR REPLACE INTO items
+  // Plain INSERT, never INSERT OR REPLACE: REPLACE's implicit delete does not
+  // fire the AFTER DELETE trigger (recursive_triggers is off), so the replaced
+  // row's terms would linger in the external-content FTS index as ghosts.
+  // Callers delete the row first — see indexFile.
+  const insertStmt = db.prepare(`
+    INSERT INTO items
       (slug, kind, name, type, status, parent, next_action, next_action_count, staleness_days,
        confidence, reinforcement_count, last_reinforced, created, last_touched, body, file_hash, subtype,
        description, resource, brief, session_log_count, last_session_date, last_session_type, last_session_summary)
@@ -599,12 +718,13 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       return
     }
 
-    const bodyActions = getNextActions(body)
+    const doc = documentForFile({ kind })
+    const bodyActions = doc.getNextActions(body)
     const nextAction = bodyActions.length > 0 ? bodyActions[0] : null
     const nextActionCount = bodyActions.length
 
-    const brief = getBrief(body)?.slice(0, 300) ?? null
-    const logs = parseSessionLog(body)
+    const brief = doc.getBrief(body)?.slice(0, 300) ?? null
+    const logs = doc.parseSessionLog(body)
     const lastLog = logs[0] ?? null
 
     const item: IndexItem = {
@@ -624,7 +744,7 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       last_touched: fm['last-touched'] ?? null,
       body,
       file_hash: hash,
-      subtype: kind === 'knowledge' ? (fm.subtype ?? 'insight') : null,
+      subtype: kind === 'knowledge' ? (fm.subtype ?? DEFAULT_KNOWLEDGE_SUBTYPE) : null,
       description: fm.description ?? null,
       resource: kind === 'entity' ? (fm.resource ?? null) : null,
       brief,
@@ -634,9 +754,12 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       last_session_summary: lastLog?.summary?.slice(0, 300) ?? null,
     }
 
-    // Upsert item and rebuild links
+    // Replace item and rebuild links. Delete-then-insert keeps the FTS index
+    // trigger-consistent for externally changed files (hand edit, git pull),
+    // the same path hafez's own mutations take via upsertFromFile.
+    deleteItemStmt.run(slug)
     deleteLinksStmt.run(slug)
-    upsertStmt.run(item)
+    insertStmt.run(item)
 
     // Index related links
     if (fm.related && Array.isArray(fm.related)) {
@@ -659,7 +782,7 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
     // Harvest [[wiki links]] from body (excluding ## Related section)
     // Strip the Related section to avoid double-counting generated links
     let authoredBody = body
-    const relatedSection = findSection(body, 'Related')
+    const relatedSection = doc.findSection(body, 'Related')
     if (relatedSection) {
       authoredBody = body.slice(0, relatedSection.start) + body.slice(relatedSection.end)
     }
@@ -680,6 +803,8 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
   }
 
   const rebuildTransaction = db.transaction(() => {
+    // Watermark the scan by when it STARTED (see syncIfStale).
+    const scanStart = Date.now() - WATERMARK_SLACK_MS
     db.exec('DELETE FROM items')
     db.exec('DELETE FROM links')
 
@@ -700,7 +825,7 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
     }
 
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)")
-      .run(Date.now().toString())
+      .run(scanStart.toString())
   })
 
   function rebuild(): void {
@@ -714,11 +839,21 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
     const lastSyncTime = parseInt(lastSync.value, 10)
     let changed = false
 
+    // Watermark the scan by when it STARTED, not when it finished. A file
+    // written while the scan is in flight — after its read, before the record —
+    // would otherwise be stamped as already-indexed and skipped by every later
+    // sync, leaving it permanently stale. `>=` covers the same-millisecond
+    // case; a re-read of an unchanged file is a cheap hash compare. The slack
+    // absorbs FS-vs-Date.now clock rounding at the boundary — a file whose
+    // mtime rounds just below the instant the scan started must still read as
+    // dirty; the only cost is re-hashing files touched inside the window.
+    const scanStart = Date.now() - WATERMARK_SLACK_MS
+
     const dirs = INDEXED_KINDS.map(kind => ({ dir: kindDir(kind), kind }))
 
     for (const { dir, kind } of dirs) {
       for (const file of scanVaultDir(join(vaultPath, dir))) {
-        if (statSync(file).mtimeMs > lastSyncTime) {
+        if (statSync(file).mtimeMs >= lastSyncTime) {
           indexFile(file, kind)
           changed = true
         }
@@ -740,9 +875,11 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       }
     }
 
+    afterScanHook?.()
+
     if (changed) {
       db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)")
-        .run(Date.now().toString())
+        .run(scanStart.toString())
     }
   }
 
@@ -765,11 +902,187 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
   const count = (db.prepare('SELECT COUNT(*) as c FROM items').get() as any).c
   if (count === 0) rebuild()
 
-  return {
+  return withReadSurface({
     rebuild, syncIfStale, upsertFromFile, removeItem,
     queryItems: (qopts) => queryItemsFn(db, qopts),
     search: (q, k) => searchFn(db, q, k),
     getStats: () => getStatsFn(db),
+    indexEntries: () => indexEntriesFn(db),
     close: () => db.close(),
+  })
+}
+
+// --- The read surface: opts mapping + row shaping over queryItemsFn ---
+
+/** The five read-surface methods exist in exactly one place: attached here
+ * over any core index (write-capable or read-only). */
+type IndexCore = Omit<HafezIndex, 'queryEntities' | 'queryChildren' | 'queryRelatedTo' | 'queryKnowledge' | 'queryUnified'>
+
+function withReadSurface(core: IndexCore): HafezIndex {
+  const index: HafezIndex = {
+    ...core,
+    queryEntities: (opts) => queryEntitiesFn(index, opts),
+    queryChildren: (parentSlug) => queryEntitiesFn(index, { parent: parentSlug }),
+    queryRelatedTo: (slug, relation) => queryRelatedToFn(index, slug, relation),
+    queryKnowledge: (opts) => queryKnowledgeFn(index, opts),
+    queryUnified: (opts) => queryUnifiedFn(index, opts),
   }
+  return index
+}
+
+function toQueryResult(slug: string, row: Record<string, any>): QueryResult {
+  return {
+    slug,
+    name: row.name,
+    type: row.type,
+    status: row.status,
+    description: row.description ?? null,
+    resource: row.resource ?? null,
+    domain: row.domain ?? [],
+    last_touched: row.last_touched,
+    next_action: row.next_action ?? null,
+    next_action_count: row.next_action_count ?? 0,
+    parent: row.parent ?? null,
+    related: row.related ?? [],
+    staleness_days: row.staleness_days ?? null,
+    tags: row.tags ?? [],
+    brief: row.brief ?? null,
+    session_log_count: row.session_log_count ?? 0,
+    last_session_date: row.last_session_date ?? null,
+    last_session_type: row.last_session_type ?? null,
+    last_session_summary: row.last_session_summary ?? null,
+  }
+}
+
+function toKnowledgeResult(slug: string, row: Record<string, any>): KnowledgeQueryResult {
+  return {
+    slug,
+    name: row.name,
+    description: row.description ?? null,
+    domain: row.domain ?? [],
+    confidence: row.confidence ?? 'observation',
+    related: row.related ?? [],
+    reinforcement_count: row.reinforcement_count ?? 0,
+    last_reinforced: row.last_reinforced ?? null,
+    last_touched: row.last_touched ?? null,
+  }
+}
+
+const STATUS_FILTERS = new Set<string>(ENTITY_STATUSES)
+
+// One mapper per opts family: the entity filter set (entities + unified), the
+// knowledge filter set (knowledge + unified), the time window (every kind
+// carries created/last_touched), and the tags/sort/paging tail every list
+// query shares. Each opt maps in exactly one place, so the filtered and
+// unified views can't silently diverge. Domain appears in both filter mappers
+// (both kinds carry it) — mapping it twice is idempotent.
+type ListOpts = Pick<EntityQueryOpts, 'tags' | 'sort_by' | 'sort_order' | 'limit' | 'offset'>
+
+function mapEntityFilterOpts(qopts: QueryOpts, opts?: EntityQueryOpts): void {
+  if (opts?.filter && STATUS_FILTERS.has(opts.filter)) qopts.status = opts.filter
+  if (opts?.filter === 'stale') qopts.filter = 'stale'
+  if (opts?.filter === 'capture') qopts.filter = 'capture'
+  if (opts?.type) qopts.type = opts.type
+  if (opts?.parent) qopts.parent = opts.parent
+  if (opts?.domain) qopts.domain = opts.domain
+}
+
+function mapTimeOpts(qopts: QueryOpts, opts?: TimeOpts): void {
+  if (opts?.since) qopts.since = opts.since
+  if (opts?.before) qopts.before = opts.before
+  if (opts?.createdSince) qopts.createdSince = opts.createdSince
+  if (opts?.createdBefore) qopts.createdBefore = opts.createdBefore
+}
+
+function mapListOpts(qopts: QueryOpts, opts?: ListOpts): void {
+  if (opts?.tags) qopts.tags = opts.tags
+  if (opts?.sort_by) qopts.sort_by = opts.sort_by
+  if (opts?.sort_order) qopts.sort_order = opts.sort_order
+  if (opts?.limit != null) qopts.limit = opts.limit
+  if (opts?.offset != null) qopts.offset = opts.offset
+}
+
+function mapKnowledgeFilterOpts(qopts: QueryOpts, opts?: { domain?: string; confidence?: string; subtype?: string }): void {
+  if (opts?.domain) qopts.domain = opts.domain
+  if (opts?.confidence) qopts.confidence = opts.confidence
+  if (opts?.subtype) qopts.subtype = opts.subtype
+}
+
+function validateEntityFilterOpts(opts?: EntityQueryOpts): void {
+  assertEnum(opts?.filter, QUERY_FILTERS, 'filter')
+  assertEnum(opts?.type, ENTITY_TYPES, 'type')
+}
+
+function validateKnowledgeFilterOpts(opts?: { confidence?: string; subtype?: string }): void {
+  assertEnum(opts?.confidence, CONFIDENCE_LEVELS, 'confidence')
+  assertEnum(opts?.subtype, VALID_SUBTYPES, 'subtype')
+}
+
+function queryEntitiesFn(index: HafezIndex, opts?: EntityQueryOpts): { items: QueryResult[], total: number } {
+  index.syncIfStale()
+  validateEntityFilterOpts(opts)
+  validateKnowledgeFilterOpts(opts)
+  validateTimeOpts(opts)
+  validateListOpts(opts)
+  const qopts: QueryOpts = { kind: 'entity' }
+  mapEntityFilterOpts(qopts, opts)
+  mapTimeOpts(qopts, opts)
+  mapListOpts(qopts, opts)
+  const { items, total } = index.queryItems(qopts)
+  return { items: items.map(i => toQueryResult(i.slug, i)), total }
+}
+
+function queryRelatedToFn(index: HafezIndex, slug: string, relation?: string): { items: UnifiedResult[], total: number } {
+  index.syncIfStale()
+  const { items, total } = index.queryItems({ relatedTo: slug, relation })
+  return {
+    items: items.map(i =>
+      i.kind === 'entity'
+        ? { ...toQueryResult(i.slug, i), kind: 'entity' as const }
+        : { ...toKnowledgeResult(i.slug, i), kind: 'knowledge' as const }
+    ),
+    total,
+  }
+}
+
+function queryKnowledgeFn(index: HafezIndex, opts?: KnowledgeQueryOpts): { items: KnowledgeQueryResult[], total: number } {
+  index.syncIfStale()
+  validateKnowledgeFilterOpts(opts)
+  validateTimeOpts(opts)
+  validateListOpts(opts)
+  const qopts: QueryOpts = { kind: 'knowledge' }
+  mapKnowledgeFilterOpts(qopts, opts)
+  mapTimeOpts(qopts, opts)
+  mapListOpts(qopts, opts)
+  const { items, total } = index.queryItems(qopts)
+  return { items: items.map(i => toKnowledgeResult(i.slug, i)), total }
+}
+
+function queryUnifiedFn(
+  index: HafezIndex,
+  opts?: UnifiedQueryOpts,
+): { items: UnifiedResult[], total: number } {
+  index.syncIfStale()
+  assertEnum(opts?.kind, ['entity', 'knowledge', 'all'], 'kind')
+  validateEntityFilterOpts(opts)
+  validateKnowledgeFilterOpts(opts)
+  validateTimeOpts(opts)
+  validateListOpts(opts)
+  const qopts: QueryOpts = {}
+  if (opts?.kind && opts.kind !== 'all') qopts.kind = opts.kind
+  // When kind is 'all' or unset, no kind filter — both entities and knowledge are returned
+  mapEntityFilterOpts(qopts, opts)
+  mapKnowledgeFilterOpts(qopts, opts)
+  mapTimeOpts(qopts, opts)
+  mapListOpts(qopts, opts)
+
+  const result = index.queryItems(qopts)
+  const items: UnifiedResult[] = result.items.map(i => {
+    if (i.kind === 'entity') {
+      return { ...toQueryResult(i.slug, i), kind: 'entity' as const }
+    } else {
+      return { ...toKnowledgeResult(i.slug, i), kind: 'knowledge' as const }
+    }
+  })
+  return { items, total: result.total }
 }

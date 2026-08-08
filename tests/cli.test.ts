@@ -1,7 +1,7 @@
 // tests/cli.test.ts
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFileSync } from 'child_process'
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs'
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { serializeFile } from '../src/vault.js'
@@ -126,7 +126,7 @@ describe('CLI', () => {
 
   it('help lists every dispatched command', () => {
     const { stdout } = run('help')
-    for (const cmd of ['read', 'query', 'search', 'create', 'capture', 'promote', 'update', 'batch', 'digest', 'sync', 'stats', 'changelog', 'schema', 'validate', 'init', 'onboard', 'help --agent']) {
+    for (const cmd of ['read', 'query', 'search', 'create', 'capture', 'promote', 'update', 'batch', 'digest', 'sync', 'stats', 'changelog', 'schema', 'validate', 'init', 'onboard', 'upgrade', 'help --agent']) {
       expect(stdout).toContain(cmd)
     }
   })
@@ -203,6 +203,15 @@ describe('CLI', () => {
     expect(slug).toBe('cli-insight-alias-test')
   })
 
+  it('create entity --insight is rejected, not silently dropped', () => {
+    // insight is knowledge-only: the Op Spec's kind gate rejects it. A flag the
+    // CLI drops on the floor is a false success.
+    const { stderr, exitCode } = run('create', 'entity', 'CLI Insight On Entity', '--type', 'entity', '--insight', 'nope')
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('insight')
+    expect(existsSync(join(VAULT, 'entities', 'cli-insight-on-entity.md'))).toBe(false)
+  })
+
   it('help --agent output contains hard-rules prompt-gate section', () => {
     // Migrated from the old --synthesis/--add-evidence assertions. Help is now a
     // prompt-gate, not a flat CLI reference — the individual update flags live
@@ -224,11 +233,13 @@ describe('CLI', () => {
   })
 
   it('HafezError details appear in stderr', () => {
-    const { stderr, exitCode } = run('update', 'test-proj', '--log', 'audit: checking stuff', '--agent', 'claude')
+    // Two invalid fields → two Op Spec shape errors → message plus detail lines
+    const { stderr, exitCode } = run('update', 'test-proj', '--status', 'bananas', '--log', 'audit: checking stuff', '--agent', 'claude')
     expect(exitCode).toBe(2) // VALIDATION_FAILED
-    expect(stderr).toContain('Invalid session log entry')
-    expect(stderr).toContain('invalid session log type: audit')
-    expect(stderr).toContain('progress, decision, blocker, research')
+    expect(stderr).toContain('invalid shape at fields.status')
+    expect(stderr).toContain('invalid shape at fields.session_log.type')
+    expect(stderr).toContain('  - ') // details rendered as list lines
+    expect(stderr).toContain('"progress"|"decision"|"blocker"|"research"')
   })
 
   it('help --agent contains session-log enum values from the live schema', () => {
@@ -376,7 +387,8 @@ describe('exit-code contract (C5)', () => {
   it('an invalid direct update enum exits 2 and writes nothing', () => {
     const r = run('update', 'test-proj', '--status', 'bananas')
     expect(r.exitCode).toBe(2)
-    expect(r.stderr).toContain('Invalid status')
+    expect(r.stderr).toContain('invalid shape at fields.status')
+    expect(r.stderr).toContain('"active"|"paused"|"done"')
     expect(readFileSync(join(VAULT, 'entities', 'test-proj.md'), 'utf-8')).not.toContain('bananas')
   })
 
@@ -385,5 +397,12 @@ describe('exit-code contract (C5)', () => {
     expect(exitCode).toBe(0)
     expect(stdout).toContain('## Exit codes')
     expect(stdout).toContain('vault locked')
+  })
+
+  it('an invalid subtype on direct create exits 2, not a crash (Spine strictness)', () => {
+    const r = run('create', 'knowledge', 'Bad Subtype Note', '--subtype', 'bogus')
+    expect(r.exitCode).toBe(2)
+    expect(r.stderr).toContain('invalid shape at fields.subtype')
+    expect(existsSync(join(VAULT, 'knowledge', 'bad-subtype-note.md'))).toBe(false)
   })
 })

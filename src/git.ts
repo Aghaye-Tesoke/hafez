@@ -5,7 +5,8 @@ import { dirname, join } from 'node:path'
 import { simpleGit, type SimpleGit } from 'simple-git'
 
 import { mergeVaultContent } from './merge.js'
-import { VAULT_FILE_RE, INDEXED_DIR_PATHSPECS, classifyIndexedRelPath } from './vault.js'
+import { VAULT_FILE_RE, INDEXED_DIR_PATHSPECS, classifyIndexedRelPath, vaultKindFromRelPath } from './vault.js'
+import { normalizeSinceDate } from './dates.js'
 import { HafezError, type GitConfig, type ChangelogEntry, type Journal } from './types.js'
 
 const logMerge = (msg: string) => process.stderr.write(`[hafez-merge] ${msg}\n`)
@@ -57,6 +58,61 @@ async function ensureCleanState(git: SimpleGit, vaultPath: string): Promise<void
 async function hasOriginRemote(git: SimpleGit): Promise<boolean> {
   const remotes = await git.getRemotes()
   return remotes.some(r => r.name === 'origin')
+}
+
+/** The branch this vault is on (symbolic HEAD). */
+async function currentBranch(git: SimpleGit): Promise<string> {
+  return (await git.raw(['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+}
+
+/** The branch's configured upstream (`origin/main`), or null when it has none. */
+async function upstreamRef(git: SimpleGit): Promise<string | null> {
+  try {
+    const ref = (await git.raw(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])).trim()
+    return ref || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Give the current branch an upstream when git does not know about one yet.
+ *
+ * `git remote add origin …` on a vault that has only ever been local leaves
+ * the branch both unpublished and untracked, and in that state `git pull`,
+ * `git push` and `@{u}` are all fatal — so every mutation after the remote
+ * was added died at the sync/push stage. Returns false when origin does not
+ * carry the branch at all: there is nothing to pull and nothing to track
+ * until the first push creates it (see pushCurrent).
+ *
+ * A remote we cannot reach also reports false — the caller's push, and its
+ * retry loop, is where a network failure belongs.
+ */
+async function ensureUpstream(git: SimpleGit): Promise<boolean> {
+  if (await upstreamRef(git)) return true
+  try {
+    const branch = await currentBranch(git)
+    const heads = await git.raw(['ls-remote', '--heads', 'origin', branch])
+    if (!heads.trim()) return false
+    await git.fetch('origin', branch)
+    await git.raw(['branch', `--set-upstream-to=origin/${branch}`, branch])
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Push the current branch, publishing it when it has no upstream yet. That
+ * first `push --set-upstream` is what turns a freshly-added origin into a
+ * normal tracking setup; every push after it is the plain push.
+ */
+async function pushCurrent(git: SimpleGit): Promise<void> {
+  if (await upstreamRef(git)) {
+    await git.push()
+    return
+  }
+  await git.push(['--set-upstream', 'origin', await currentBranch(git)])
 }
 
 /** Read one side of a conflicted file from the index; null if that side deleted it. */
@@ -120,10 +176,13 @@ async function resolveRebaseConflicts(
           await git.raw(['rm', '--force', '--ignore-unmatch', '--', file])
           continue
         }
+        // Classify from the repo-relative path: every file here passed
+        // VAULT_FILE_RE, so the Layout classifier is total over it — no
+        // fallback kind to drift when a vault dir is added.
         const merged =
           localContent === null ? remoteContent!
           : remoteContent === null ? localContent
-          : mergeVaultContent(remoteContent, localContent)
+          : mergeVaultContent(remoteContent, localContent, vaultKindFromRelPath(file))
 
         const fullPath = join(vaultPath, file)
         mkdirSync(dirname(fullPath), { recursive: true })
@@ -210,10 +269,14 @@ async function pushResolving(
   conflictMessage: (files: string[]) => string,
   exhaustedMessage: string
 ): Promise<void> {
+  // Bootstrap a freshly-added origin before the retry loop: without an
+  // upstream the rejection handling below (pull --rebase) is itself fatal.
+  await ensureUpstream(git)
+
   let lastDetail = ''
   for (let attempt = 1; attempt <= MAX_PUSH_RETRIES; attempt++) {
     try {
-      await git.push()
+      await pushCurrent(git)
       return
     } catch (pushErr) {
       lastDetail = pushErr instanceof Error ? pushErr.message : String(pushErr)
@@ -254,31 +317,39 @@ export async function gitSync(
 
   let pulled = false
 
-  // Always pull first (bidirectional sync)
-  const headBefore = (await git.revparse(['HEAD'])).trim()
-  for (let attempt = 1; attempt <= MAX_PUSH_RETRIES; attempt++) {
-    try {
-      await pullResolving(git, vaultPath, syncConflictMessage)
-      const headAfter = (await git.revparse(['HEAD'])).trim()
-      pulled = headAfter !== headBefore
-      break
-    } catch (err) {
-      if (err instanceof HafezError) throw err
-      if (attempt === MAX_PUSH_RETRIES) {
-        const detail = err instanceof Error ? err.message : String(err)
-        throw new HafezError(
-          'GIT_PUSH_FAILED',
-          `Git pull failed after ${MAX_PUSH_RETRIES} attempts during sync. Changes saved locally.`,
-          [detail]
-        )
-      }
-      await new Promise((resolve) => setTimeout(resolve, RETRY_BASE_MS * attempt))
-    }
-  }
+  // A remote that does not carry this branch yet (freshly added to a vault
+  // that has only ever been local) has nothing to pull and no `@{u}` to count
+  // against — both steps would be fatal. Skip straight to the push, which
+  // publishes the branch and sets the upstream.
+  const tracking = await ensureUpstream(git)
 
-  // Check if there are local commits to push
-  const ahead = await git.raw(['rev-list', '--count', '@{u}..HEAD']).then(s => parseInt(s.trim(), 10))
-  if (ahead === 0) return { pulled, pushed: false, remote: true }
+  if (tracking) {
+    // Always pull first (bidirectional sync)
+    const headBefore = (await git.revparse(['HEAD'])).trim()
+    for (let attempt = 1; attempt <= MAX_PUSH_RETRIES; attempt++) {
+      try {
+        await pullResolving(git, vaultPath, syncConflictMessage)
+        const headAfter = (await git.revparse(['HEAD'])).trim()
+        pulled = headAfter !== headBefore
+        break
+      } catch (err) {
+        if (err instanceof HafezError) throw err
+        if (attempt === MAX_PUSH_RETRIES) {
+          const detail = err instanceof Error ? err.message : String(err)
+          throw new HafezError(
+            'GIT_PUSH_FAILED',
+            `Git pull failed after ${MAX_PUSH_RETRIES} attempts during sync. Changes saved locally.`,
+            [detail]
+          )
+        }
+        await new Promise((resolve) => setTimeout(resolve, RETRY_BASE_MS * attempt))
+      }
+    }
+
+    // Check if there are local commits to push
+    const ahead = await git.raw(['rev-list', '--count', '@{u}..HEAD']).then(s => parseInt(s.trim(), 10))
+    if (ahead === 0) return { pulled, pushed: false, remote: true }
+  }
 
   await pushResolving(
     git, vaultPath, syncConflictMessage,
@@ -300,6 +371,25 @@ async function gitUnstage(vaultPath: string, files: string[]): Promise<void> {
   } catch { /* best effort — rollback must not mask the original error */ }
 }
 
+/**
+ * The subset of `files` that `git add` can actually stage. `git add` is fatal
+ * on a pathspec matching nothing, and a batch that creates then deletes the
+ * same slug (capture then cross-kind promote) hands the Journal a deleted path
+ * that is absent from the worktree AND was never tracked — unstageable by
+ * construction, and it needs no staging: git never knew about it. A deleted
+ * path git DOES track still goes through `add`, which stages its removal.
+ */
+async function stageablePaths(git: SimpleGit, vaultPath: string, files: string[]): Promise<string[]> {
+  const absent = files.filter(f => !existsSync(join(vaultPath, f)))
+  if (absent.length === 0) return files
+  // -z: NUL-separated, so git never quotes/escapes the paths it echoes back.
+  const tracked = new Set(
+    (await git.raw(['ls-files', '-z', '--', ...absent])).split('\0').filter(Boolean)
+  )
+  const absentSet = new Set(absent)
+  return files.filter(f => !absentSet.has(f) || tracked.has(f))
+}
+
 /** Get list of files with unresolved conflicts */
 async function getConflictingFiles(git: SimpleGit): Promise<string[]> {
   try {
@@ -310,20 +400,45 @@ async function getConflictingFiles(git: SimpleGit): Promise<string[]> {
   }
 }
 
-const FILE_STATUS_MAP: Record<string, 'created' | 'updated' | 'deleted'> = {
+type ChangelogOperation = 'created' | 'updated' | 'deleted'
+
+const FILE_STATUS_MAP: Record<string, ChangelogOperation> = {
   A: 'created',
   M: 'updated',
   D: 'deleted',
 }
 
+/**
+ * One `--name-status` line → the (path, operation) pairs it stands for.
+ *
+ * Rename and copy lines carry a similarity score and TWO paths
+ * (`R100\told\tnew`), so they match neither the single-path shape nor a
+ * bare status letter. A promote moves entities/<slug>.md to
+ * knowledge/<slug>.md, which git reports exactly that way — dropping the
+ * line made every promote invisible in the changelog. A rename reads as the
+ * old path disappearing and the new one appearing; a copy leaves the source
+ * in place, so only the destination is news.
+ */
+function parseNameStatusLine(line: string): Array<{ path: string; operation: ChangelogOperation }> {
+  const moveMatch = line.match(/^([RC])\d*\t([^\t]+)\t(.+)$/)
+  if (moveMatch) {
+    const [, statusChar, from, to] = moveMatch
+    const dest = [{ path: to, operation: 'created' as const }]
+    return statusChar === 'C' ? dest : [{ path: from, operation: 'deleted' as const }, ...dest]
+  }
+
+  const match = line.match(/^([A-Z])\t(.+)$/)
+  if (!match) return []
+  const operation = FILE_STATUS_MAP[match[1]]
+  return operation ? [{ path: match[2], operation }] : []
+}
+
 export async function gitChangelog(vaultPath: string, since: string): Promise<ChangelogEntry[]> {
   const git: SimpleGit = simpleGit(vaultPath)
 
-  // git approxidate fills a date-only --since with the *current* time of
-  // day, so `--since <today>` means "since right now" and silently returns
-  // nothing — the obvious "what happened today" query was the one that
-  // failed. Normalise bare dates to local midnight.
-  const normalizedSince = /^\d{4}-\d{2}-\d{2}$/.test(since) ? `${since}T00:00:00` : since
+  // Bare dates become local midnight — the same calendar-day boundary the
+  // vault stamps and query comparisons use (see dates.ts).
+  const normalizedSince = normalizeSinceDate(since)
 
   let output: string
   try {
@@ -350,20 +465,16 @@ export async function gitChangelog(vaultPath: string, since: string): Promise<Ch
     const [, , timestamp, commit_message] = headerMatch
 
     for (let i = 1; i < lines.length; i++) {
-      const fileMatch = lines[i].match(/^([AMDRC])\t(.+)$/)
-      if (!fileMatch) continue
+      for (const { path: filePath, operation } of parseNameStatusLine(lines[i])) {
+        // Only vault documents — scaffold files (.gitkeep) live in the same
+        // dirs and would otherwise surface as changelog rows.
+        if (!filePath.endsWith('.md')) continue
 
-      const [, statusChar, filePath] = fileMatch
-      const operation = FILE_STATUS_MAP[statusChar]
-      if (!operation) continue
-      // Only vault documents — scaffold files (.gitkeep) live in the same
-      // dirs and would otherwise surface as changelog rows.
-      if (!filePath.endsWith('.md')) continue
+        const classified = classifyIndexedRelPath(filePath)
+        if (!classified) continue
 
-      const classified = classifyIndexedRelPath(filePath)
-      if (!classified) continue
-
-      entries.push({ slug: classified.slug, kind: classified.kind, operation, timestamp, commit_message })
+        entries.push({ slug: classified.slug, kind: classified.kind, operation, timestamp, commit_message })
+      }
     }
   }
 
@@ -421,11 +532,19 @@ export async function gitCommitAndPush(
     }
   }
 
-  await git.add(files)
+  const stageable = await stageablePaths(git, vaultPath, files)
+  if (stageable.length === 0) return
+  await git.add(stageable)
 
-  // Handle "nothing to commit" (e.g., idempotent update wrote identical content)
-  const status = await git.status()
-  if (status.staged.length === 0) return
+  // Handle "nothing to commit" (e.g., idempotent update wrote identical
+  // content). Ask the index directly rather than via simple-git's status:
+  // its `staged` list omits renamed paths (they go to `renamed` only), so a
+  // promote git detected as a rename read as "nothing to commit" and was
+  // silently dropped — left staged, uncommitted, absent from the changelog.
+  // Same output-based protocol the rebase loop uses, and it is well-defined
+  // against an unborn HEAD (diffs the empty tree).
+  const stagedPaths = (await git.raw(['diff', '--cached', '--name-only'])).trim()
+  if (stagedPaths.length === 0) return
 
   const committed = await git.commit(message)
   // simple-git swallows some commit failures (e.g. a rejected pre-commit
@@ -464,7 +583,11 @@ export function createGitJournal(vaultPath: string, config: GitConfig = {}): Jou
         if (!(err instanceof HafezError && err.code === 'GIT_PUSH_FAILED')) {
           await gitUnstage(vaultPath, files)
         }
-        throw err
+        // The Journal is the seam: git's own error types must not escape it,
+        // or callers (and the CLI exit-code table) see an unclassified failure.
+        if (err instanceof HafezError) throw err
+        const detail = err instanceof Error ? err.message : String(err)
+        throw new HafezError('GIT_COMMIT_FAILED', `git commit failed for: ${files.join(', ')}`, [detail])
       }
     },
     sync: () => gitSync(vaultPath),

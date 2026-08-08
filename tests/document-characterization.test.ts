@@ -1,6 +1,6 @@
 // tests/document-characterization.test.ts
 //
-// C3 characterization suite (plans/2026-08-02-architecture-deepening.md):
+// C3 characterization suite (plans/archive/2026-08-02-architecture-deepening.md):
 // originally pinned the divergent behavior of the four pre-unification
 // section splitters (see the commit that introduced this file). With
 // src/document.ts landed, every DIVERGENCE test now pins the FIXED,
@@ -9,8 +9,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createHafez } from '../src/index.js'
 import { serializeFile } from '../src/vault.js'
-import { findSection, getBrief } from '../src/document.js'
-import { parseSessionLog, countSessionLogEntries, prependSessionLogEntry, bodyBeforeSessionLog } from '../src/document.js'
+import { documentFor, getBrief, parseSessionLog, countSessionLogEntries } from '../src/document.js'
+
+// Entity-union binding — the fixtures below are entity bodies.
+const { findSection, prependSessionLogEntry, bodyBeforeSessionLog } = documentFor({ kind: 'entity' })
 import { mergeVaultContent } from '../src/merge.js'
 import { parseContent } from '../src/vault.js'
 import { mkdirSync, rmSync, readFileSync } from 'fs'
@@ -184,7 +186,7 @@ describe('DIVERGENCE: merge splits user ## headings out of their section (merge.
     const remote = serializeFile(fmRemote,
       '## Brief\n\nremote intro\n\n## Session Log\n')
 
-    const merged = parseContent(mergeVaultContent(remote, local))
+    const merged = parseContent(mergeVaultContent(remote, local, 'entity'))
     // FIXED (owner decision: atomic sections): the Brief is one unit — the
     // newer side wins it whole, embedded user headings included.
     expect(getBrief(merged.body)).toBe('remote intro')
@@ -197,7 +199,7 @@ describe('DIVERGENCE: merge splits user ## headings out of their section (merge.
     const local = serializeFile(fmLocal, `## Session Log\n\n${localEntry}\n`)
     const remote = serializeFile(fmRemote, `## Session Log\n\n${remoteEntry}\n`)
 
-    const merged = parseContent(mergeVaultContent(remote, local))
+    const merged = parseContent(mergeVaultContent(remote, local, 'entity'))
     const sl = findSection(merged.body, 'Session Log')!.content
     // FIXED: the entry keeps its authored ## Detail tail; the remote entry
     // sorts after the (newer) local entry and its tail.

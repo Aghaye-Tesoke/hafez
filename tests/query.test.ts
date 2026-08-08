@@ -1,12 +1,19 @@
 // tests/query.test.ts
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { queryEntities, queryChildren, queryRelatedTo, queryKnowledge, queryUnified } from '../src/query.js'
 import { createIndex, type HafezIndex } from '../src/db.js'
 import { serializeFile } from '../src/vault.js'
 import { writeFileSync, mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import type { EntityQueryOpts, UnifiedResult } from '../src/types.js'
+import type { EntityQueryOpts, KnowledgeQueryOpts, UnifiedResult } from '../src/types.js'
+
+// S5: the read surface lives on HafezIndex now — these wrappers keep the
+// suite's call shape while exercising the real index methods.
+const queryEntities = (index: HafezIndex, opts?: EntityQueryOpts) => index.queryEntities(opts)
+const queryChildren = (index: HafezIndex, parentSlug: string) => index.queryChildren(parentSlug)
+const queryRelatedTo = (index: HafezIndex, slug: string, relation?: string) => index.queryRelatedTo(slug, relation)
+const queryKnowledge = (index: HafezIndex, opts?: KnowledgeQueryOpts) => index.queryKnowledge(opts)
+const queryUnified = (index: HafezIndex, opts?: EntityQueryOpts & { kind?: 'entity' | 'knowledge' | 'all' }) => index.queryUnified(opts)
 
 const TMP = join(tmpdir(), 'hafez-test-query-' + Date.now())
 

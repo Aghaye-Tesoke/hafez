@@ -2,7 +2,7 @@
 // Generates the vault-root index.md covering entities (grouped by status) and
 // knowledge (grouped by domain) — local-only, auto-regenerated on every entity/knowledge write.
 import { readFileSync, writeFileSync, existsSync, statSync, mkdirSync } from 'fs'
-import { join, basename } from 'path'
+import { join, basename, resolve } from 'path'
 import { parseFilePath, scanVaultDir, kindDir } from './vault.js'
 import { deriveSummary } from './document.js'
 import { ENTITY_STATUSES } from './contracts.js'
@@ -12,6 +12,42 @@ interface IndexEntry {
   name: string
   summary: string
   suffix: string
+}
+
+/** One indexed document, as the SQLite index can hand it over. index.md needs
+ * nothing the index does not already hold, so a regeneration reads rows
+ * instead of re-reading and re-parsing every file in the vault. Declared here
+ * (not in db.ts) to keep the module edge pointing one way: db.ts already
+ * imports from this file. */
+export interface VaultIndexRow {
+  slug: string
+  kind: 'entity' | 'knowledge'
+  name: string
+  type: string | null
+  status: string | null
+  confidence: string | null
+  description: string | null
+  domain: string[]
+  body: string
+}
+
+/** Index rows in the shape the renderer below expects — the same
+ * {slug, fm, body} triple scanParsed produces from disk. */
+function fromRows(rows: VaultIndexRow[], kind: 'entity' | 'knowledge'): Array<{ slug: string; fm: Record<string, any>; body: string }> {
+  return rows
+    .filter(r => r.kind === kind)
+    .map(r => ({
+      slug: r.slug,
+      body: r.body,
+      fm: {
+        name: r.name,
+        type: r.type ?? undefined,
+        status: r.status ?? undefined,
+        confidence: r.confidence ?? undefined,
+        description: r.description ?? undefined,
+        domain: r.domain,
+      },
+    }))
 }
 
 function truncate(s: string): string {
@@ -47,11 +83,37 @@ function scanParsed(dir: string): Array<{ slug: string; fm: Record<string, any>;
  * would dirty their vault — so they go into .git/info/exclude instead. */
 const LOCAL_EXCLUDES = ['/index.md', '/.hafez.db', '/.hafez.db-shm', '/.hafez.db-wal']
 
+/** Locate the git directory that owns `info/exclude` for this vault.
+ * `.git` is a directory in a normal clone, but a *gitfile* (`gitdir: <path>`)
+ * in a linked worktree or submodule — treating that file as "not a repo" is
+ * what let index.md and .hafez.db pollute `git status` there. Git reads
+ * `info/exclude` from the COMMON dir, so for a linked worktree the pointed-at
+ * per-worktree dir is one more hop from the answer: its `commondir` file names
+ * the shared dir (writing the exclude in the per-worktree dir has no effect).
+ * Returns null when the vault is not a git repo at all. */
+function resolveExcludeGitDir(vaultPath: string): string | null {
+  const dotGit = join(vaultPath, '.git')
+  if (!existsSync(dotGit)) return null
+  const stat = statSync(dotGit)
+  if (stat.isDirectory()) return dotGit
+  if (!stat.isFile()) return null
+  const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, 'utf-8'))
+  if (!pointer) return null
+  const gitDir = resolve(vaultPath, pointer[1].trim())
+  if (!existsSync(gitDir)) return null
+  const commonDirFile = join(gitDir, 'commondir')
+  if (existsSync(commonDirFile)) {
+    const commonDir = resolve(gitDir, readFileSync(commonDirFile, 'utf-8').trim())
+    if (existsSync(commonDir)) return commonDir
+  }
+  return gitDir
+}
+
 /** Ensure every generated local-only artifact is covered by .git/info/exclude. */
 export function ensureLocalExclude(vaultPath: string): void {
   try {
-    const gitDir = join(vaultPath, '.git')
-    if (!existsSync(gitDir) || !statSync(gitDir).isDirectory()) return
+    const gitDir = resolveExcludeGitDir(vaultPath)
+    if (!gitDir) return
     const excludePath = join(gitDir, 'info', 'exclude')
     const existing = existsSync(excludePath) ? readFileSync(excludePath, 'utf-8') : ''
     const lines = new Set(existing.split('\n').map(l => l.trim()))
@@ -63,18 +125,27 @@ export function ensureLocalExclude(vaultPath: string): void {
   } catch { /* best effort — never fail a vault write over ignore hygiene */ }
 }
 
-export function generateVaultIndex(vaultPath: string): void {
+/** Regenerate the vault-root index.md.
+ *
+ * `rows` is the SQLite index's view of the vault — every mutation refreshes
+ * those rows anyway, so passing them avoids a second full-vault read for the
+ * same content. Omitting them (standalone/one-off use) falls back to reading
+ * the files directly. */
+export function generateVaultIndex(vaultPath: string, rows?: VaultIndexRow[]): void {
   const entitiesDir = join(vaultPath, kindDir('entity'))
   const knowledgeDir = join(vaultPath, kindDir('knowledge'))
   const hasEntities = existsSync(entitiesDir)
   const hasKnowledge = existsSync(knowledgeDir)
   if (!hasEntities && !hasKnowledge) return
 
+  const docsFor = (kind: 'entity' | 'knowledge', dir: string) =>
+    rows ? fromRows(rows, kind) : scanParsed(dir)
+
   const lines = ['# Vault Index', '', '> Auto-generated by hafez. Do not edit manually.', '']
 
   if (hasEntities) {
     const byStatus = new Map<string, IndexEntry[]>()
-    for (const { slug, fm, body } of scanParsed(entitiesDir)) {
+    for (const { slug, fm, body } of docsFor('entity', entitiesDir)) {
       const status = fm.status ?? 'active'
       const list = byStatus.get(status) ?? []
       list.push({ slug, name: fm.name, summary: truncate(deriveSummary('entity', fm, body)), suffix: fm.type ?? 'entity' })
@@ -101,7 +172,7 @@ export function generateVaultIndex(vaultPath: string): void {
 
   if (hasKnowledge) {
     const entries: Array<IndexEntry & { domains: string[] }> = []
-    for (const { slug, fm, body } of scanParsed(knowledgeDir)) {
+    for (const { slug, fm, body } of docsFor('knowledge', knowledgeDir)) {
       entries.push({
         slug,
         name: fm.name,

@@ -146,6 +146,24 @@ describe('batch --dry-run', () => {
     expect(apply.stdout).toContain('Batch complete: 3 operations')
   })
 
+  // Same parity rule for the non-error disposition: a duplicate session is a
+  // skip in both phases, reported with the same sentence.
+  it('reports a duplicate session as a skip in both dry-run and apply', () => {
+    const input = JSON.stringify([{ op: 'create', kind: 'session', name: 'Parity Session 2026-08-07' }])
+    expect(runWithStdin(input, 'batch').exitCode).toBe(0)
+
+    const dry = runWithStdin(input, 'batch', '--dry-run')
+    expect(dry.exitCode).toBe(0)
+    expect(dry.stdout).toContain('Warning: op[0] session \'parity-session-2026-08-07\' already exists — op skipped')
+    expect(dry.stdout).not.toContain('Derived slugs:')
+
+    const apply = runWithStdin(input, 'batch')
+    expect(apply.exitCode).toBe(0)
+    const warn = (out: string) => out.split('\n').filter(l => l.startsWith('Warning: op['))
+    expect(warn(apply.stdout)).toEqual(warn(dry.stdout))
+    expect(apply.stdout).not.toContain('created:')
+  })
+
   it('rejects slug collisions at dry-run, including within the batch itself', () => {
     const input = JSON.stringify([
       { op: 'capture', name: 'Dup Note' },

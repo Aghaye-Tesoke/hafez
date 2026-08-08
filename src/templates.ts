@@ -1,28 +1,27 @@
 // src/templates.ts
 import type { EntityType, KnowledgeSubtype } from './types.js'
-import { SUBTYPE_SECTIONS } from './contracts.js'
+import { SUBTYPE_SECTIONS, DEFAULT_KNOWLEDGE_SUBTYPE, SESSION_SECTIONS, ENTITY_TYPES, getContract } from './contracts.js'
 
-const ITEM_TEMPLATES: Record<EntityType, string[]> = {
-  capture: ['## Notes'],
-  entity: ['## Context', '## Session Log'],
-  project: ['## Purpose', '## Goals', '## Session Log'],
-}
-
-export function bodyTemplate(type: EntityType, fields?: { purpose?: string; notes?: string }): string {
-  const sections = ITEM_TEMPLATES[type]
-  if (!sections) throw new Error(`Unknown item type: ${type}`)
+/** Render a body from a section list, injecting each field's text under the
+ * section that field writes into (contracts.CREATE_FIELD_SECTIONS names the
+ * pairs; a field whose section this template lacks is rejected upstream by
+ * `unreachableFields`, so an unplaced value never reaches here). */
+function render(sections: string[], content: Record<string, string | undefined>): string {
   const lines: string[] = []
   for (const section of sections) {
-    lines.push(section)
-    if (section === '## Purpose' && fields?.purpose) {
-      lines.push('', fields.purpose)
-    }
-    if (section === '## Notes' && fields?.notes) {
-      lines.push('', fields.notes)
-    }
+    lines.push(`## ${section}`)
+    const text = content[section]
+    if (text) lines.push('', text)
     lines.push('')
   }
   return lines.join('\n')
+}
+
+export function bodyTemplate(type: EntityType, fields?: { purpose?: string; notes?: string }): string {
+  // The template IS the contract's default sections — the Document module
+  // derives its structural set from the same place, so the two can't drift.
+  if (!(ENTITY_TYPES as readonly string[]).includes(type)) throw new Error(`Unknown item type: ${type}`)
+  return render(getContract(type).defaultSections, { Purpose: fields?.purpose, Notes: fields?.notes })
 }
 
 export function knowledgeBodyTemplate(subtype?: KnowledgeSubtype, fields?: { synthesis?: string }): string {
@@ -32,14 +31,15 @@ export function knowledgeBodyTemplate(subtype?: KnowledgeSubtype, fields?: { syn
       "Use batch kind: 'session' instead. See knowledge-v2 migration."
     )
   }
-  const sections = SUBTYPE_SECTIONS[subtype ?? 'insight']
-  const lines: string[] = []
-  for (const section of sections) {
-    lines.push(`## ${section}`)
-    if ((section === 'Synthesis' || section === 'Summary') && fields?.synthesis) {
-      lines.push('', fields.synthesis)
-    }
-    lines.push('')
-  }
-  return lines.join('\n')
+  // 'Summary' was a second injection target here until sessions stopped being
+  // a knowledge subtype; no SUBTYPE_SECTIONS entry has carried it since — the
+  // session body is its own template below.
+  return render(SUBTYPE_SECTIONS[subtype ?? DEFAULT_KNOWLEDGE_SUBTYPE], { Synthesis: fields?.synthesis })
+}
+
+/** Session bodies. Sessions have no TypeContract, but their headings are
+ * structural for Document splitting — so the list lives in contracts with
+ * every other section set, and this renders it. */
+export function sessionBodyTemplate(fields?: { synthesis?: string }): string {
+  return render([...SESSION_SECTIONS], { Summary: fields?.synthesis })
 }

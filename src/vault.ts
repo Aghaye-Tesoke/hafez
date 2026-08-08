@@ -1,7 +1,7 @@
 // src/vault.ts
 import matter from 'gray-matter'
 import yaml from 'js-yaml'
-import { readFileSync, readdirSync } from 'fs'
+import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join } from 'path'
 import { HafezError } from './types.js'
 import type { ParsedVaultFile, EntityFrontmatter, KnowledgeFrontmatter, SessionFrontmatter } from './types.js'
@@ -88,16 +88,45 @@ export function resolveFilePath(vaultPath: string, slug: string, kind: VaultKind
   return join(vaultPath, KIND_DIRS[kind], `${slug}.md`)
 }
 
+/** The file a slug names, or null — entities are resolved before knowledge,
+ * the one resolution order every operation sees. */
+export function findVaultFile(vaultPath: string, slug: string): string | null {
+  const entity = resolveFilePath(vaultPath, slug, 'entity')
+  if (existsSync(entity)) return entity
+  const knowledge = resolveFilePath(vaultPath, slug, 'knowledge')
+  if (existsSync(knowledge)) return knowledge
+  return null
+}
+
+/** Does this slug name a vault file? An invalid slug definitionally doesn't
+ * exist — reference checks (create parent/related, link targets, validate)
+ * must report "does not exist", not crash. validate() in particular exists to
+ * REPORT malformed refs. */
+export function vaultFileExists(vaultPath: string, slug: string): boolean {
+  try { return findVaultFile(vaultPath, slug) !== null } catch { return false }
+}
+
 // Separator-agnostic: OS paths use '/' or '\' depending on platform, and a
 // POSIX-only check silently classifies every entity as knowledge on Windows
 // (all updates then fail on kind rules). Exported pure so win32 paths are
 // unit-testable from any platform.
+// The DEEPEST kind-dir occurrence wins: the in-vault dir is always deeper
+// than any ancestor, so a vault living under a directory named 'entities'
+// (e.g. ~/data/entities/myvault) can't shadow its knowledge/ files.
 export function kindFromPath(filePath: string): 'entity' | 'knowledge' {
-  return /[/\\]entities[/\\]/.test(filePath) ? 'entity' : 'knowledge'
+  const lastMatch = (dir: string): number => {
+    let idx = -1
+    for (const m of filePath.matchAll(new RegExp(`[/\\\\]${dir}[/\\\\]`, 'g'))) idx = m.index
+    return idx
+  }
+  return lastMatch(KIND_DIRS.entity) > lastMatch(KIND_DIRS.knowledge) ? 'entity' : 'knowledge'
 }
 
-// Fields that must always be arrays when present (may be scalar in hand-edited YAML)
-const ARRAY_FIELDS = ['related', 'tags', 'domain']
+/** Fields that must always be arrays when present (may be scalar in
+ * hand-edited YAML). Parsing coerces them here; merge.ts unions them on
+ * conflict — one list, so a new list-valued field cannot be normalized on
+ * read and then overwritten wholesale on merge. */
+export const ARRAY_FIELDS = ['related', 'tags', 'domain']
 
 function normalizeFrontmatter(fm: Record<string, any>): Record<string, any> {
   for (const field of ARRAY_FIELDS) {
@@ -116,6 +145,17 @@ function normalizeFrontmatter(fm: Record<string, any>): Record<string, any> {
 export function vaultKindFromPath(filePath: string): VaultKind {
   if (new RegExp(`[/\\\\]${KIND_DIRS.session}[/\\\\][^/\\\\]+$`).test(filePath)) return 'session'
   return kindFromPath(filePath)
+}
+
+/** Total kind classification for a vault-relative content file (anything
+ * matching VAULT_FILE_RE) — derived from KIND_DIRS, so adding a vault dir
+ * can't silently fall a new kind through to the wrong one. Throws on paths
+ * outside the vault dirs; callers gate on VAULT_FILE_RE first. */
+export function vaultKindFromRelPath(relPath: string): VaultKind {
+  for (const [kind, dir] of Object.entries(KIND_DIRS) as Array<[VaultKind, string]>) {
+    if (relPath.startsWith(`${dir}/`)) return kind
+  }
+  throw new HafezError('VALIDATION_FAILED', `Not a vault content path: ${relPath}`)
 }
 
 export function parseFilePath(path: string): ParsedVaultFile {

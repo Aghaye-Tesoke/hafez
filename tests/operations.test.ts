@@ -155,10 +155,10 @@ describe('update', () => {
   it('rejects invalid enum values on the direct update path (batch already did)', async () => {
     const os = makeOS()
     await expect(os.update('test-project', { status: 'bananas' as any }))
-      .rejects.toThrow(/Invalid status/)
+      .rejects.toThrow(/invalid shape at fields\.status/)
     const noteSlug = await os.create('knowledge', 'Enum Guard Note', { synthesis: 'Initial' })
     await expect(os.update(noteSlug, { confidence: 'bogus' as any }))
-      .rejects.toThrow(/Invalid confidence/)
+      .rejects.toThrow(/invalid shape at fields\.confidence/)
     // The invalid value never lands in frontmatter
     const { frontmatter } = parseFilePath(join(VAULT, 'entities/test-project.md'))
     expect(frontmatter.status).not.toBe('bananas')
@@ -591,5 +591,118 @@ describe('batch session log archival (parity with single-op update)', () => {
     const last = journal.commits.at(-1)!
     expect(last.message).toBe('batch: 10 operations')
     expect(last.written).toContain('entities/archive/batch-archive-test-log.md')
+  })
+})
+
+describe('Spine strictness (direct path = batch path)', () => {
+  it('rejects unknown fields on direct update instead of silently dropping them', async () => {
+    const { os, journal } = makeOSWithJournal()
+    await expect(os.update('test-project', { brife: 'typo' } as any))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED' })
+    expect(journal.commits).toHaveLength(0)
+  })
+
+  it('rejects an invalid subtype on direct knowledge create', async () => {
+    const os = makeOS()
+    await expect(os.create('knowledge', 'Bad Subtype Direct', { subtype: 'bogus' as any }))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED' })
+    expect(existsSync(join(VAULT, 'knowledge/bad-subtype-direct.md'))).toBe(false)
+  })
+
+  it('single-op commits carry per-op messages, not batch messages', async () => {
+    const { os, journal } = makeOSWithJournal()
+    await os.update('test-project', { brief: 'spine message check' })
+    expect(journal.commits.at(-1)?.message).toBe('update: test-project')
+  })
+
+  it('a missing slug outranks field-shape errors: NOT_FOUND, not VALIDATION_FAILED', async () => {
+    const os = makeOS()
+    // Both problems at once — the direct path always surfaced NOT_FOUND
+    // first, and scripts branch on its exit code.
+    await expect(os.update('no-such-slug-xyz', { status: 'bananas' as any }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+
+  it('a duplicate session create surfaces SLUG_EXISTS, not a generic validation error', async () => {
+    // TS overloads and the CLI block create('session'), but the runtime
+    // passes kind through verbatim for untyped JS callers; the duplicate is
+    // reported as a non-thrown per-op error result, which the single-op
+    // unwrap must surface under its own error class.
+    const os = makeOS()
+    await (os.create as any)('session', 'Spine Session Dup', {})
+    await expect((os.create as any)('session', 'Spine Session Dup', {}))
+      .rejects.toMatchObject({ code: 'SLUG_EXISTS' })
+  })
+})
+
+describe('kind-union section binding (write-path deletion safety)', () => {
+  it('plan sections survive a synthesis rewrite on a knowledge note with no persisted subtype', async () => {
+    const os = makeOS()
+    await os.create('knowledge', 'Planish Note', { synthesis: 'original' })
+    const fp = join(VAULT, 'knowledge/planish-note.md')
+    // Hand edits (or pre-subtype files) carry plan sections without a
+    // persisted subtype — an adjacent rewrite must not swallow them.
+    writeFileSync(fp, readFileSync(fp, 'utf-8') + '\n## Goal\n\nship it\n\n## Steps\n\n- step one\n')
+    await os.update('planish-note', { synthesis: 'REPLACED' })
+    const { body } = parseFilePath(fp)
+    expect(body).toContain('REPLACED')
+    expect(body).not.toContain('original')
+    expect(body).toContain('## Goal')
+    expect(body).toContain('ship it')
+    expect(body).toContain('- step one')
+  })
+
+  it('a cross-type section a merge preserved survives subsequent updates', async () => {
+    const os = makeOS()
+    await os.create('entity', 'Merged Project', { type: 'project', purpose: 'p' })
+    const fp = join(VAULT, 'entities/merged-project.md')
+    // Simulate the post-merge state: a promote race merged in the capture
+    // side's Notes; the heading is outside the project contract but must
+    // stay structural for every later write.
+    writeFileSync(fp, readFileSync(fp, 'utf-8') + '\n## Notes\n\nremote capture notes\n')
+    await os.update('merged-project', { brief: 'first' })
+    await os.update('merged-project', { brief: 'second' })
+    const { body } = parseFilePath(fp)
+    expect(body).toContain('## Notes')
+    expect(body).toContain('remote capture notes')
+    expect(body).toContain('second')
+  })
+})
+
+describe('promote (memory journal)', () => {
+  it('promotes capture → entity with Notes → Context rename and a log entry', async () => {
+    const { os, journal } = makeOSWithJournal()
+    await os.capture('Spine Promote One', 'raw notes here')
+    const slug = await os.promote('spine-promote-one', 'entity')
+    expect(slug).toBe('spine-promote-one')
+    const { frontmatter, body } = parseFilePath(join(VAULT, 'entities/spine-promote-one.md'))
+    expect(frontmatter.type).toBe('entity')
+    expect(body).toContain('## Context')
+    expect(body).toContain('Promoted from capture to entity')
+    expect(journal.commits.at(-1)?.message).toBe('promote: spine-promote-one capture → entity')
+  })
+
+  it('promotes capture → knowledge as a move: knowledge written, entity deleted', async () => {
+    const { os, journal } = makeOSWithJournal()
+    await os.capture('Spine Promote Two', 'insight material')
+    await os.promote('spine-promote-two', 'knowledge')
+    expect(existsSync(join(VAULT, 'knowledge/spine-promote-two.md'))).toBe(true)
+    expect(existsSync(join(VAULT, 'entities/spine-promote-two.md'))).toBe(false)
+    const commit = journal.commits.at(-1)!
+    expect(commit.written).toContain('knowledge/spine-promote-two.md')
+    expect(commit.deleted).toContain('entities/spine-promote-two.md')
+  })
+
+  it('rejects an invalid promotion path with VALIDATION_FAILED', async () => {
+    const os = makeOS()
+    await os.create('entity', 'Spine Promote Proj', { type: 'project' })
+    await expect(os.promote('spine-promote-proj', 'entity'))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED' })
+  })
+
+  it('promote of a missing slug throws NOT_FOUND', async () => {
+    const os = makeOS()
+    await expect(os.promote('no-such-slug-xyz', 'entity'))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' })
   })
 })

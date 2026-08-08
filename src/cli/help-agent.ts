@@ -149,6 +149,30 @@ function renderDigestSection(): string {
   return lines.join('\n')
 }
 
+const UPGRADE_SECTION = `## Upgrading hafez itself
+
+\`hafez upgrade\` — checks whether the installed hafez is outdated and prints
+the steps. It NEVER installs: the steps install code and overwrite the user's
+agent instructions, so show them verbatim, get an explicit yes, and only then
+run them. Re-run to verify. Every check outcome exits 0 — being outdated is a
+report, not a gate — so read the output, not the exit code. A non-zero exit
+means the invocation was wrong (exit 2, \`upgrade\` takes no arguments), never
+that a check failed. Not to be confused with \`hafez update\`, which updates
+an entity.
+
+\`--json\` keys: current, latest (null when unverified), comparison
+(behind|equal|ahead|unknown), registryReachable, npmMajor, install
+(registry|dev-checkout), skill (present|absent), skillSource, skillTarget,
+alternativeInstall, steps. \`steps\` is the action list in execution order;
+\`kind: 'command'\` entries are executable, \`kind: 'action'\` entries are
+prose — do not shell out to them. \`alternativeInstall\` is mutually exclusive
+with the install command in \`steps\`; never run both.
+
+Checks the npm registry only (override with \`HAFEZ_REGISTRY_URL\`), so a
+just-cut GitHub Release can read as \`equal\` until it is published.
+
+`
+
 const FOOTER = `## Lookup pointers
 
 - \`hafez schema\`                      — list all ops
@@ -188,6 +212,7 @@ export function renderAgentHelp(): string {
     '',
     EXIT_CODES_SECTION,
     '',
+    UPGRADE_SECTION,
     FOOTER,
   ].join('\n')
 }
