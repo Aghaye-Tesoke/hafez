@@ -6,8 +6,8 @@
 // exit-code → stdout surface.
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
-import { COMMANDS, EXIT_CODES, USAGE, exitCodeFor, extractGlobalFlags, isBindingsFailure } from '../src/cli/index.js'
-import { UsageError } from '../src/cli/args.js'
+import { COMMANDS, EXIT_CODES, EXIT_TABLE, USAGE, exitCodeFor, extractGlobalFlags, isBindingsFailure } from '../src/cli/index.js'
+import { HelpRequest, RenderedError, UsageError } from '../src/cli/args.js'
 import { HafezError } from '../src/types.js'
 
 // The dispatch module is loaded on every single invocation, so what it
@@ -25,7 +25,7 @@ describe('CLI startup stays lazy', () => {
   })
 
   it('every heavy module is reached through a dynamic import', () => {
-    for (const heavy of ['../index.js', './commands.js', './commands-schema.js', './help-agent.js', './onboard.js', './resolve-vault.js', './upgrade.js']) {
+    for (const heavy of ['../index.js', './commands.js', './commands-schema.js', '../surfaces/surfaces.js', './onboard.js', './resolve-vault.js', './upgrade.js']) {
       expect(staticImports, `${heavy} must stay lazy`).not.toContain(heavy)
       expect(source, `${heavy} must be dynamically imported`).toContain(`import('${heavy}')`)
     }
@@ -52,6 +52,50 @@ describe('exit-code contract', () => {
     expect(exitCodeFor(new HafezError('BOGUS' as any, 'x'))).toBe(1)
     expect(exitCodeFor(new Error('boom'))).toBe(1)
     expect(exitCodeFor('not even an error')).toBe(1)
+  })
+
+  it('a command help request exits 0 (#32)', () => {
+    expect(exitCodeFor(new HelpRequest('Usage: hafez read <slug>'))).toBe(0)
+  })
+
+  it('a rendered failure exits by its code', () => {
+    expect(exitCodeFor(new RenderedError('NOT_FOUND', 'Error: x', 'stderr'))).toBe(1)
+    expect(exitCodeFor(new RenderedError('VALIDATION_FAILED', '{}', 'stdout'))).toBe(2)
+  })
+})
+
+// #89: exit codes are documented in `hafez --help`, printed from the same
+// table the adapter maps through. Parse the printed list back out and hold
+// it to the table — and the table to every code the adapter can produce.
+describe('exit codes in hafez --help', () => {
+  const printed = (() => {
+    const block = USAGE.split('\nExit codes:\n')[1]?.split('\n\n')[0] ?? ''
+    return block.split('\n').filter(Boolean).map(line => {
+      const m = line.match(/^ {2}(\d+) {2}(.+)$/)
+      if (!m) throw new Error(`unparseable exit-code line: ${JSON.stringify(line)}`)
+      return { exit: Number(m[1]), meaning: m[2] }
+    })
+  })()
+
+  it('prints every row of the table, in order, with its meaning', () => {
+    expect(printed).toEqual(EXIT_TABLE.map(({ exit, meaning }) => ({ exit, meaning })))
+  })
+
+  it('the table lists every exit the adapter can produce', () => {
+    const listed = new Set(EXIT_TABLE.map(r => r.exit))
+    const produced = [
+      0, // success
+      4, // mutate succeeded, auto-sync failed (main)
+      exitCodeFor(new UsageError('x')),
+      exitCodeFor(new Error('x')),
+      ...Object.keys(EXIT_CODES).map(code => exitCodeFor(new HafezError(code as any, 'x'))),
+    ]
+    for (const exit of produced) expect(listed, `exit ${exit} is undocumented`).toContain(exit)
+  })
+
+  it('each exit is listed once', () => {
+    const exits = EXIT_TABLE.map(r => r.exit)
+    expect(new Set(exits).size).toBe(exits.length)
   })
 })
 
@@ -101,7 +145,7 @@ describe('the dispatch table covers every command', () => {
       .filter(([, s]) => s.phase === 'vault' && s.mutating)
       .map(([n]) => n)
       .sort()
-    expect(mutating).toEqual(['batch', 'capture', 'create', 'link', 'promote', 'unlink', 'update'])
+    expect(mutating).toEqual(['batch', 'capture', 'create', 'delete', 'link', 'promote', 'unlink', 'update'])
   })
 
   it('export dispatches from the table like any other command', () => {

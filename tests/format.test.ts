@@ -128,8 +128,8 @@ describe('formatKnowledgeHeader description', () => {
 describe('formatQueryTable', () => {
   it('renders entity results as markdown table', () => {
     const result = formatQueryTable([
-      { slug: 'proj-a', name: 'Project A', type: 'project', status: 'active', last_touched: '2026-03-14', next_action: 'Do thing', next_action_count: 1, parent: null, related: [] },
-      { slug: 'proj-b', name: 'Project B', type: 'entity', status: 'paused', last_touched: '2026-03-01', next_action: null, next_action_count: 0, parent: 'proj-a', related: ['proj-a'] },
+      { slug: 'proj-a', name: 'Project A', type: 'project', status: 'active', next_action: 'Do thing', next_action_count: 1 },
+      { slug: 'proj-b', name: 'Project B', type: 'entity', status: 'paused', next_action: null, next_action_count: 0 },
     ])
     expect(result).toContain('| slug ')
     expect(result).toContain('| proj-a |')
@@ -139,7 +139,7 @@ describe('formatQueryTable', () => {
 
   it('shows +N more when next_action_count > 1', () => {
     const result = formatQueryTable([
-      { slug: 'proj-a', name: 'Project A', type: 'project', status: 'active', last_touched: '2026-03-14', next_action: 'First action', next_action_count: 3, parent: null, related: [] },
+      { slug: 'proj-a', name: 'Project A', type: 'project', status: 'active', next_action: 'First action', next_action_count: 3 },
     ])
     expect(result).toContain('First action (+2 more)')
   })
@@ -153,7 +153,7 @@ describe('formatQueryTable', () => {
 describe('formatKnowledgeTable', () => {
   it('renders knowledge results as markdown table', () => {
     const result = formatKnowledgeTable([
-      { slug: 'tdd-pattern', name: 'TDD Pattern', domain: ['engineering'], confidence: 'pattern', related: [], reinforcement_count: 3, last_reinforced: '2026-03-10' },
+      { slug: 'tdd-pattern', name: 'TDD Pattern', domain: ['engineering'], confidence: 'pattern', reinforcement_count: 3 },
     ])
     expect(result).toContain('| slug ')
     expect(result).toContain('| tdd-pattern |')
@@ -196,7 +196,7 @@ describe('formatSearchResults', () => {
 describe('formatValidation', () => {
   it('renders clean report', () => {
     const result = formatValidation({
-      broken_slugs: [], orphaned_knowledge: [], oversized_related: [], missing_fields: [],
+      broken_slugs: [], orphaned_knowledge: [], missing_fields: [],
       total_entities: 10, total_knowledge: 5,
     })
     expect(result).toContain('Vault OK')
@@ -208,7 +208,6 @@ describe('formatValidation', () => {
     const result = formatValidation({
       broken_slugs: [{ slug: 'x', field: 'parent', issue: 'not found' }],
       orphaned_knowledge: ['lonely'],
-      oversized_related: [{ slug: 'y', field: 'related', issue: '6 items' }],
       missing_fields: [{ slug: 'z', field: 'name', issue: 'missing required field' }],
       total_entities: 10, total_knowledge: 5,
     })
@@ -216,14 +215,13 @@ describe('formatValidation', () => {
     expect(result).toContain('x: not found')
     expect(result).toContain('Orphaned Knowledge')
     expect(result).toContain('lonely')
-    expect(result).toContain('Oversized Related')
     expect(result).toContain('Missing Fields')
   })
 
   it('does not say Vault OK when there are issues', () => {
     const result = formatValidation({
       broken_slugs: [{ slug: 'x', field: 'parent', issue: 'not found' }],
-      orphaned_knowledge: [], oversized_related: [], missing_fields: [],
+      orphaned_knowledge: [], missing_fields: [],
       total_entities: 10, total_knowledge: 5,
     })
     expect(result).not.toContain('Vault OK')

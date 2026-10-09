@@ -10,8 +10,9 @@ import { execFileSync } from 'child_process'
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 import { serializeFile } from '../src/vault.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-dry-run-test-' + Date.now())
 const BARE = join(TMP, 'remote.git')
@@ -22,7 +23,6 @@ function runWithStdin(stdinInput: string, ...args: string[]): { stdout: string; 
   try {
     const stdout = execFileSync('node', [CLI, '--vault', VAULT, ...args], {
       encoding: 'utf-8',
-      stderr: 'pipe',
       input: stdinInput,
     }) as string
     return { stdout, stderr: '', exitCode: 0 }
@@ -42,7 +42,7 @@ beforeAll(async () => {
   await simpleGit().clone(BARE, VAULT)
   mkdirSync(join(VAULT, 'entities'), { recursive: true })
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDay()
   writeFileSync(
     join(VAULT, 'entities', 'test-proj.md'),
     serializeFile(

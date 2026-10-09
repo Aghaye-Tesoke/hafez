@@ -8,7 +8,7 @@
 // Every semantic gate lives here and runs exactly once, in the validate phase.
 // Apply assumes the payload it receives passed these checks.
 import { z } from 'zod'
-import type { BatchOperation, CreateEntityFields, CreateKnowledgeFields, KnowledgeSubtype, SessionLogEntry, UpdateFields } from './types.js'
+import type { BatchOperation, CreateEntityFields, CreateKnowledgeFields, DeletableKind, KnowledgeSubtype, SessionLogEntry, UpdateFields } from './types.js'
 import {
   ALIAS_KEYS,
   ENTITY_TYPES,
@@ -29,13 +29,6 @@ import { HafezError } from './types.js'
 // (not silently dropped), which is load-bearing for the error-formatter's did-you-mean
 // hints and for catching typos like `{"kind": "parent"}` on a link op.
 
-export const SessionLogSchema = z.object({
-  type: z.enum([...SESSION_LOG_TYPES] as [string, ...string[]]),
-  summary: z.string(),
-  body: z.string().optional(),
-  agent: z.string(),
-}).strict()
-
 // Body-section text must have text after trimming. An empty or whitespace-only
 // value (an agent expanding an unset variable) used to sail through the shape —
 // on the action/evidence fields it was dropped by a truthiness guard in apply
@@ -51,23 +44,39 @@ export const SessionLogSchema = z.object({
 // stored text.
 const nonEmptyText = z.string().trim().min(1, 'must contain text — an empty value is rejected, never silently dropped')
 
+// A list field (domain, tags, related) takes a string[] or, like the CLI's
+// list flags (`--domain "a,b"`), one comma string. The split is the one rule
+// for both paths — the CLI's `splitList` calls it — so `"a, b"` is the same
+// two values everywhere (#33).
+export const splitCommaList = (value: string): string[] => value.split(',').map(s => s.trim()).filter(Boolean)
+const stringList = z.preprocess(v => typeof v === 'string' ? splitCommaList(v) : v, z.array(z.string()))
+
+export const SessionLogSchema = z.object({
+  type: z.enum([...SESSION_LOG_TYPES] as [string, ...string[]]),
+  summary: z.string(),
+  body: nonEmptyText.optional(),
+  agent: z.string(),
+}).strict()
+
 export const UpdateFieldsSchema = z.object({
   status: z.enum([...ENTITY_STATUSES] as [string, ...string[]]).optional(),
   current_state: nonEmptyText.optional(),
   session_log: SessionLogSchema.optional(),
+  agent: nonEmptyText.optional(),     // entity-only; names the agent on the added session log entry
   brief: z.string().nullable().optional(),
   add_action: nonEmptyText.optional(),
   add_actions: z.array(nonEmptyText).optional(),
   complete_action: nonEmptyText.optional(),
   remove_action: nonEmptyText.optional(),
   clear_actions: z.boolean().optional(),
+  parent: z.string().optional(),     // entity-only; the slug must exist, no cycle
   // Knowledge metadata
   description: z.string().nullable().optional(),
   resource: z.string().nullable().optional(),
-  domain: z.array(z.string()).optional(),
+  domain: stringList.optional(),
   confidence: z.enum([...CONFIDENCE_LEVELS] as [string, ...string[]]).optional(),
-  tags: z.array(z.string()).optional(),
-  related: z.array(z.string()).optional(),
+  tags: stringList.optional(),
+  related: stringList.optional(),
   synthesis: nonEmptyText.optional(),
   insight: nonEmptyText.optional(),   // alias for synthesis (normalized by normalizeAliases)
   add_evidence: nonEmptyText.optional(),
@@ -79,10 +88,10 @@ export const CreateEntityFieldsSchema = z.object({
   purpose: nonEmptyText.optional(),
   description: z.string().optional(),
   resource: z.string().optional(),
-  domain: z.array(z.string()).optional(),
+  domain: stringList.optional(),
   parent: z.string().optional(),
-  related: z.array(z.string()).optional(),
-  tags: z.array(z.string()).optional(),
+  related: stringList.optional(),
+  tags: stringList.optional(),
   brief: nonEmptyText.optional(),
   add_action: nonEmptyText.optional(),
   add_actions: z.array(nonEmptyText).optional(),
@@ -93,19 +102,20 @@ export const CreateKnowledgeFieldsSchema = z.object({
   // Plan-only: insights have no lifecycle, so the semantic check rejects
   // status on any other subtype (the shape only pins the allowed values).
   status: z.enum([...PLAN_STATUSES] as [string, ...string[]]).optional(),
+  confidence: z.enum([...CONFIDENCE_LEVELS] as [string, ...string[]]).optional(),
   synthesis: nonEmptyText.optional(),
   insight: nonEmptyText.optional(),
   description: z.string().optional(),
-  domain: z.array(z.string()).optional(),
-  related: z.array(z.string()).optional(),
-  tags: z.array(z.string()).optional(),
+  domain: stringList.optional(),
+  related: stringList.optional(),
+  tags: stringList.optional(),
   'session-date': z.string().optional(),
 }).strict()
 
 export const CreateSessionFieldsSchema = z.object({
   synthesis: nonEmptyText.optional(),
   insight: nonEmptyText.optional(),
-  related: z.array(z.string()).optional(),
+  related: stringList.optional(),
   'session-date': z.string().optional(),
 }).strict()
 
@@ -133,6 +143,18 @@ const CreateSessionBranch = z.object({
   name: z.string(),
   fields: CreateSessionFieldsSchema.optional(),
 }).strict()
+
+/** Update fields the mechanised session log neither counts nor names:
+ * ticking a box is not history worth an entry, and `agent` only names it. */
+const UNLOGGED_FIELDS = new Set<keyof UpdateFields>(['add_action', 'add_actions', 'complete_action', 'remove_action', 'clear_actions', 'agent'])
+
+/** The fields an update's mechanised session log entry names — empty when
+ * the update earns none. Shared by the update check (which rejects an
+ * `agent` with no entry to name) and the Apply update arm (which writes it). */
+export function loggedFields(fields: UpdateFields): (keyof UpdateFields)[] {
+  return (Object.keys(fields) as (keyof UpdateFields)[])
+    .filter(f => fields[f] !== undefined && !UNLOGGED_FIELDS.has(f))
+}
 
 const UpdateBranch = z.object({
   op: z.literal('update'),
@@ -166,6 +188,13 @@ const PromoteBranch = z.object({
   target: z.enum(['entity', 'project', 'knowledge']),
 }).strict()
 
+// No `kind`: the slug alone says what is being deleted, the same as
+// `hafez delete <slug>`. The check resolves it and rejects an entity.
+const DeleteBranch = z.object({
+  op: z.literal('delete'),
+  slug: z.string(),
+}).strict()
+
 // Nested discriminated union: outer on `op`, inner on `kind` for create branch.
 // A flat `discriminatedUnion('op', [...])` cannot work because three branches share
 // op=create — Zod requires unique discriminator values per branch and throws at
@@ -185,6 +214,7 @@ export const BatchOperationSchema = z.discriminatedUnion('op', [
   LinkBranch,
   UnlinkBranch,
   PromoteBranch,
+  DeleteBranch,
 ])
 
 // --- Alias normalization ---
@@ -242,6 +272,13 @@ export interface ResolvedTarget {
   subtype?: KnowledgeSubtype
 }
 
+/** The frontmatter links `validate` checks: what makes one file a referrer
+ * of another. */
+export interface FileLinks {
+  parent?: string
+  related?: string[]
+}
+
 /** Vault context handed to each spec's semantic check by validateBatchCore.
  * Simulation-aware: creates earlier in the batch count as existing. */
 export interface OpCheckContext {
@@ -250,6 +287,15 @@ export interface OpCheckContext {
   sessionExists(slug: string): boolean
   simulate(slug: string, info: ResolvedTarget): void
   simulateSession(slug: string): void
+  /** The parent/related a file carries after the earlier ops in the batch. */
+  linksOf(slug: string): FileLinks
+  /** Record the parent/related a file will carry after this op. Every op
+   * that changes a link calls it, so `referrers` sees the batch so far. */
+  simulateLinks(slug: string, links: FileLinks): void
+  /** Entities and knowledge notes whose parent or related names `slug`,
+   * after the earlier ops in the batch. A file never refers to itself. */
+  referrers(slug: string): string[]
+  simulateDelete(slug: string, kind: DeletableKind): void
   /** Kind gating is subtype-aware for knowledge: a plan carries `status`,
    * an insight does not (see contracts.SUBTYPE_STATUSES). */
   validateKindFields(kind: 'entity' | 'knowledge', fields: UpdateFields, subtype?: KnowledgeSubtype): void
@@ -325,6 +371,35 @@ function claimNew(
   return taken ? 'SLUG_EXISTS' : undefined
 }
 
+/** The link fields an update payload sets, or null when it sets none. */
+function linkFieldsOf(fields: UpdateFields): FileLinks | null {
+  const links: FileLinks = {}
+  if (fields.parent !== undefined) links.parent = fields.parent
+  if (fields.related !== undefined) links.related = fields.related
+  return Object.keys(links).length > 0 ? links : null
+}
+
+/** The parent chain `slug → parent → … → slug` that giving `slug` this
+ * parent closes, or null when the chain ends or loops without `slug`.
+ * Shared by the Op Spec checks (against the simulated batch) and
+ * `validateVault` (against the files). */
+export function parentCycle(slug: string, parent: string | undefined, parentOf: (s: string) => string | undefined): string[] | null {
+  const path = [slug]
+  const seen = new Set(path)
+  for (let p = parent; p !== undefined; p = parentOf(p)) {
+    path.push(p)
+    if (p === slug) return path
+    if (seen.has(p)) return null
+    seen.add(p)
+  }
+  return null
+}
+
+function parentCycleError(slug: string, parent: string, ctx: OpCheckContext): string | null {
+  const cycle = parentCycle(slug, parent, s => ctx.linksOf(s).parent)
+  return cycle ? `Parent '${parent}' would make a cycle: ${cycle.join(' → ')}` : null
+}
+
 // --- The table ---
 
 export interface OpSpec {
@@ -336,6 +411,9 @@ export interface OpSpec {
   description: string
   /** Optional fields force-included in the generated example payload. */
   exampleInclude: readonly string[]
+  /** The op's `slug` may name a session note as well as an entity or
+   * knowledge note. */
+  addressesSessions?: boolean
   check(op: any, ctx: OpCheckContext): OpCheckResult
 }
 
@@ -348,7 +426,7 @@ const OP_SPEC_ROWS = [
     name: 'update',
     op: 'update',
     schema: UpdateBranch,
-    description: 'Update an entity or knowledge note (status, brief, next actions, session log, synthesis, …). `insight` is an alias for `synthesis` (knowledge-only; ignored when `synthesis` is also given). On knowledge notes `status` is plan-subtype only (active|done); insights reject it.',
+    description: 'Update an entity or knowledge note (status, brief, next actions, session log, synthesis, …). Next Actions fields compose within one op as prune, tick, add: `clear_actions` → `remove_action` → `complete_action` → `add_action(s)` — queries match the list as it was before the op (two queries naming one line is an error), added lines land last, so `clear_actions` + `add_actions` rebuilds the list; `clear_actions` with a query field is rejected. Lines leaving the list (removed, cleared, pruned with an emptied section, ticked past nine, oldest first) move to the entity\'s archive log. A Handle of an open action (as `read` shows it, or any longer or shorter prefix of four or more hex that names only that line) names that line; anything else is a case-insensitive substring of the text. `parent` sets the parent link (entity-only; the slug must exist, and the parent chain must not lead back to the entity). `insight` is an alias for `synthesis` (knowledge-only; ignored when `synthesis` is also given). An entity update with no `session_log` gets a `progress` entry naming the fields written, unless its only fields are action fields; `agent` names the agent on it (entity-only, detected from the Harness when absent, rejected alongside `session_log`). On knowledge notes `status` is plan-subtype only (active|done); insights reject it.',
     exampleInclude: ['status'],
     check(op: Extract<BatchOperation, { op: 'update' }>, ctx) {
       const errors: string[] = []
@@ -358,6 +436,28 @@ const OP_SPEC_ROWS = [
       else {
         try { ctx.validateKindFields(target.kind, op.fields, target.subtype) } catch (err) { pushErr(errors, err) }
       }
+      // Statically contradictory: clear_actions runs first and empties the
+      // list, so any query in the same op would fail at apply time with a
+      // misleading "No matching action". Reject here, where the message can
+      // say why and land beside the batch's other errors. Entity targets
+      // only — on a knowledge note validateKindFields has already rejected
+      // the fields themselves, and a second error about their order is noise.
+      if (target?.kind === 'entity' && op.fields.clear_actions) {
+        const queries = (['remove_action', 'complete_action'] as const).filter(f => op.fields[f] !== undefined)
+        if (queries.length > 0) {
+          errors.push(`clear_actions empties the list before ${queries.join(' and ')} would run — drop the clear or use a separate op`)
+        }
+      }
+      // `agent` names the entry the Spine adds; with nothing added it would be
+      // dropped. Entity targets only — on a knowledge note validateKindFields
+      // has already rejected it as entity-only.
+      if (target?.kind === 'entity' && op.fields.agent !== undefined) {
+        if (op.fields.session_log) {
+          errors.push('agent names the session log entry added when session_log is absent — with session_log, set session_log.agent instead')
+        } else if (loggedFields(op.fields).length === 0) {
+          errors.push('agent names the session log entry, and an update of action fields alone writes none — drop agent')
+        }
+      }
       if (op.fields.session_log) {
         const logErrors = ctx.validateSessionLogEntry(op.fields.session_log)
         if (logErrors.length > 0) errors.push(`Invalid session log entry: ${logErrors.join('; ')}`)
@@ -366,6 +466,17 @@ const OP_SPEC_ROWS = [
         for (const r of op.fields.related) {
           if (!ctx.existsAnywhere(r)) errors.push(`Related slug '${r}' does not exist`)
         }
+      }
+      if (op.fields.parent !== undefined) {
+        if (!ctx.existsAnywhere(op.fields.parent)) errors.push(`Parent '${op.fields.parent}' does not exist`)
+        else if (target?.kind === 'entity') {
+          const cycle = parentCycleError(op.slug, op.fields.parent, ctx)
+          if (cycle) errors.push(cycle)
+        }
+      }
+      if (target) {
+        const links = linkFieldsOf(op.fields)
+        if (links) ctx.simulateLinks(op.slug, { ...ctx.linksOf(op.slug), ...links })
       }
       return { slug: op.slug, errors, primaryCode }
     },
@@ -382,6 +493,7 @@ const OP_SPEC_ROWS = [
       const slug = slugify(op.name)
       const primaryCode = claimNew(ctx, errors, slug, { kind: 'entity', type: op.fields.type },
         () => ctx.buildEntityFrontmatter(op.name, op.fields))
+      if (!primaryCode) ctx.simulateLinks(slug, { parent: op.fields.parent, related: op.fields.related })
       return { slug, errors, created: errors.length === 0, primaryCode }
     },
   },
@@ -390,7 +502,7 @@ const OP_SPEC_ROWS = [
     op: 'create',
     kind: 'knowledge',
     schema: CreateKnowledgeBranch,
-    description: 'Create a new knowledge note (insight / plan subtype). `insight` is an alias for `synthesis` (ignored when `synthesis` is also given). `status` (active|done) is plan-only; `synthesis` is insight-only — plan bodies are Goal/Steps/Dependencies, and a field whose section the subtype lacks is rejected, never dropped.',
+    description: 'Create a new knowledge note (insight / plan subtype). `confidence` defaults to observation. `insight` is an alias for `synthesis` (ignored when `synthesis` is also given). `status` (active|done) is plan-only; `synthesis` is insight-only — plan bodies are Goal/Steps/Dependencies, and a field whose section the subtype lacks is rejected, never dropped.',
     exampleInclude: ['subtype', 'synthesis'],
     check(op: Extract<BatchOperation, { op: 'create'; kind: 'knowledge' }>, ctx) {
       const errors: string[] = []
@@ -398,6 +510,7 @@ const OP_SPEC_ROWS = [
       const primaryCode = claimNew(ctx, errors, slug,
         { kind: 'knowledge', type: 'knowledge', subtype: op.fields?.subtype as KnowledgeSubtype | undefined },
         () => ctx.buildKnowledgeFrontmatter(op.name, (op.fields || {}) as CreateKnowledgeFields))
+      if (!primaryCode) ctx.simulateLinks(slug, { related: op.fields?.related })
       return { slug, errors, created: errors.length === 0, primaryCode }
     },
   },
@@ -441,6 +554,16 @@ const OP_SPEC_ROWS = [
       let primaryCode: OpCheckResult['primaryCode']
       if (!ctx.resolve(op.slug)) { errors.push(notFoundError(op.slug)); primaryCode = 'NOT_FOUND' }
       if (!ctx.existsAnywhere(op.target)) errors.push(`Target '${op.target}' does not exist`)
+      else if (!primaryCode && op.relation === 'parent') {
+        const cycle = parentCycleError(op.slug, op.target, ctx)
+        if (cycle) errors.push(cycle)
+      }
+      if (!primaryCode) {
+        const links = ctx.linksOf(op.slug)
+        ctx.simulateLinks(op.slug, op.relation === 'parent'
+          ? { ...links, parent: op.target }
+          : { ...links, related: [...(links.related ?? []).filter(r => r !== op.target), op.target] })
+      }
       return { slug: op.slug, errors, primaryCode }
     },
   },
@@ -454,6 +577,12 @@ const OP_SPEC_ROWS = [
       const errors: string[] = []
       let primaryCode: OpCheckResult['primaryCode']
       if (!ctx.resolve(op.slug)) { errors.push(notFoundError(op.slug)); primaryCode = 'NOT_FOUND' }
+      else {
+        const links = ctx.linksOf(op.slug)
+        ctx.simulateLinks(op.slug, op.relation === 'parent'
+          ? { ...links, parent: links.parent === op.target ? undefined : links.parent }
+          : { ...links, related: links.related?.filter(r => r !== op.target) })
+      }
       return { slug: op.slug, errors, primaryCode }
     },
   },
@@ -476,8 +605,41 @@ const OP_SPEC_ROWS = [
             errors.push(`Cannot promote ${currentType} to ${op.target}. Valid targets: ${contract.canPromoteTo.join(', ') || 'none (terminal type)'}`)
           } else {
             ctx.simulate(op.slug, op.target === 'knowledge' ? { kind: 'knowledge', type: 'knowledge' } : { kind: 'entity', type: op.target })
+            // A promoted knowledge note keeps related but not parent.
+            if (op.target === 'knowledge') ctx.simulateLinks(op.slug, { related: ctx.linksOf(op.slug).related })
           }
         } catch (err) { pushErr(errors, err) }
+      }
+      return { slug: op.slug, errors, primaryCode }
+    },
+  },
+  {
+    name: 'delete',
+    op: 'delete',
+    schema: DeleteBranch,
+    description: 'Delete a knowledge or session note. An entity is never deleted — retire it with `hafez update <slug> --status done`. Rejected while another entity or knowledge note links to the note (parent/related): unlink or re-point those first — an earlier op in the same batch counts.',
+    exampleInclude: [],
+    addressesSessions: true,
+    check(op: Extract<BatchOperation, { op: 'delete' }>, ctx) {
+      const errors: string[] = []
+      let primaryCode: OpCheckResult['primaryCode']
+      const target = ctx.resolve(op.slug)
+      const session = ctx.sessionExists(op.slug)
+      if (target?.kind === 'entity') {
+        errors.push(`'${op.slug}' is an entity (${target.type}) — an entity is never deleted; retire it with \`hafez update ${op.slug} --status done\``)
+      } else if (target && session) {
+        errors.push(`'${op.slug}' is ambiguous — it names both a knowledge note and a session note, and delete will not guess which`)
+      } else if (!target && !session) {
+        errors.push(notFoundError(op.slug)); primaryCode = 'NOT_FOUND'
+      } else {
+        // Only knowledge can be linked to: a parent/related slug must name an
+        // entity or knowledge note, never a session.
+        const referrers = target ? ctx.referrers(op.slug) : []
+        if (referrers.length > 0) {
+          errors.push(`'${op.slug}' is still linked from ${referrers.join(', ')} (parent/related) — unlink or re-point those first; an earlier op in the same batch counts`)
+        } else {
+          ctx.simulateDelete(op.slug, target ? 'knowledge' : 'session')
+        }
       }
       return { slug: op.slug, errors, primaryCode }
     },
@@ -513,6 +675,12 @@ export function slugBearingOpNames(): string[] {
       return shape !== undefined && 'slug' in shape
     })
     .map(s => s.op))]
+}
+
+/** Slug-bearing ops whose slug may name a session note — a missing entity
+ * or knowledge note alone is not NOT_FOUND for them. */
+export function sessionAddressingOpNames(): string[] {
+  return OP_SPECS.filter(s => s.addressesSessions).map(s => s.op)
 }
 
 /** Create kinds for error text — derived from the table. */

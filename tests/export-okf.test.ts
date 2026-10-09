@@ -1,7 +1,7 @@
 // tests/export-okf.test.ts
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { exportOkf } from '../src/export-okf.js'
-import { parseFilePath, parseContent, serializeFile } from '../src/vault.js'
+import { exportOkf, type OkfFrontmatter } from '../src/export-okf.js'
+import { parseContent, serializeFile } from '../src/vault.js'
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -31,6 +31,13 @@ function writeKnowledge(slug: string, fm: Record<string, any>, body = '## Synthe
   writeFileSync(join(vault, 'knowledge', `${slug}.md`), serializeFile(fm, body))
 }
 
+// An exported OKF document is not vault frontmatter (name→title, derived
+// timestamp), so it is read back as OkfFrontmatter, not through parseFilePath.
+function readOkf(path: string): { frontmatter: OkfFrontmatter; body: string } {
+  const { frontmatter, body } = parseContent(readFileSync(path, 'utf-8'))
+  return { frontmatter: frontmatter as OkfFrontmatter, body }
+}
+
 function writeSession(slug: string, fm: Record<string, any>, body = '## Summary\n\nSession summary line.\n') {
   writeFileSync(join(vault, 'sessions', `${slug}.md`), serializeFile(fm, body))
 }
@@ -54,7 +61,7 @@ describe('exportOkf frontmatter mapping', () => {
     expect(report.knowledge).toBe(1)
     expect(report.sessions).toBe(1)
 
-    const ent = parseFilePath(join(out, 'entities', 'proj.md')).frontmatter
+    const ent = readOkf(join(out, 'entities', 'proj.md')).frontmatter
     expect(ent.type).toBe('project')
     expect(ent.title).toBe('My Project')
     expect(ent.description).toBe('A project')
@@ -67,13 +74,13 @@ describe('exportOkf frontmatter mapping', () => {
     expect(ent.created).toBe('2026-01-01')
     expect(ent.name).toBeUndefined()
 
-    const kn = parseFilePath(join(out, 'knowledge', 'plan-note.md')).frontmatter
+    const kn = readOkf(join(out, 'knowledge', 'plan-note.md')).frontmatter
     expect(kn.type).toBe('knowledge/plan')
     expect(kn.title).toBe('Plan Note')
     expect(kn.timestamp).toBe('2026-03-03')
     expect(kn.confidence).toBe('pattern')
 
-    const ses = parseFilePath(join(out, 'sessions', 'session-a.md')).frontmatter
+    const ses = readOkf(join(out, 'sessions', 'session-a.md')).frontmatter
     expect(ses.type).toBe('session')
     expect(ses.timestamp).toBe('2026-01-09')
     expect(ses.description).toBe('Session summary line.')
@@ -82,7 +89,7 @@ describe('exportOkf frontmatter mapping', () => {
   it('exports knowledge without subtype under the insight default, matching the index', () => {
     writeKnowledge('bare-note', { name: 'Bare Note', created: '2026-01-01' })
     exportOkf(vault, out)
-    const kn = parseFilePath(join(out, 'knowledge', 'bare-note.md')).frontmatter
+    const kn = readOkf(join(out, 'knowledge', 'bare-note.md')).frontmatter
     expect(kn.type).toBe('knowledge/insight')
     expect(kn.description).toBe('Insight line.')
     expect(kn.timestamp).toBe('2026-01-01')
@@ -93,7 +100,7 @@ describe('exportOkf frontmatter mapping', () => {
       name: 'Briefed', type: 'entity', status: 'active', created: '2026-01-01', 'last-touched': '2026-01-01',
     }, '## Brief\n\nBrief first line.\nSecond line.\n\n## Session Log\n')
     exportOkf(vault, out)
-    const ent = parseFilePath(join(out, 'entities', 'briefed.md')).frontmatter
+    const ent = readOkf(join(out, 'entities', 'briefed.md')).frontmatter
     expect(ent.description).toBe('Brief first line.')
   })
 })
@@ -105,7 +112,7 @@ describe('exportOkf link rewriting', () => {
     writeEntity('beta', { name: 'Beta', type: 'entity', status: 'active', created: '2026-01-01', 'last-touched': '2026-01-01' })
 
     const report = exportOkf(vault, out)
-    const body = parseFilePath(join(out, 'entities', 'alpha.md')).body
+    const body = readOkf(join(out, 'entities', 'alpha.md')).body
     expect(body).toContain('[beta](/entities/beta.md)')
     expect(body).toContain('[the beta project](/entities/beta.md)')
     expect(report.unresolvedLinks).toBe(0)
@@ -118,7 +125,7 @@ describe('exportOkf link rewriting', () => {
     writeSession('some-session', { name: 'Some Session', created: '2026-01-01' })
 
     exportOkf(vault, out)
-    const body = parseFilePath(join(out, 'entities', 'linker.md')).body
+    const body = readOkf(join(out, 'entities', 'linker.md')).body
     expect(body).toContain('[some-note](/knowledge/some-note.md)')
     expect(body).toContain('[some-session](/sessions/some-session.md)')
   })
@@ -130,7 +137,7 @@ describe('exportOkf link rewriting', () => {
       'Points at [[dupe]].\n\n## Session Log\n')
 
     exportOkf(vault, out)
-    const body = parseFilePath(join(out, 'entities', 'pointer.md')).body
+    const body = readOkf(join(out, 'entities', 'pointer.md')).body
     expect(body).toContain('[dupe](/entities/dupe.md)')
     expect(body).not.toContain('/knowledge/dupe.md')
   })
@@ -141,7 +148,7 @@ describe('exportOkf link rewriting', () => {
     writeEntity('beta', { name: 'Beta', type: 'entity', status: 'active', created: '2026-01-01', 'last-touched': '2026-01-01' })
 
     const report = exportOkf(vault, out)
-    const body = parseFilePath(join(out, 'entities', 'spacer.md')).body
+    const body = readOkf(join(out, 'entities', 'spacer.md')).body
     expect(body).toContain('[beta](/entities/beta.md)')
     expect(body).toContain('[the beta project](/entities/beta.md)')
     expect(report.unresolvedLinks).toBe(0)
@@ -152,7 +159,7 @@ describe('exportOkf link rewriting', () => {
       'Mentions [[ghost]] and [[ghost|a ghost]].\n\n## Session Log\n')
 
     const report = exportOkf(vault, out)
-    const body = parseFilePath(join(out, 'entities', 'lonely.md')).body
+    const body = readOkf(join(out, 'entities', 'lonely.md')).body
     expect(body).toContain('Mentions ghost and a ghost.')
     expect(body).not.toContain('[[')
     expect(report.unresolvedLinks).toBe(2)
@@ -210,13 +217,13 @@ describe('exportOkf guards and edge cases', () => {
     // The vault doc lands under a disambiguated name, content intact
     const docPath = join(out, 'entities', 'index-doc.md')
     expect(existsSync(docPath)).toBe(true)
-    const doc = parseFilePath(docPath)
+    const doc = readOkf(docPath)
     expect(doc.frontmatter.title).toBe('Index Entity')
     expect(doc.body).toContain('Real content that must survive.')
 
     // Both the dir index and inbound links point at the renamed file
     expect(dirIndex).toContain('(/entities/index-doc.md)')
-    const pointer = parseFilePath(join(out, 'entities', 'pointer.md')).body
+    const pointer = readOkf(join(out, 'entities', 'pointer.md')).body
     expect(pointer).toContain('[index](/entities/index-doc.md)')
     expect(report.unresolvedLinks).toBe(0)
   })
@@ -226,8 +233,8 @@ describe('exportOkf guards and edge cases', () => {
     writeKnowledge('index-doc', { name: 'Index Doc Note', created: '2026-01-01' })
 
     exportOkf(vault, out)
-    expect(parseFilePath(join(out, 'knowledge', 'index-doc.md')).frontmatter.title).toBe('Index Doc Note')
-    expect(parseFilePath(join(out, 'knowledge', 'index-doc-2.md')).frontmatter.title).toBe('Index Note')
+    expect(readOkf(join(out, 'knowledge', 'index-doc.md')).frontmatter.title).toBe('Index Doc Note')
+    expect(readOkf(join(out, 'knowledge', 'index-doc-2.md')).frontmatter.title).toBe('Index Note')
   })
 
   it('exports an empty vault as root index.md only with zero counts', () => {
@@ -254,7 +261,7 @@ describe('exportOkf OKF v0.1 conformance', () => {
     for (const dir of ['entities', 'knowledge', 'sessions']) {
       for (const file of readdirSync(join(out, dir))) {
         if (file === 'index.md') continue
-        const { frontmatter } = parseFilePath(join(out, dir, file))
+        const { frontmatter } = readOkf(join(out, dir, file))
         expect(typeof frontmatter.type).toBe('string')
         expect(frontmatter.type.length).toBeGreaterThan(0)
       }
@@ -266,7 +273,8 @@ describe('exportOkf OKF v0.1 conformance', () => {
     }
 
     // Rule 3b: root index.md frontmatter is exactly { okf_version: '0.1' }
-    const root = parseFilePath(join(out, 'index.md'))
+    // The root index is not an OKF document (no type/title), so read it untyped.
+    const root = parseContent(readFileSync(join(out, 'index.md'), 'utf-8'))
     expect(root.frontmatter).toEqual({ okf_version: '0.1' })
     expect(root.body).toContain('[Entities](/entities/index.md)')
     expect(root.body).toContain('1 concepts')

@@ -1,13 +1,15 @@
 // src/index.ts
-import { parseFilePath, slugify, kindFromPath, kindDir, scanVaultDir, isIndexedRelPath, findVaultFile, vaultFileExists } from './vault.js'
+import { parseFilePath, slugify, kindFromPath, kindDir, isIndexedRelPath, findVaultFile, vaultFileExists, resolveFilePath, scanVaultDir, INDEXED_KINDS } from './vault.js'
 import { createGitJournal } from './git.js'
-import { validateEntityFrontmatter, validateKnowledgeFrontmatter, validateSessionLogEntry } from './schema.js'
+import { validateSessionLogEntry } from './schema.js'
+import { validateVault } from './validate.js'
 import { documentForFile } from './document.js'
 import { createIndex, type HafezIndex } from './db.js'
+import { closestSlugs } from './closest.js'
 import { generateVaultIndex } from './knowledge-index.js'
-import type { Hafez, HafezConfig, ReadDepth, ParsedFile, UpdateFields, CreateEntityFields, CreateKnowledgeFields, QueryFilter, EntityType, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, LinkRelation, ConfidenceLevel, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, BatchOpValidation, BatchValidationReport, SearchResult, VaultStats } from './types.js'
+import type { Hafez, HafezConfig, DeletableKind, ReadDepth, ParsedFile, UpdateFields, CreateEntityFields, CreateKnowledgeFields, QueryFilter, EntityType, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, LinkRelation, ConfidenceLevel, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, BatchOpValidation, BatchValidationReport, SearchResult, VaultStats } from './types.js'
 import { HafezError } from './types.js'
-import { BatchOperationSchema, specFor, slugBearingOpNames, notFoundError, normalizeOperations, opErrorLine, batchInvalidHeader, type OpCheckContext, type ResolvedTarget } from './batch-ops.js'
+import { BatchOperationSchema, specFor, slugBearingOpNames, sessionAddressingOpNames, notFoundError, normalizeOperations, opErrorLine, batchInvalidHeader, type OpCheckContext, type ResolvedTarget, type FileLinks } from './batch-ops.js'
 import { applyOperation, buildEntityFrontmatter, buildKnowledgeFrontmatter, validateKindFields, type AppliedOp } from './apply.js'
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs'
 import { join, basename } from 'path'
@@ -99,17 +101,20 @@ export function createHafez(config: HafezConfig): Hafez {
 
   async function read(slug: string, depth: ReadDepth = 'summary'): Promise<ParsedFile> {
     const filePath = findFile(slug)
-    if (!filePath) throw new HafezError('NOT_FOUND', `Entity or knowledge '${slug}' not found`)
+    if (!filePath) {
+      // A miss carries the closest slugs as its details: the recovery the
+      // `read` miss output renders (#91).
+      const closest = withIndex(idx => { idx.syncIfStale(); return closestSlugs(slug, idx.indexEntries()) }, [] as string[])
+      throw new HafezError('NOT_FOUND', `Entity or knowledge '${slug}' not found`, closest)
+    }
     const parsed = parseFilePath(filePath)
     // findFile only resolves the indexed kinds, so the session arm is unreachable
-    const kind = parsed.kind === 'session' ? 'knowledge' : parsed.kind
-    const frontmatter = parsed.frontmatter as ParsedFile['frontmatter']
-    const body = parsed.body
-    if (depth === 'frontmatter') return { kind, frontmatter, body: '' }
+    if (parsed.kind === 'session') throw new HafezError('NOT_FOUND', `Entity or knowledge '${slug}' not found`)
+    if (depth === 'frontmatter') return { ...parsed, body: '' }
     if (depth === 'summary') {
-      return { kind, frontmatter, body: documentForFile(parsed).bodyBeforeSessionLog(body) }
+      return { ...parsed, body: documentForFile(parsed).bodyBeforeSessionLog(parsed.body) }
     }
-    return { kind, frontmatter, body }
+    return parsed
   }
 
   function rollbackFiles(originals: Map<string, string | null>): void {
@@ -139,7 +144,7 @@ export function createHafez(config: HafezConfig): Hafez {
   // many under one commit. The failure policy is uniform: a commit-stage
   // failure rolls the written files back (nothing landed); a push-stage
   // failure keeps the local commit, indexes it, and surfaces the error.
-  type WriteAction = 'create' | 'capture' | 'update' | 'link' | 'unlink' | 'promote'
+  type WriteAction = 'create' | 'capture' | 'update' | 'link' | 'unlink' | 'promote' | 'delete'
 
   async function runMutations(
     operations: BatchOperation[],
@@ -292,7 +297,7 @@ export function createHafez(config: HafezConfig): Hafez {
 
   async function update(slug: string, fields: UpdateFields) {
     const { applied } = await runMutations([{ op: 'update', slug, fields }], { action: 'update' })
-    return { matched_action: applied[0].matchedAction }
+    return applied[0].updateResult ?? {}
   }
 
   async function link(slug: string, target: string, relation: LinkRelation): Promise<void> {
@@ -301,6 +306,11 @@ export function createHafez(config: HafezConfig): Hafez {
 
   async function unlink(slug: string, target: string, relation: LinkRelation): Promise<void> {
     await runMutations([{ op: 'unlink', slug, target, relation }], { action: 'unlink' })
+  }
+
+  async function del(slug: string): Promise<DeletableKind> {
+    const { applied } = await runMutations([{ op: 'delete', slug }], { action: 'delete' })
+    return applied[0].deletedKind!
   }
 
   // "Recent" with day-granularity dates: primary sort is the frontmatter day,
@@ -340,11 +350,30 @@ export function createHafez(config: HafezConfig): Hafez {
     // slug → what it would be after earlier ops in this batch
     const simulated = new Map<string, ResolvedTarget>()
     const simulatedSessions = new Set<string>()
-    const existsAnywhere = (slug: string) => simulated.has(slug) || exists(slug)
+    // Deletes earlier in the batch: the slug is absent to every later op, so
+    // delete-then-create of one slug is a rewrite, not a collision.
+    const deleted = new Set<string>()
+    const deletedSessions = new Set<string>()
+    // slug → its parent/related after the earlier ops; files absent here
+    // carry what is on disk.
+    const simulatedLinks = new Map<string, FileLinks>()
+    const existsAnywhere = (slug: string) => !deleted.has(slug) && (simulated.has(slug) || exists(slug))
+    const linksOf = (slug: string): FileLinks => {
+      const sim = simulatedLinks.get(slug)
+      if (sim) return sim
+      const fp = findFile(slug)
+      if (!fp) return {}
+      try {
+        const pf = parseFilePath(fp)
+        if (pf.kind === 'entity') return { parent: pf.frontmatter.parent, related: pf.frontmatter.related }
+        return { related: pf.frontmatter.related }
+      } catch { return {} }
+    }
 
     // Vault context for the Op Spec table's semantic checks (src/batch-ops.ts).
     const ctx: OpCheckContext = {
       resolve: (slug) => {
+        if (deleted.has(slug)) return null
         const sim = simulated.get(slug)
         if (sim) return sim
         const fp = findFile(slug)
@@ -365,9 +394,36 @@ export function createHafez(config: HafezConfig): Hafez {
         } catch { return { kind, type: 'entity' } }
       },
       existsAnywhere,
-      sessionExists: (slug) => existsSync(join(vaultPath, kindDir('session'), `${slug}.md`)) || simulatedSessions.has(slug),
-      simulate: (slug, info) => { simulated.set(slug, info) },
-      simulateSession: (slug) => { simulatedSessions.add(slug) },
+      // resolveFilePath, not a bare join: delete acts on this answer, and a
+      // '../' slug must never reach a file outside sessions/.
+      sessionExists: (slug) => {
+        if (deletedSessions.has(slug)) return false
+        if (simulatedSessions.has(slug)) return true
+        try { return existsSync(resolveFilePath(vaultPath, slug, 'session')) } catch { return false }
+      },
+      simulate: (slug, info) => { deleted.delete(slug); simulated.set(slug, info) },
+      simulateSession: (slug) => { deletedSessions.delete(slug); simulatedSessions.add(slug) },
+      linksOf,
+      simulateLinks: (slug, links) => { simulatedLinks.set(slug, links) },
+      // Read from disk, not the index: the validate phase must see the vault
+      // as `validate` will, and a stale index row would let a linked note go.
+      referrers: (slug) => {
+        const candidates = new Set(simulated.keys())
+        for (const kind of INDEXED_KINDS) {
+          for (const fp of scanVaultDir(join(vaultPath, kindDir(kind)))) candidates.add(basename(fp, '.md'))
+        }
+        return [...candidates]
+          .filter(from => from !== slug && !deleted.has(from))
+          .filter(from => { const l = linksOf(from); return l.parent === slug || (l.related ?? []).includes(slug) })
+          .sort()
+      },
+      simulateDelete: (slug, kind) => {
+        if (kind === 'session') { deletedSessions.add(slug); simulatedSessions.delete(slug); return }
+        deleted.add(slug)
+        simulated.delete(slug)
+        // A file created under this slug later in the batch starts unlinked.
+        simulatedLinks.set(slug, {})
+      },
       validateKindFields,
       validateSessionLogEntry: (entry) => validateSessionLogEntry(entry),
       buildEntityFrontmatter: (name, fields) => { buildEntityFrontmatter(name, fields, existsAnywhere) },
@@ -400,7 +456,8 @@ export function createHafez(config: HafezConfig): Hafez {
         // first (and scripts branch on its exit code) — keep that precedence.
         if (raw && typeof raw.slug === 'string' && raw.slug &&
             slugBearingOpNames().includes(entry.op) &&
-            !existsAnywhere(raw.slug)) {
+            !existsAnywhere(raw.slug) &&
+            !(sessionAddressingOpNames().includes(entry.op) && ctx.sessionExists(raw.slug))) {
           entry.errors.unshift(notFoundError(raw.slug))
           entry.primaryCode = 'NOT_FOUND'
         }
@@ -431,94 +488,7 @@ export function createHafez(config: HafezConfig): Hafez {
   }
 
   async function validate(): Promise<ValidationReport> {
-    const report: ValidationReport = {
-      broken_slugs: [],
-      orphaned_knowledge: [],
-      oversized_related: [],
-      missing_fields: [],
-      total_entities: 0,
-      total_knowledge: 0,
-    }
-
-    const allSlugs = new Set<string>()
-    const knowledgeSlugs = new Set<string>()
-    const referencedKnowledge = new Set<string>()
-
-    // Scan entities
-    const entDir = join(vaultPath, kindDir('entity'))
-    {
-      const files = scanVaultDir(entDir)
-      report.total_entities = files.length
-      for (const filePath of files) {
-        const slug = basename(filePath, '.md')
-        allSlugs.add(slug)
-        let fm: Record<string, any>
-        try {
-          fm = parseFilePath(filePath).frontmatter
-        } catch {
-          report.missing_fields.push({ slug, field: '', issue: 'failed to parse frontmatter' })
-          continue
-        }
-
-        const errors = validateEntityFrontmatter(fm)
-        for (const e of errors) report.missing_fields.push({ slug, field: '', issue: e })
-
-        if (fm.parent) {
-          if (!exists(fm.parent)) report.broken_slugs.push({ slug, field: 'parent', issue: `parent '${fm.parent}' does not exist` })
-        }
-        if (fm.related && Array.isArray(fm.related)) {
-          for (const r of fm.related) {
-            if (!exists(r)) report.broken_slugs.push({ slug, field: 'related', issue: `related '${r}' does not exist` })
-            // Track referenced knowledge
-            referencedKnowledge.add(r)
-          }
-        }
-      }
-    }
-
-    // Scan knowledge
-    const knDir = join(vaultPath, kindDir('knowledge'))
-    {
-      const files = scanVaultDir(knDir)
-      report.total_knowledge = files.length
-      for (const filePath of files) {
-        const slug = basename(filePath, '.md')
-        allSlugs.add(slug)
-        knowledgeSlugs.add(slug)
-        let fm: Record<string, any>
-        try {
-          fm = parseFilePath(filePath).frontmatter
-        } catch {
-          report.missing_fields.push({ slug, field: '', issue: 'failed to parse frontmatter' })
-          continue
-        }
-
-        const errors = validateKnowledgeFrontmatter(fm)
-        for (const e of errors) report.missing_fields.push({ slug, field: '', issue: e })
-
-        if (fm.related && Array.isArray(fm.related)) {
-          for (const r of fm.related) {
-            if (!exists(r)) report.broken_slugs.push({ slug, field: 'related', issue: `related '${r}' does not exist` })
-          }
-        }
-      }
-    }
-
-    // Find orphaned knowledge: no related, and not referenced by any entity
-    for (const slug of knowledgeSlugs) {
-      let fm: Record<string, any>
-      try {
-        fm = parseFilePath(join(knDir, `${slug}.md`)).frontmatter
-      } catch {
-        continue // already reported above
-      }
-      const hasRelated = fm.related && Array.isArray(fm.related) && fm.related.length > 0
-      if (!hasRelated && !referencedKnowledge.has(slug)) {
-        report.orphaned_knowledge.push(slug)
-      }
-    }
-
-    return report
+    return validateVault(vaultPath)
   }
 
   async function promote(slug: string, target: 'entity' | 'project' | 'knowledge'): Promise<string> {
@@ -549,6 +519,7 @@ export function createHafez(config: HafezConfig): Hafez {
     capture,
     link,
     unlink,
+    delete: del,
     batch,
     // Same normalization as the apply path — dry-run must judge the payload
     // apply would actually run.
@@ -591,6 +562,6 @@ export function createHafez(config: HafezConfig): Hafez {
 }
 
 export { HafezError } from './types.js'
-export type { Hafez, HafezConfig, HafezErrorCode, EntityType, EntityStatus, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, EntityFrontmatter, KnowledgeFrontmatter, ParsedFile, SessionLogEntry, UpdateFields, UpdateResult, CreateEntityFields, CreateKnowledgeFields, QueryFilter, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, ReadDepth, ConfidenceLevel, LinkRelation, GitConfig, Journal, SearchResult, VaultStats, ChangelogEntry, KnowledgeSubtype } from './types.js'
+export type { Hafez, HafezConfig, HafezErrorCode, EntityType, EntityStatus, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, AllQueryOpts, SortField, EntitySortField, EntityFrontmatter, KnowledgeFrontmatter, ParsedFile, SessionLogEntry, UpdateFields, UpdateResult, CreateEntityFields, CreateKnowledgeFields, QueryFilter, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, ReadDepth, ConfidenceLevel, LinkRelation, GitConfig, Journal, SearchResult, VaultStats, ChangelogEntry, KnowledgeSubtype } from './types.js'
 export { getBrief, getNextActions } from './document.js'
 export { parseSessionLogHeading, parseSessionLog } from './document.js'

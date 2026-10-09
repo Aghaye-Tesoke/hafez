@@ -5,7 +5,7 @@ import { HafezError } from '../src/types.js'
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 
 const TMP = join(tmpdir(), 'hafez-test-git-' + Date.now())
 const BARE = join(TMP, 'remote.git')

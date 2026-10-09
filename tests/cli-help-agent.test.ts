@@ -1,67 +1,40 @@
 // tests/cli-help-agent.test.ts
 //
-// Structural assertions on the prompt-gate output. NOT a snapshot test —
-// snapshots churn the diff every time the preamble is tuned, and schema
-// fidelity is by-construction (generated sections derive from the Op Spec
-// table). These tests just verify the top-level promises of the help document.
-//
-// Token count ceiling uses a char/3.5 proxy, documented inline as a
-// conservative overcount (safe-fail direction — false positives force
-// review, never false passes).
+// `hafez help --agent` prints the `hafez` skill body: one text from the one
+// source (Agent Contract, "Surfaces"), the reference an agent reads when the
+// skill is not installed. The byte-for-byte check against the committed skill
+// file is in tests/surfaces.test.ts; this file asserts the command's wiring
+// and the size an agent pays to read it.
 
 import { describe, it, expect } from 'vitest'
-import { renderAgentHelp } from '../src/cli/help-agent.js'
-import { listOps, getEnumValues } from '../src/cli/schema-introspect.js'
+import { execFileSync } from 'child_process'
+import { join } from 'path'
+import { renderAgentHelp, renderHafezSkill } from '../src/surfaces/surfaces.js'
 
-describe('cli-help-agent: structural guarantees', () => {
-  const output = renderAgentHelp()
-
-  it('contains the hard-rules block with ALWAYS/NEVER markers', () => {
-    expect(output).toMatch(/ALWAYS batch/)
-    expect(output).toMatch(/NEVER invent field names/)
+describe('help --agent', () => {
+  it('the built CLI prints the skill body and nothing else', () => {
+    const out = execFileSync('node', [join(process.cwd(), 'dist', 'cli.js'), 'help', '--agent'], { encoding: 'utf-8' })
+    expect(out).toBe(`${renderAgentHelp()}\n`)
+    expect(out.startsWith('# Hafez\n')).toBe(true)
   })
 
-  it('contains every op from listOps() at least once', () => {
-    for (const op of listOps()) expect(output).toContain(op.name)
+  it('never names itself as the reference, and no longer carries the old API catalogue', () => {
+    const out = renderAgentHelp()
+    expect(out).not.toContain('help --agent')
+    expect(out).not.toContain('<!-- SECTION:')
+    expect(out).not.toContain('ALWAYS batch')
   })
 
-  it('contains every critical enum value from schema-introspect', () => {
-    const paths = [
-      'update.fields.status',
-      'update.fields.session_log.type',
-      'update.fields.confidence',
-      'create-entity.fields.type',
-      'create-knowledge.fields.subtype',
-      'link.relation',
-    ]
-    for (const p of paths) {
-      const values = getEnumValues(p)
-      expect(values).not.toBeNull()
-      for (const v of values!) expect(output).toContain(v)
-    }
+  it('is covered by the skill file\'s hash', () => {
+    const skill = renderHafezSkill()
+    expect(skill.endsWith(`\n${renderAgentHelp()}\n`)).toBe(true)
   })
 
-  it('contains every required section marker', () => {
-    expect(output).toContain('<!-- SECTION:op-catalog -->')
-    expect(output).toContain('<!-- /SECTION:op-catalog -->')
-    expect(output).toContain('<!-- SECTION:critical-enums -->')
-    expect(output).toContain('<!-- /SECTION:critical-enums -->')
-    expect(output).toContain('<!-- SECTION:batch-examples -->')
-    expect(output).toContain('<!-- /SECTION:batch-examples -->')
-    expect(output).toContain('<!-- SECTION:digest -->')
-    expect(output).toContain('<!-- /SECTION:digest -->')
-  })
-
-  it('documents the digest pipe usage', () => {
-    expect(output).toContain('hafez digest | hafez batch')
-    expect(output).toContain('hafez schema digest')
-  })
-
-  it('token count stays under 3000', () => {
-    // char/3.5 is a conservative proxy (overcounts by ~15% for mixed prose+JSON)
-    // biased toward failing the test rather than letting a bloated payload ship.
-    // If a real tokenizer is added later, swap the function without changing the ceiling.
-    const tokens = Math.ceil(output.length / 3.5)
-    expect(tokens).toBeLessThan(3000)
+  it('stays under 1200 tokens', () => {
+    // The skill body is read on every invoke and by `help --agent` on every
+    // fallback. The cut-over (#100) measured about 670 tokens by the char/3.5
+    // proxy, which overcounts, so the ceiling leaves room for an Item or two
+    // and fails on a catalogue creeping back in.
+    expect(Math.ceil(renderAgentHelp().length / 3.5)).toBeLessThan(1200)
   })
 })

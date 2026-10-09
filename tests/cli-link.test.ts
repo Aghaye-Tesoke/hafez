@@ -11,10 +11,11 @@ import { spawnSync } from 'child_process'
 import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 import { serializeFile } from '../src/vault.js'
 import { parseBatchInput } from '../src/cli/commands.js'
 import { HafezError } from '../src/types.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-cli-link-test-' + Date.now())
 const BARE = join(TMP, 'remote.git')
@@ -37,7 +38,7 @@ beforeAll(async () => {
   await simpleGit().clone(BARE, VAULT)
   mkdirSync(join(VAULT, 'entities'), { recursive: true })
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDay()
   for (const name of ['foo', 'bar']) {
     writeFileSync(
       join(VAULT, 'entities', `${name}.md`),

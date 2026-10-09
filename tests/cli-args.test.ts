@@ -4,8 +4,8 @@
 // enough. The exit-code contract itself is asserted in cli.test.ts against
 // the real binary.
 import { describe, it, expect } from 'vitest'
-import { parseArgs, splitList, UsageError } from '../src/cli/args.js'
-import { cmdRead, cmdUpdate, cmdCapture } from '../src/cli/commands.js'
+import { HelpRequest, parseArgs, splitList, UsageError } from '../src/cli/args.js'
+import { cmdRead, cmdUpdate, cmdCapture, cmdQuery } from '../src/cli/commands.js'
 import type { Hafez } from '../src/types.js'
 
 describe('parseArgs', () => {
@@ -35,6 +35,24 @@ describe('parseArgs', () => {
       .toThrow(UsageError)
   })
 
+  it('rejects a flag named after an Object.prototype member as unknown (#134)', () => {
+    for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      expect(() => parseArgs([`--${name}`, 'v'], { brief: 'string' }, 'usage'))
+        .toThrow(`Unknown flag --${name}`)
+    }
+  })
+
+  it('--help or -h anywhere outside value position is a HelpRequest carrying the usage (#32)', () => {
+    for (const args of [['--help'], ['-h'], ['slug', '--brief', 'x', '-h']]) {
+      let caught: unknown
+      try { parseArgs(args, { brief: 'string' }, 'the usage') } catch (err) { caught = err }
+      expect(caught).toBeInstanceOf(HelpRequest)
+      expect(caught).not.toBeInstanceOf(UsageError)
+      expect((caught as HelpRequest).usage).toBe('the usage')
+    }
+    expect(parseArgs(['--brief', '-h'], { brief: 'string' }, 'usage').flags.brief).toBe('-h')
+  })
+
   it('rejects a string flag with no value', () => {
     expect(() => parseArgs(['--brief'], { brief: 'string' }, 'usage'))
       .toThrow(/requires a value/)
@@ -48,6 +66,29 @@ describe('parseArgs', () => {
       { brief: 'string', 'clear-actions': 'boolean' },
       'usage',
     )).toThrow(/--brief requires a value/)
+  })
+
+  it('a repeatable flag collects every value, in order', () => {
+    const { flags } = parseArgs(['--add-action', 'a', '--add-action', 'b'], { 'add-action': 'repeat' }, 'usage')
+    expect(flags['add-action']).toEqual(['a', 'b'])
+  })
+
+  it('a repeatable flag given once is still a list', () => {
+    const { flags } = parseArgs(['--add-action', 'a'], { 'add-action': 'repeat' }, 'usage')
+    expect(flags['add-action']).toEqual(['a'])
+  })
+
+  // Never last-wins: a silently overwritten value is a dropped value.
+  it('a repeated scalar flag is a UsageError naming the flag', () => {
+    expect(() => parseArgs(['--brief', 'x', '--brief', 'y'], { brief: 'string' }, 'usage'))
+      .toThrow(UsageError)
+    expect(() => parseArgs(['--brief', 'x', '--brief', 'y'], { brief: 'string' }, 'usage'))
+      .toThrow(/--brief/)
+  })
+
+  it('a repeated boolean flag is a UsageError too', () => {
+    expect(() => parseArgs(['--clear-actions', '--clear-actions'], { 'clear-actions': 'boolean' }, 'usage'))
+      .toThrow(/--clear-actions/)
   })
 
   it('splitList trims comma lists', () => {
@@ -80,9 +121,30 @@ describe('handlers without subprocess spawns', () => {
         calls.push({ slug, ...fields })
         return {}
       },
+      // A knowledge target, so no session log is added: this test pins the
+      // flag mapping alone (the added entry is tests/cli-update-session-log).
+      read: async () => ({ kind: 'knowledge' }),
     } as unknown as Hafez
     await cmdUpdate(os, ['s', '--brief', '', '--tags', 'a,b', '--clear-actions'])
     expect(calls[0]).toEqual({ slug: 's', brief: null, tags: ['a', 'b'], clear_actions: true })
+  })
+
+  it('cmdUpdate maps a repeated --add-action to the add_actions array field', async () => {
+    const calls: Record<string, unknown>[] = []
+    const os = {
+      update: async (slug: string, fields: Record<string, unknown>) => { calls.push(fields); return {} },
+      // A knowledge target: no stale reminder to read for.
+      read: async () => ({ kind: 'knowledge' }),
+    } as unknown as Hafez
+    await cmdUpdate(os, ['s', '--add-action', 'a', '--add-action', 'b'])
+    await cmdUpdate(os, ['s', '--add-action', 'one'])
+    expect(calls).toEqual([{ add_actions: ['a', 'b'] }, { add_action: 'one' }])
+  })
+
+  // The repeated-scalar rule lives in the one parser, so it binds every
+  // command — not just update and create. Last-wins here queried `b` alone.
+  it('cmdQuery rejects a repeated --tag instead of keeping the last', async () => {
+    await expect(cmdQuery({} as Hafez, ['--tag', 'a', '--tag', 'b'])).rejects.toThrow(/--tag was given more than once/)
   })
 
   it('cmdUpdate still fails loudly on the removed --next-action flag', async () => {

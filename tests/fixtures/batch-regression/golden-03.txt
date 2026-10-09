@@ -1,1 +1,2 @@
+A	entities/archive/hafez-log.md
 M	entities/hafez.md

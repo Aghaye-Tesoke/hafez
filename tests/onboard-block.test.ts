@@ -1,0 +1,273 @@
+// tests/onboard-block.test.ts
+//
+// The temp-home seam for `onboard --block`, the SessionStart hook's render:
+// the Block, then one line per entity whose `resource` or slug matches the
+// folder. Three folders are tried, each exactly: the working directory, its
+// git root, and in a linked worktree the main repository's root. Any failure
+// prints nothing. The two renders in tests/fixtures/surfaces/onboard.md are checked
+// whole in tests/surfaces.test.ts.
+
+import { describe, it, expect, afterEach } from 'vitest'
+import { execFileSync, spawnSync } from 'child_process'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, realpathSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { cmdOnboard } from '../src/cli/onboard.js'
+import { renderBlock } from '../src/surfaces/surfaces.js'
+
+const dirs: string[] = []
+afterEach(() => {
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+const tempDir = (prefix: string): string => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
+  dirs.push(dir)
+  return dir
+}
+
+interface Seed {
+  slug: string
+  status?: 'active' | 'paused' | 'done'
+  description?: string
+  resource?: string
+}
+
+/** A home whose config names a vault holding `entities`. */
+function setup(entities: Seed[]): { home: string; vault: string } {
+  const home = tempDir('hafez-home-')
+  const vault = tempDir('hafez-vault-')
+  mkdirSync(join(vault, 'entities'))
+  mkdirSync(join(vault, 'knowledge'))
+  for (const e of entities) {
+    writeFileSync(join(vault, 'entities', `${e.slug}.md`), [
+      '---',
+      `name: ${e.slug}`,
+      'type: project',
+      `status: ${e.status ?? 'active'}`,
+      'created: 2026-10-01',
+      'last-touched: 2026-10-01',
+      ...(e.description ? [`description: ${e.description}`] : []),
+      ...(e.resource ? [`resource: '${e.resource}'`] : []),
+      '---',
+      '',
+      '## Brief',
+      '',
+      'x',
+      '',
+    ].join('\n'))
+  }
+  mkdirSync(join(home, '.config', 'hafez'), { recursive: true })
+  writeFileSync(join(home, '.config', 'hafez', 'vault'), vault + '\n')
+  return { home, vault }
+}
+
+const git = (cwd: string, ...args: string[]) =>
+  execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd, stdio: 'pipe' }).toString()
+
+/** A git repository at `parent/name`, with one commit so worktrees can branch. */
+function repo(parent: string, name: string): string {
+  const root = join(parent, name)
+  mkdirSync(root, { recursive: true })
+  git(root, 'init', '-q')
+  git(root, 'commit', '-q', '--allow-empty', '-m', 'init')
+  return root
+}
+
+const block = (home: string, cwd: string, ...args: string[]) =>
+  cmdOnboard(['--block', ...args], { home, env: {}, cwd })
+
+const BLOCK = renderBlock()
+const AUTH = { slug: 'auth-refactor', description: 'Move session handling from cookies to short-lived tokens' }
+const LINE = 'hafez read auth-refactor (Move session handling from cookies to short-lived tokens)'
+
+describe('onboard --block: the render', () => {
+  it('starts with the Block exactly as block.md', async () => {
+    const { home } = setup([AUTH])
+    const cwd = join(tempDir('work-'), 'auth-refactor')
+    mkdirSync(cwd)
+    const out = await block(home, cwd)
+    expect(out!.startsWith(readFileSync('tests/fixtures/surfaces/block.md', 'utf-8'))).toBe(true)
+  })
+
+  it('prints the Block alone when nothing matches', async () => {
+    const { home } = setup([AUTH])
+    expect(await block(home, tempDir('elsewhere-'))).toBe(BLOCK)
+  })
+
+  it('prints the slug alone when the entity has no description', async () => {
+    const { home } = setup([{ slug: 'auth-refactor' }])
+    const cwd = join(tempDir('work-'), 'auth-refactor')
+    mkdirSync(cwd)
+    expect((await block(home, cwd))!.endsWith('\nhafez read auth-refactor\n')).toBe(true)
+  })
+
+  it('looks for the config under XDG_CONFIG_HOME over ~/.config when it is set', async () => {
+    const { home } = setup([AUTH])
+    const xdg = tempDir('xdg-')
+    expect(await cmdOnboard(['--block'], { home, env: { XDG_CONFIG_HOME: xdg }, cwd: home })).toBeNull()
+  })
+
+  it('accepts --harness', async () => {
+    const { home } = setup([])
+    expect(await block(home, tempDir('elsewhere-'), '--harness', 'claude-code')).toBe(BLOCK)
+  })
+})
+
+describe('onboard --block: the three folders', () => {
+  it('matches a resource equal to the working directory', async () => {
+    const cwd = tempDir('anything-')
+    const { home } = setup([{ ...AUTH, resource: cwd }])
+    expect(await block(home, cwd)).toContain(LINE)
+  })
+
+  it('matches a slug equal to the git root\'s name from a subdirectory', async () => {
+    const { home } = setup([AUTH])
+    const root = repo(tempDir('work-'), 'auth-refactor')
+    const cwd = join(root, 'src', 'deep')
+    mkdirSync(cwd, { recursive: true })
+    expect(await block(home, cwd)).toContain(LINE)
+  })
+
+  it('matches a resource equal to the git root', async () => {
+    const root = repo(tempDir('work-'), 'checkout')
+    const { home } = setup([{ ...AUTH, resource: root }])
+    const cwd = join(root, 'src')
+    mkdirSync(cwd)
+    expect(await block(home, cwd)).toContain(LINE)
+  })
+
+  it('matches a resource equal to the git root\'s remote URL, however it is spelled', async () => {
+    const root = repo(tempDir('work-'), 'checkout')
+    git(root, 'remote', 'add', 'origin', 'git@github.com:Acme/Auth-Service.git')
+    const { home } = setup([{ ...AUTH, resource: 'https://github.com/acme/auth-service/' }])
+    expect(await block(home, root)).toContain(LINE)
+  })
+
+  it('matches a slug equal to the main repository\'s name from a linked worktree', async () => {
+    const work = tempDir('work-')
+    const main = repo(work, 'auth-refactor')
+    git(main, 'worktree', 'add', '-q', join(work, 'auth-refactor-42'))
+    const cwd = join(work, 'auth-refactor-42', 'src')
+    mkdirSync(cwd)
+    const { home } = setup([AUTH])
+    expect(await block(home, cwd)).toContain(LINE)
+  })
+
+  it('matches a resource equal to the main repository\'s root from a linked worktree', async () => {
+    const work = tempDir('work-')
+    const main = repo(work, 'checkout')
+    git(main, 'worktree', 'add', '-q', join(work, 'wt'))
+    const { home } = setup([{ ...AUTH, resource: main }])
+    expect(await block(home, join(work, 'wt'))).toContain(LINE)
+  })
+
+  it('does not match a parent directory of the working directory', async () => {
+    const { home } = setup([AUTH])
+    const cwd = join(tempDir('work-'), 'auth-refactor', 'notes')
+    mkdirSync(cwd, { recursive: true })
+    expect(await block(home, cwd)).toBe(BLOCK)
+  })
+
+  it('does not match a directory between the working directory and the git root', async () => {
+    const { home } = setup([AUTH])
+    const root = repo(tempDir('work-'), 'checkout')
+    const cwd = join(root, 'auth-refactor', 'src')
+    mkdirSync(cwd, { recursive: true })
+    expect(await block(home, cwd)).toBe(BLOCK)
+  })
+
+  it('does not match a directory above the git root', async () => {
+    const { home } = setup([AUTH])
+    const root = repo(join(tempDir('work-'), 'auth-refactor'), 'checkout')
+    expect(await block(home, root)).toBe(BLOCK)
+  })
+})
+
+describe('onboard --block: several matches', () => {
+  it('prints them all, active first', async () => {
+    const cwd = join(tempDir('work-'), 'auth-refactor')
+    mkdirSync(cwd)
+    const { home } = setup([
+      { slug: 'auth-a', status: 'done', resource: cwd },
+      { slug: 'auth-b', status: 'paused', resource: cwd },
+      { slug: 'auth-refactor', status: 'active' },
+      { slug: 'unrelated', status: 'active' },
+    ])
+    const out = (await block(home, cwd))!
+    expect(out.slice(BLOCK.length)).toBe([
+      '',
+      'This folder matches several Hafez entities. Read the one that fits first:',
+      'hafez read auth-refactor',
+      'hafez read auth-b',
+      'hafez read auth-a',
+      '',
+    ].join('\n'))
+  })
+})
+
+describe('onboard --block: any failure prints nothing', () => {
+  it('prints nothing when no vault is configured', async () => {
+    const home = tempDir('hafez-home-')
+    expect(await block(home, home)).toBeNull()
+  })
+
+  it('prints nothing when the config names a folder that is not a vault', async () => {
+    const home = tempDir('hafez-home-')
+    mkdirSync(join(home, '.config', 'hafez'), { recursive: true })
+    writeFileSync(join(home, '.config', 'hafez', 'vault'), join(home, 'nowhere') + '\n')
+    expect(await block(home, home)).toBeNull()
+  })
+
+  it('prints nothing when the working directory is gone', async () => {
+    const { home } = setup([AUTH])
+    expect(await block(home, join(home, 'deleted'))).toBeNull()
+  })
+
+  it('prints nothing and leaves no index behind when --vault names a folder that is not a vault', async () => {
+    const home = tempDir('hafez-home-')
+    const notVault = tempDir('not-vault-')
+    expect(await cmdOnboard(['--block'], { home, env: {}, cwd: home, vaultFlag: notVault })).toBeNull()
+    expect(readdirSync(notVault)).toEqual([])
+  })
+
+  it('the built CLI exits 0 with empty stdout on an unresolvable vault', () => {
+    const home = tempDir('hafez-home-')
+    const stdout = execFileSync('node', [join(process.cwd(), 'dist', 'cli.js'), 'onboard', '--block'], {
+      cwd: home,
+      env: { PATH: process.env.PATH, HOME: home },
+      encoding: 'utf-8',
+    })
+    expect(stdout).toBe('')
+  })
+
+  // A hand-edited hook line, or one an older install wrote with a flag a newer
+  // binary dropped, must not block the session either (#132).
+  const cli = (home: string, ...args: string[]) =>
+    spawnSync('node', [join(process.cwd(), 'dist', 'cli.js'), ...args], {
+      cwd: home,
+      env: { PATH: process.env.PATH, HOME: home },
+      encoding: 'utf-8',
+    })
+
+  it.each([
+    ['an unknown harness', ['onboard', '--block', '--harness', 'nope']],
+    ['an unknown flag', ['onboard', '--block', '--bogus']],
+    ['a flag --block does not take', ['onboard', '--block', '--install', '--mode', 'always-on']],
+    ['an unexpected argument', ['onboard', '--block', 'extra']],
+    ['--vault with no value', ['onboard', '--block', '--vault']],
+    ['--vault given twice', ['--vault', '/a', 'onboard', '--block', '--vault', '/b']],
+  ])('the built CLI prints nothing and exits 0 on %s', (_, args) => {
+    const { home } = setup([AUTH])
+    const r = cli(home, ...args)
+    expect({ stdout: r.stdout, stderr: r.stderr, status: r.status }).toEqual({ stdout: '', stderr: '', status: 0 })
+    expect(readdirSync(home)).toEqual(['.config'])
+  })
+
+  it('without --block, a bad onboard invocation is still a usage error', () => {
+    const home = tempDir('hafez-home-')
+    const r = cli(home, 'onboard', '--harness', 'nope')
+    expect(r.status).toBe(2)
+    expect(r.stderr).toMatch(/^Error: /)
+  })
+})

@@ -14,9 +14,10 @@ import { serializeFile } from '../src/vault.js'
 import { createHafez } from '../src/index.js'
 import { createIndex, __setAfterScanHook } from '../src/db.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-test-idxlife-' + Date.now())
-const today = new Date().toISOString().slice(0, 10)
+const today = localDay()
 
 function makeVault(name: string): string {
   const vault = join(TMP, name)

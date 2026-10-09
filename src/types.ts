@@ -29,18 +29,24 @@ export type PlanStatus = typeof PLAN_STATUSES[number]
 
 // --- Query Options ---
 
+/** Sort fields, and the two an entity query cannot honour — reinforcement
+ * lives on knowledge notes only. Asking for one on the entity branch is a
+ * validation error, not a silent fall back to recency, so the entity opts
+ * type declares only what that branch can actually sort by. */
+export type SortField = 'last_touched' | 'created' | 'name' | 'staleness' | 'last_reinforced' | 'reinforcement_count'
+export type EntitySortField = Exclude<SortField, 'last_reinforced' | 'reinforcement_count'>
+
 export interface EntityQueryOpts {
   filter?: QueryFilter
   type?: EntityType
   parent?: string
   domain?: string
-  confidence?: ConfidenceLevel
   since?: string          // ISO date — last_touched >= since
   before?: string         // ISO date — last_touched <= before
   createdSince?: string   // ISO date — created >= createdSince
   createdBefore?: string  // ISO date — created <= createdBefore
   tags?: string[]
-  sort_by?: 'last_touched' | 'created' | 'name' | 'staleness' | 'last_reinforced' | 'reinforcement_count'
+  sort_by?: EntitySortField
   sort_order?: 'asc' | 'desc'
   limit?: number
   offset?: number
@@ -55,19 +61,32 @@ export interface KnowledgeQueryOpts {
   createdSince?: string   // ISO date — created >= createdSince
   createdBefore?: string  // ISO date — created <= createdBefore
   tags?: string[]
-  sort_by?: 'last_touched' | 'created' | 'name' | 'staleness' | 'last_reinforced' | 'reinforcement_count'
+  sort_by?: SortField
   sort_order?: 'asc' | 'desc'
   limit?: number
   offset?: number
 }
 
-/** The unified (`kind: 'all'`) query takes the entity filter set plus the
- * knowledge-only narrowing flags. Status filters apply to the entity side
- * only — knowledge notes carry no status and are never excluded by one. */
-export interface UnifiedQueryOpts extends EntityQueryOpts {
-  kind?: 'entity' | 'knowledge' | 'all'
+/** `kind: 'all'` (or unset): reaches both sides, so it takes opts from both
+ * and can honour every sort field. Status filters narrow the entity side only
+ * — knowledge notes carry no status and are never excluded by one. */
+export interface AllQueryOpts extends Omit<EntityQueryOpts, 'sort_by'> {
+  kind?: 'all'
+  confidence?: ConfidenceLevel
   subtype?: KnowledgeSubtype
+  sort_by?: SortField
 }
+
+/** The unified query, discriminated on `kind`. Naming a single kind narrows
+ * this query to that kind's opts, because a narrowed branch maps no more than
+ * the dedicated one does: an out-of-scope condition would land on a column the
+ * selected kind leaves NULL and silently exclude every row. The read surface
+ * rejects those at runtime for callers without types; the union is what makes
+ * them a compile error first. */
+export type UnifiedQueryOpts =
+  | AllQueryOpts
+  | (EntityQueryOpts & { kind: 'entity' })
+  | (KnowledgeQueryOpts & { kind: 'knowledge' })
 
 // --- Frontmatter ---
 
@@ -118,12 +137,9 @@ export type ParsedVaultFile =
   | { kind: 'knowledge'; frontmatter: KnowledgeFrontmatter; body: string }
   | { kind: 'session'; frontmatter: SessionFrontmatter; body: string }
 
-export interface ParsedFile<T = EntityFrontmatter | KnowledgeFrontmatter> {
-  /** Populated by read(): which side of the vault the slug resolved to. */
-  kind?: 'entity' | 'knowledge'
-  frontmatter: T
-  body: string
-}
+/** What read() returns: the indexed arms of ParsedVaultFile (a session slug is
+ * never resolvable through read()), so consumers narrow on `kind`. */
+export type ParsedFile = Extract<ParsedVaultFile, { kind: 'entity' | 'knowledge' }>
 
 // --- Session log ---
 
@@ -148,12 +164,18 @@ export interface UpdateFields {
   status?: EntityStatus
   current_state?: string
   session_log?: SessionLogEntry
+  agent?: string                     // entity-only; names the agent on the entry added when session_log is absent (default: detected from the Harness)
   brief?: string | null              // string = set/replace, null = remove section
+  // Next Actions fields compose within one op as prune, tick, add:
+  // clear_actions → remove_action → complete_action → add_action(s).
+  // Queries match the list as it was before the op (two queries naming one
+  // line is an error); added lines land last.
   add_action?: string                // add one item to Next Actions
   add_actions?: string[]             // add multiple items to Next Actions
-  complete_action?: string           // complete matching item (substring, case-insensitive)
-  remove_action?: string             // remove matching item without completing
-  clear_actions?: boolean            // remove entire Next Actions section
+  complete_action?: string           // complete the item: an open line's Handle, else a substring (case-insensitive)
+  remove_action?: string             // remove the item without completing: Handle or substring, as above
+  clear_actions?: boolean            // remove entire Next Actions section (rejected with a query field)
+  parent?: string                    // entity-only; sets the parent link (slug must exist)
   // Domain (shared) + knowledge-only metadata
   description?: string | null      // '' or null clears
   resource?: string | null         // entity-only canonical URI, '' or null clears
@@ -168,7 +190,9 @@ export interface UpdateFields {
 }
 
 export interface UpdateResult {
-  matched_action?: string                // the full text of action that was completed/removed
+  completed_action?: string              // text of the line complete_action matched, stamp stripped
+  removed_action?: string                // text of the line remove_action matched, stamp stripped
+  logged?: true                          // a session log entry was written: given, or mechanised by the Spine
 }
 
 export interface CreateEntityFields {
@@ -188,6 +212,7 @@ export interface CreateEntityFields {
 export interface CreateKnowledgeFields {
   subtype?: KnowledgeSubtype
   status?: PlanStatus       // plan subtype only — insights have no lifecycle
+  confidence?: ConfidenceLevel  // defaults to observation
   synthesis?: string        // replaces insight
   insight?: string          // alias for synthesis; synthesis wins when both are set
   description?: string
@@ -246,7 +271,6 @@ export interface ValidationIssue {
 export interface ValidationReport {
   broken_slugs: ValidationIssue[]
   orphaned_knowledge: string[]
-  oversized_related: ValidationIssue[]
   missing_fields: ValidationIssue[]
   total_entities: number
   total_knowledge: number
@@ -311,6 +335,11 @@ export type BatchOperation =
   | { op: 'link'; slug: string; target: string; relation: LinkRelation }
   | { op: 'unlink'; slug: string; target: string; relation: LinkRelation }
   | { op: 'promote'; slug: string; target: 'entity' | 'project' | 'knowledge' }
+  | { op: 'delete'; slug: string }
+
+/** What `delete` may remove. An entity is never deleted: it is retired with
+ * `status: done`. */
+export type DeletableKind = 'knowledge' | 'session'
 
 // Per-op result of the shared validate phase (dry-run and apply both run it).
 // `slug` is the derived slug for create/capture ops — the dry-run slug oracle.
@@ -390,6 +419,8 @@ export interface Hafez {
   link(slug: string, target: string, relation: LinkRelation): Promise<void>
   unlink(slug: string, target: string, relation: LinkRelation): Promise<void>
   promote(slug: string, target: 'entity' | 'project' | 'knowledge'): Promise<string>
+  /** Delete a knowledge or session note; resolves to the kind deleted. */
+  delete(slug: string): Promise<DeletableKind>
   batch(operations: BatchOperation[]): Promise<BatchResult[]>
   validateBatch(operations: BatchOperation[]): Promise<BatchValidationReport>
   sync(): Promise<{ pulled: boolean; pushed: boolean; remote: boolean }>

@@ -13,10 +13,11 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { spawnSync } from 'child_process'
-import { mkdirSync, rmSync, readFileSync } from 'fs'
+import { mkdirSync, rmSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
+import { serializeFile } from '../src/vault.js'
 
 const TZ = new Date().getUTCHours() < 12 ? 'Etc/GMT+12' : 'Etc/GMT-14'
 
@@ -113,5 +114,22 @@ describe('date convention: the local calendar day', () => {
       const inChangelog = changelogSlugs(date).includes('late-night-entity')
       expect(inChangelog, `disagreement on --since ${date} (TZ=${TZ})`).toBe(inQuery)
     }
+  })
+
+  it('stale entities count local days: exactly staleness-days ago is not stale, one older is (query and stats)', () => {
+    for (const [slug, delta] of [['touched-14-days-ago', -14], ['touched-15-days-ago', -15]] as const) {
+      const fm = { name: slug, type: 'project', status: 'active', created: '2026-01-01', 'last-touched': dayInTz(delta) }
+      writeFileSync(join(VAULT, 'entities', `${slug}.md`), serializeFile(fm, '## Purpose\n\n## Session Log\n'))
+    }
+    const q = run('query', '--json', '--filter', 'stale')
+    expect(q.exitCode, q.stderr).toBe(0)
+    const stale = JSON.parse(q.stdout).items.map((i: { slug: string }) => i.slug)
+    expect(stale, `TZ=${TZ}`).toContain('touched-15-days-ago')
+    expect(stale, `TZ=${TZ}`).not.toContain('touched-14-days-ago')
+
+    const s = run('stats', '--json')
+    expect(s.exitCode, s.stderr).toBe(0)
+    const days = Object.fromEntries(JSON.parse(s.stdout).stale.map((e: { slug: string; days_since_touched: number }) => [e.slug, e.days_since_touched]))
+    expect(days, `TZ=${TZ}`).toEqual({ 'touched-15-days-ago': 15 })
   })
 })

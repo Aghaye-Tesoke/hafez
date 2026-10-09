@@ -10,11 +10,89 @@
 // global fallback set — a session-only heading like '## Decisions' quoted
 // inside an entity's Brief must NOT terminate that section.
 
-import type { SessionLogEntry, SessionLogType } from './types.js'
+import { createHash } from 'crypto'
+import { HafezError, type SessionLogEntry, type SessionLogType } from './types.js'
 import { ALL_CONTRACTS, SUBTYPE_SECTIONS, SESSION_SECTIONS, getContract } from './contracts.js'
 import { localDay } from './dates.js'
 
-const UNCHECKED_RE = /^- \[ \] (.+)$/gm
+// One checkbox line of Next Actions, tested line by line. `m` so a CRLF
+// line's trailing \r is not taken as action text.
+const OPEN_ACTION_RE = /^- \[ \] (.+)$/m
+const ACTION_RE = /^- \[([ xX])\] (.+)$/m
+
+// --- Next-action added-date stamp ---
+// Adding an action stamps its line `(added YYYY-MM-DD)` with the local day
+// (Apply does the stamping — every add path goes through it). The stamp is
+// file format only: every reader of action text — the index, query, matching,
+// export, merge identity — works on the unstamped text.
+
+const ACTION_STAMP_RE = /\s*\(added (\d{4}-\d{2}-\d{2})\)\s*$/
+
+/** The action text without its trailing added-date stamp, if any. */
+export function stripActionStamp(text: string): string {
+  return text.replace(ACTION_STAMP_RE, '')
+}
+
+/** The day an action's stamp names; null when the line is undated. */
+export function actionAdded(text: string): string | null {
+  return ACTION_STAMP_RE.exec(text)?.[1] ?? null
+}
+
+/** Stamp an action with its added date; text that already ends in a stamp is
+ * returned as is, so a carried-over line is never double-stamped. */
+export function stampAction(text: string, day: string): string {
+  return ACTION_STAMP_RE.test(text) ? text : `${text.trimEnd()} (added ${day})`
+}
+
+// --- Next-action Handles ---
+// `read` renders a Handle in front of each open action so an agent can tick
+// or drop a line without quoting its text. Derived at read time, never stored.
+
+const HANDLE_MIN_LENGTH = 4
+/** A query that may name a line by Handle: lowercase hex, at least the minimum. */
+const HANDLE_QUERY_RE = new RegExp(`^[0-9a-f]{${HANDLE_MIN_LENGTH},}$`)
+
+/** The full hashes Handles are cut from, one per open action line, in order:
+ * bare hex of the SHA-256 of the normalised, unstamped text. A repeated text
+ * hashes with its occurrence number, so identical lines get distinct hashes. */
+function actionHashes(lines: string[]): string[] {
+  const seen = new Map<string, number>()
+  return lines.map(line => {
+    const text = normalizeForMatch(stripActionStamp(line))
+    const n = seen.get(text) ?? 0
+    seen.set(text, n + 1)
+    return createHash('sha256').update(n === 0 ? text : `${text}\0${n}`).digest('hex')
+  })
+}
+
+/** The Handles of a list of open action lines, in order: each line's hash cut
+ * to the shortest prefix (at least four) that no other line's hash shares. */
+function actionHandles(lines: string[]): string[] {
+  const hashes = actionHashes(lines)
+  return hashes.map((hash, i) => {
+    let length = HANDLE_MIN_LENGTH
+    hashes.forEach((other, j) => {
+      // Capped at the full hash: two identical hashes share every prefix.
+      while (j !== i && length < hash.length && other.startsWith(hash.slice(0, length))) length++
+    })
+    return hash.slice(0, length)
+  })
+}
+
+/** One checkbox line of Next Actions as a reader sees it: unstamped text, and
+ * a Handle and added day (null when undated) when the line is open. */
+export type ActionItem =
+  | { handle: string; text: string; added: string | null }
+  | { handle?: undefined; text: string }
+
+/** The open action a query named: its line's position within the Next
+ * Actions section, and its unstamped text. Editing by position rather than
+ * re-matching the text keeps a Handle-named line unambiguous when its text
+ * is a substring of another line's, or a duplicate of one. */
+export interface ActionMatch {
+  line: number
+  text: string
+}
 
 // --- Set-independent helpers ---
 
@@ -154,10 +232,17 @@ export interface Doc {
   setBrief(body: string, content: string): string
   removeBrief(body: string): string
   getNextActions(body: string): string[]
+  getActionItems(body: string): ActionItem[]
+  renderActionHandles(body: string, mark?: (added: string | null) => string): string
   addNextAction(body: string, action: string): string
-  completeNextAction(body: string, query: string): { matched: string; body: string }
-  removeNextAction(body: string, query: string): { matched: string; body: string }
+  matchNextAction(body: string, query: string): ActionMatch
+  completeNextAction(body: string, action: string | ActionMatch): { matched: string; body: string }
+  removeNextAction(body: string, action: string | ActionMatch): { matched: string; line: string; body: string }
+  actionLines(body: string): string[]
+  extractOldestTickedActions(body: string, keep: number): { lines: string[]; body: string }
+  pruneNextActions(body: string): string
   clearNextActions(body: string): string
+  stripNextActionStamps(body: string): string
   syncRelatedSection(body: string, frontmatter: { parent?: string; related?: string[] }): string
 }
 
@@ -433,32 +518,76 @@ function makeDoc(structuralSections: Set<string>): Doc {
     return insertSectionBefore(body, heading, content, beforeFallbacks)
   }
 
-  /**
-   * Match an action by case-insensitive substring against unchecked items.
-   * Throws on 0 or >1 matches.
-   */
-  function matchAction(body: string, query: string): string {
+  /** The Next Actions section's raw lines (from the heading's line end to the
+   * section end) — the line positions an ActionMatch counts in. */
+  function actionSectionLines(body: string): string[] {
     const section = findSection(body, 'Next Actions')
-    if (!section) throw new Error(`No matching action for "${query}"`)
+    return section ? body.slice(section.headingEnd, section.end).split('\n') : []
+  }
 
-    const normalizedQuery = normalizeForMatch(query).toLowerCase()
-    const matches: string[] = []
-    const allActions: string[] = []
+  /** A section line as it leaves the file (archive): without a CRLF line's \r. */
+  function withoutCR(line: string): string {
+    return line.replace(/\r$/, '')
+  }
 
-    let m: RegExpExecArray | null
-    const re = new RegExp(UNCHECKED_RE.source, 'gm')
-    while ((m = re.exec(section.content)) !== null) {
-      allActions.push(m[1])
-      if (normalizeForMatch(m[1]).toLowerCase().includes(normalizedQuery)) {
-        matches.push(m[1])
-      }
+  /** Where the action at `lines[i]` ends: past every line it carries (sub-
+   * bullets, notes — anything up to the next checkbox line), trailing blank
+   * lines left out. The item rule merge.ts parses by; whatever moves the
+   * action moves these with it. */
+  function actionEnd(lines: string[], i: number): number {
+    let end = i + 1
+    for (let j = i + 1; j < lines.length && !ACTION_RE.test(lines[j]); j++) {
+      if (lines[j].trim()) end = j + 1
     }
+    return end
+  }
+
+  /** The action at `lines[i]` and the lines it carries, as they leave the file. */
+  function actionBlock(lines: string[], i: number): string {
+    return lines.slice(i, actionEnd(lines, i)).map(withoutCR).join('\n')
+  }
+
+  /** Every open line of Next Actions: its position and raw text, stamp included. */
+  function openActions(body: string): Array<{ line: number; raw: string }> {
+    return actionSectionLines(body).flatMap((l, line) => {
+      const m = OPEN_ACTION_RE.exec(l)
+      return m ? [{ line, raw: m[1] }] : []
+    })
+  }
+
+  /**
+   * Find the open action a query names. Four or more lowercase hex that
+   * prefix exactly one open line's hash name that line, so a Handle from an
+   * earlier read still works after a sibling changed its rendered length;
+   * prefixing two or more is ambiguous. Anything else is text: a
+   * case-insensitive substring of the unstamped text, the query's own stamp
+   * (copied from a read) ignored. Throws on 0 or >1 matches; error text
+   * lists the unstamped actions.
+   */
+  function matchAction(body: string, query: string): ActionMatch {
+    if (!findSection(body, 'Next Actions')) throw new HafezError('VALIDATION_FAILED', `No matching action for "${query}"`)
+    const open = openActions(body)
+    const toMatch = (a: { line: number; raw: string }): ActionMatch => ({ line: a.line, text: stripActionStamp(a.raw) })
+
+    const ambiguous = (matches: Array<{ raw: string }>) =>
+      new HafezError('VALIDATION_FAILED', `Ambiguous match for "${query}": ${matches.map(a => stripActionStamp(a.raw)).join(', ')}`)
+
+    if (HANDLE_QUERY_RE.test(query)) {
+      const hashes = actionHashes(open.map(a => a.raw))
+      const byHandle = open.filter((_, i) => hashes[i].startsWith(query))
+      if (byHandle.length === 1) return toMatch(byHandle[0])
+      if (byHandle.length > 1) throw ambiguous(byHandle)
+    }
+
+    // A query that is only a stamp keeps it, so it cannot strip to '' and match every line.
+    const normalizedQuery = normalizeForMatch(stripActionStamp(query) || query).toLowerCase()
+    const matches = open.filter(a => normalizeForMatch(stripActionStamp(a.raw)).toLowerCase().includes(normalizedQuery))
 
     if (matches.length === 0) {
-      throw new Error(`No matching action for "${query}". Actions: ${JSON.stringify(allActions)}`)
+      throw new HafezError('VALIDATION_FAILED', `No matching action for "${query}". Actions: ${JSON.stringify(open.map(a => stripActionStamp(a.raw)))}`)
     }
-    if (matches.length > 1) throw new Error(`Ambiguous match for "${query}": ${matches.join(', ')}`)
-    return matches[0]
+    if (matches.length > 1) throw ambiguous(matches)
+    return toMatch(matches[0])
   }
 
   // --- Brief functions ---
@@ -488,16 +617,29 @@ function makeDoc(structuralSections: Set<string>): Doc {
   // --- Next Actions functions ---
 
   function getNextActions(body: string): string[] {
-    const section = findSection(body, 'Next Actions')
-    if (!section) return []
+    return openActions(body).map(a => stripActionStamp(a.raw))
+  }
 
-    const actions: string[] = []
-    let m: RegExpExecArray | null
-    const re = new RegExp(UNCHECKED_RE.source, 'gm')
-    while ((m = re.exec(section.content)) !== null) {
-      actions.push(m[1])
-    }
-    return actions
+  /** Every checkbox line of Next Actions in file order, open lines with their Handle. */
+  function getActionItems(body: string): ActionItem[] {
+    const handles = actionHandles(openActions(body).map(a => a.raw))
+    let open = 0
+    return actionSectionLines(body).flatMap(l => {
+      const m = ACTION_RE.exec(l)
+      if (!m) return []
+      const text = stripActionStamp(m[2])
+      return [m[1] === ' ' ? { handle: handles[open++], text, added: actionAdded(m[2]) } : { text }]
+    })
+  }
+
+  /** The body with each open Next Actions line rendered `- [ ] <handle>  <text>`
+   * plus whatever `mark` gives for its added day — what `read` shows. Ticked
+   * lines and everything outside the section are left as they are. */
+  function renderActionHandles(body: string, mark: (added: string | null) => string = () => ''): string {
+    const open = openActions(body)
+    if (open.length === 0) return body
+    const handles = actionHandles(open.map(a => a.raw))
+    return editActionLines(body, lines => open.forEach((a, i) => { lines[a.line] = `- [ ] ${handles[i]}  ${a.raw}${mark(actionAdded(a.raw))}` }))
   }
 
   function addNextAction(body: string, action: string): string {
@@ -506,7 +648,7 @@ function makeDoc(structuralSections: Set<string>): Doc {
       // Add the new item at the end of unchecked items (before any checked items)
       const lines = section.content.split('\n')
       const lastUncheckedIdx = lines.reduce((last, line, i) => line.startsWith('- [ ] ') ? i : last, -1)
-      const insertIdx = lastUncheckedIdx === -1 ? 0 : lastUncheckedIdx + 1
+      const insertIdx = lastUncheckedIdx === -1 ? 0 : actionEnd(lines, lastUncheckedIdx)
       lines.splice(insertIdx, 0, `- [ ] ${action}`)
 
       const newContent = lines.join('\n')
@@ -523,51 +665,81 @@ function makeDoc(structuralSections: Set<string>): Doc {
   }
 
   /**
-   * Edit the matched action's line inside the Next Actions section only.
-   * Matching was always section-scoped; editing must be too — an identical
-   * checkbox line quoted elsewhere in the body (a Brief restating a blocker)
-   * is authored content, not an action. Works on the section's raw slice and
-   * on whole lines, so action text is never interpreted as a replacement
-   * pattern ($&, $', $1 survive byte-identical).
+   * Edit the Next Actions section's raw lines, and nothing outside it. An
+   * identical checkbox line quoted elsewhere in the body (a Brief restating
+   * a blocker) is authored content, not an action. Works on whole lines, so
+   * action text is never interpreted as a replacement pattern ($&, $', $1
+   * survive byte-identical).
    */
-  function editActionLine(body: string, matched: string, edit: (lines: string[], idx: number) => void): string {
+  function editActionLines(body: string, edit: (lines: string[]) => void): string {
     const section = findSection(body, 'Next Actions')
     if (!section) return body
     const lines = body.slice(section.headingEnd, section.end).split('\n')
-    const idx = lines.indexOf(`- [ ] ${matched}`)
-    if (idx === -1) return body
-    edit(lines, idx)
+    edit(lines)
     return body.slice(0, section.headingEnd) + lines.join('\n') + body.slice(section.end)
   }
 
-  function completeNextAction(body: string, query: string): { matched: string; body: string } {
-    const matched = matchAction(body, query)
-
-    // Replace the unchecked item with checked
-    const updatedBody = editActionLine(body, matched, (lines, i) => { lines[i] = `- [x] ${matched}` })
-
-    // Check if any unchecked items remain
-    const remaining = getNextActions(updatedBody)
-    if (remaining.length === 0) {
-      return { matched, body: clearNextActions(updatedBody) }
-    }
-
-    return { matched, body: updatedBody }
+  // complete / remove edit one line and nothing else. They do not collapse
+  // an emptied section — that is pruneNextActions, run once by the caller
+  // after every edit of the op, so a tick that empties the open list and an
+  // add in the same op never remove-then-recreate the section (which lost
+  // the checked lines and re-homed the section below Current State).
+  // Each takes a query, or a match resolved earlier against this same body.
+  // `matched` is reported unstamped; the line edited keeps its stamp.
+  function completeNextAction(body: string, action: string | ActionMatch): { matched: string; body: string } {
+    const match = typeof action === 'string' ? matchAction(body, action) : action
+    return { matched: match.text, body: editActionLines(body, lines => { lines[match.line] = lines[match.line].replace('- [ ] ', '- [x] ') }) }
   }
 
-  function removeNextAction(body: string, query: string): { matched: string; body: string } {
-    const matched = matchAction(body, query)
+  // `line` is the removed line as the file held it, stamp included, with the
+  // lines it carries — what the archive log keeps.
+  function removeNextAction(body: string, action: string | ActionMatch): { matched: string; line: string; body: string } {
+    const match = typeof action === 'string' ? matchAction(body, action) : action
+    const section = actionSectionLines(body)
+    const end = actionEnd(section, match.line)
+    return { matched: match.text, line: actionBlock(section, match.line), body: editActionLines(body, lines => { lines.splice(match.line, end - match.line) }) }
+  }
 
-    // Remove the line
-    const updatedBody = editActionLine(body, matched, (lines, i) => { lines.splice(i, 1) })
+  /** Every checkbox line of Next Actions, open and ticked, as the file holds
+   * them — each with the lines it carries. */
+  function actionLines(body: string): string[] {
+    const section = actionSectionLines(body)
+    return section.flatMap((l, i) => ACTION_RE.test(l) ? [actionBlock(section, i)] : [])
+  }
 
-    // Check if any unchecked items remain
-    const remaining = getNextActions(updatedBody)
-    if (remaining.length === 0) {
-      return { matched, body: clearNextActions(updatedBody) }
+  /** Take the oldest ticked lines out of Next Actions until at most `keep`
+   * remain. Lines are added in order and ticked in place, so file order is
+   * age order. `lines` are the taken lines as the file held them, oldest
+   * first, each with the lines it carries. */
+  function extractOldestTickedActions(body: string, keep: number): { lines: string[]; body: string } {
+    const section = actionSectionLines(body)
+    const ticked = section.flatMap((l, i) => ACTION_RE.exec(l)?.[1].trim() ? [i] : [])
+    const oldest = ticked.slice(0, Math.max(0, ticked.length - keep))
+    if (oldest.length === 0) return { lines: [], body }
+    const taken = new Set(oldest.flatMap(i => Array.from({ length: actionEnd(section, i) - i }, (_, k) => i + k)))
+    return {
+      lines: oldest.map(i => actionBlock(section, i)),
+      body: editActionLines(body, lines => { lines.splice(0, lines.length, ...lines.filter((_, i) => !taken.has(i))) }),
     }
+  }
 
-    return { matched, body: updatedBody }
+  /** The body with the stamp stripped from every checkbox line (open and
+   * ticked) of Next Actions — for surfaces that carry action text but not the
+   * vault's file format (export). Nothing outside the section is touched. */
+  function stripNextActionStamps(body: string): string {
+    const section = findSection(body, 'Next Actions')
+    if (!section) return body
+    const content = body.slice(section.headingEnd, section.end)
+      .split('\n')
+      .map(line => /^- \[[ xX]\] /.test(line) ? stripActionStamp(line) : line)
+      .join('\n')
+    return body.slice(0, section.headingEnd) + content + body.slice(section.end)
+  }
+
+  /** Remove the section once no open item remains (appear-on-write, removed when emptied). */
+  function pruneNextActions(body: string): string {
+    if (!findSection(body, 'Next Actions')) return body
+    return getNextActions(body).length === 0 ? clearNextActions(body) : body
   }
 
   function clearNextActions(body: string): string {
@@ -643,10 +815,17 @@ function makeDoc(structuralSections: Set<string>): Doc {
     setBrief,
     removeBrief,
     getNextActions,
+    getActionItems,
+    renderActionHandles,
     addNextAction,
+    matchNextAction: matchAction,
     completeNextAction,
     removeNextAction,
+    actionLines,
+    extractOldestTickedActions,
+    pruneNextActions,
     clearNextActions,
+    stripNextActionStamps,
     syncRelatedSection,
   }
 }
@@ -664,6 +843,14 @@ export function getBrief(body: string): string | null {
 
 export function getNextActions(body: string): string[] {
   return ENTITY_UNION_DOC.getNextActions(body)
+}
+
+export function getActionItems(body: string): ActionItem[] {
+  return ENTITY_UNION_DOC.getActionItems(body)
+}
+
+export function renderActionHandles(body: string, mark?: (added: string | null) => string): string {
+  return ENTITY_UNION_DOC.renderActionHandles(body, mark)
 }
 
 export function parseSessionLog(body: string): Array<{ date: string; agent: string; type: SessionLogType; summary: string }> {

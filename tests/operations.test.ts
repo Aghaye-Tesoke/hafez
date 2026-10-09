@@ -5,10 +5,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createHafez } from '../src/index.js'
 import { parseFilePath } from '../src/vault.js'
+import { asKnowledge, readEntity, readKnowledge } from './helpers/vault-files.js'
 import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal, type MemoryJournal } from './helpers/memory-journal.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-test-ops-' + Date.now())
 const VAULT = join(TMP, 'vault')
@@ -34,7 +36,7 @@ describe('create', () => {
     const os = makeOS()
     const slug = await os.create('entity', 'Test Project', { type: 'project', purpose: 'Testing' })
     expect(slug).toBe('test-project')
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/test-project.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/test-project.md'))
     expect(frontmatter.name).toBe('Test Project')
     expect(frontmatter.type).toBe('project')
     expect(frontmatter.status).toBe('active')
@@ -56,7 +58,7 @@ describe('create', () => {
     const os = makeOS()
     const slug = await os.create('knowledge', 'Test Pattern', { domain: ['engineering'] })
     expect(slug).toBe('test-pattern')
-    const { frontmatter } = parseFilePath(join(VAULT, 'knowledge/test-pattern.md'))
+    const { frontmatter } = readKnowledge(join(VAULT, 'knowledge/test-pattern.md'))
     expect(frontmatter.confidence).toBe('observation')
     expect(frontmatter['reinforcement-count']).toBe(0)
   })
@@ -65,7 +67,7 @@ describe('create', () => {
     const os = makeOS()
     const slug = await os.create('entity', 'Child Thread', { type: 'entity', parent: 'test-project' })
     expect(slug).toBe('child-thread')
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/child-thread.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/child-thread.md'))
     expect(frontmatter.parent).toBe('test-project')
   })
 })
@@ -75,7 +77,7 @@ describe('capture', () => {
     const os = makeOS()
     const slug = await os.capture('Quick Idea', 'Some notes here')
     expect(slug).toBe('quick-idea')
-    const { frontmatter, body } = parseFilePath(join(VAULT, 'entities/quick-idea.md'))
+    const { frontmatter, body } = readEntity(join(VAULT, 'entities/quick-idea.md'))
     expect(frontmatter.type).toBe('capture')
     expect(body).toContain('Some notes here')
   })
@@ -106,15 +108,30 @@ describe('read', () => {
     const os = makeOS()
     await expect(os.read('nonexistent')).rejects.toThrow('not found')
   })
+
+  it('a miss carries the closest slugs as the error details, entities and knowledge alike', async () => {
+    const os = makeOS()
+    await os.create('knowledge', 'Project Testing Notes', {})
+    const err = await os.read('test-proj').catch(e => e)
+    expect(err.code).toBe('NOT_FOUND')
+    expect(err.details.slice(0, 2)).toEqual(['test-project', 'project-testing-notes'])
+  })
+
+  it('a miss with nothing close carries no closest slugs', async () => {
+    const os = makeOS()
+    const err = await os.read('launchpads').catch(e => e)
+    expect(err.code).toBe('NOT_FOUND')
+    expect(err.details).toEqual([])
+  })
 })
 
 describe('update', () => {
   it('updates status and last-touched', async () => {
     const os = makeOS()
     await os.update('test-project', { status: 'paused' })
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/test-project.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/test-project.md'))
     expect(frontmatter.status).toBe('paused')
-    expect(frontmatter['last-touched']).toBe(new Date().toISOString().slice(0, 10))
+    expect(frontmatter['last-touched']).toBe(localDay())
   })
 
   it('appends session log entry newest-first', async () => {
@@ -122,7 +139,7 @@ describe('update', () => {
     await os.update('test-project', {
       session_log: { type: 'progress', summary: 'Did something', agent: 'Test' }
     })
-    const { body } = parseFilePath(join(VAULT, 'entities/test-project.md'))
+    const { body } = readEntity(join(VAULT, 'entities/test-project.md'))
     const slIdx = body.indexOf('## Session Log')
     const entryIdx = body.indexOf('[progress]')
     expect(entryIdx).toBeGreaterThan(slIdx)
@@ -132,7 +149,7 @@ describe('update', () => {
   it('inserts current_state before session log', async () => {
     const os = makeOS()
     await os.update('test-project', { current_state: 'Everything is fine' })
-    const { body } = parseFilePath(join(VAULT, 'entities/test-project.md'))
+    const { body } = readEntity(join(VAULT, 'entities/test-project.md'))
     expect(body).toContain('## Current State')
     expect(body).toContain('Everything is fine')
     const csIdx = body.indexOf('## Current State')
@@ -160,7 +177,7 @@ describe('update', () => {
     await expect(os.update(noteSlug, { confidence: 'bogus' as any }))
       .rejects.toThrow(/invalid shape at fields\.confidence/)
     // The invalid value never lands in frontmatter
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/test-project.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/test-project.md'))
     expect(frontmatter.status).not.toBe('bananas')
   })
 
@@ -187,14 +204,14 @@ describe('link', () => {
     await os.create('entity', 'Link Target', { type: 'entity' })
     await os.create('entity', 'Link Source', { type: 'entity' })
     await os.link('link-source', 'link-target', 'parent')
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/link-source.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/link-source.md'))
     expect(frontmatter.parent).toBe('link-target')
   })
 
   it('appends to related array', async () => {
     const os = makeOS()
     await os.link('link-source', 'test-project', 'related')
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/link-source.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/link-source.md'))
     expect(frontmatter.related).toContain('test-project')
   })
 
@@ -223,14 +240,14 @@ describe('unlink', () => {
   it('removes parent relation', async () => {
     const os = makeOS()
     await os.unlink('link-source', 'link-target', 'parent')
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/link-source.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/link-source.md'))
     expect(frontmatter.parent).toBeUndefined()
   })
 
   it('removes from related array', async () => {
     const os = makeOS()
     await os.unlink('link-source', 'test-project', 'related')
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/link-source.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/link-source.md'))
     expect(frontmatter.related || []).not.toContain('test-project')
   })
 })
@@ -240,7 +257,7 @@ describe('knowledge', () => {
     const os = makeOS()
     const slug = await os.create('knowledge', 'Evidence Test Note', { synthesis: 'Initial' })
     await os.update(slug, { add_evidence: 'New evidence found' })
-    const { frontmatter, body } = await os.read(slug, 'full')
+    const { frontmatter, body } = asKnowledge(await os.read(slug, 'full'))
     expect(frontmatter['reinforcement-count']).toBe(1)
     expect(frontmatter['last-reinforced']).toBeDefined()
     expect(body).toContain('New evidence found')
@@ -255,7 +272,7 @@ describe('batch', () => {
       { op: 'create', kind: 'entity', name: 'Batch Entity', fields: { type: 'project' } },
       { op: 'link', slug: 'batch-entity', target: 'test-project', relation: 'related' },
     ])
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/batch-entity.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/batch-entity.md'))
     expect(frontmatter.related).toContain('test-project')
   })
 
@@ -289,7 +306,7 @@ describe('batch', () => {
       } },
     ])
     expect(results[0].status).toBe('ok')
-    const { frontmatter: fm } = parseFilePath(join(VAULT, 'knowledge/batch-knowledge-test.md'))
+    const { frontmatter: fm } = readKnowledge(join(VAULT, 'knowledge/batch-knowledge-test.md'))
     expect(fm.domain).toContain('engineering')
     expect(fm.confidence).toBe('pattern')
   })
@@ -420,7 +437,7 @@ describe('description field', () => {
   it('create entity with description writes frontmatter and query returns it', async () => {
     const os = makeOS()
     const slug = await os.create('entity', 'Described Entity', { type: 'project', description: 'One-line summary' })
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/described-entity.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/described-entity.md'))
     expect(frontmatter.description).toBe('One-line summary')
     const { items } = await os.query({ filter: 'all' })
     expect(items.find(i => i.slug === slug)!.description).toBe('One-line summary')
@@ -429,7 +446,7 @@ describe('description field', () => {
   it('create knowledge with description writes frontmatter and query returns it', async () => {
     const os = makeOS()
     const slug = await os.create('knowledge', 'Described Note', { description: 'Knowledge summary' })
-    const { frontmatter } = parseFilePath(join(VAULT, 'knowledge/described-note.md'))
+    const { frontmatter } = readKnowledge(join(VAULT, 'knowledge/described-note.md'))
     expect(frontmatter.description).toBe('Knowledge summary')
     const { items } = await os.query_knowledge({})
     expect(items.find(i => i.slug === slug)!.description).toBe('Knowledge summary')
@@ -439,10 +456,10 @@ describe('description field', () => {
     const os = makeOS()
     await os.create('entity', 'Desc Update Target', { type: 'entity' })
     await os.update('desc-update-target', { description: 'Now described' })
-    let fm = parseFilePath(join(VAULT, 'entities/desc-update-target.md')).frontmatter
+    let fm = readEntity(join(VAULT, 'entities/desc-update-target.md')).frontmatter
     expect(fm.description).toBe('Now described')
     await os.update('desc-update-target', { description: '' })
-    fm = parseFilePath(join(VAULT, 'entities/desc-update-target.md')).frontmatter
+    fm = readEntity(join(VAULT, 'entities/desc-update-target.md')).frontmatter
     expect(fm.description).toBeUndefined()
   })
 
@@ -452,8 +469,8 @@ describe('description field', () => {
       { op: 'create', kind: 'entity', name: 'Batch Desc Entity', fields: { type: 'entity', description: 'Batch entity desc' } },
       { op: 'create', kind: 'knowledge', name: 'Batch Desc Note', fields: { description: 'Batch knowledge desc' } },
     ])
-    expect(parseFilePath(join(VAULT, 'entities/batch-desc-entity.md')).frontmatter.description).toBe('Batch entity desc')
-    expect(parseFilePath(join(VAULT, 'knowledge/batch-desc-note.md')).frontmatter.description).toBe('Batch knowledge desc')
+    expect(readEntity(join(VAULT, 'entities/batch-desc-entity.md')).frontmatter.description).toBe('Batch entity desc')
+    expect(readKnowledge(join(VAULT, 'knowledge/batch-desc-note.md')).frontmatter.description).toBe('Batch knowledge desc')
   })
 })
 
@@ -461,7 +478,7 @@ describe('resource field', () => {
   it('create entity with resource writes frontmatter and query returns it', async () => {
     const os = makeOS()
     const slug = await os.create('entity', 'Resourced Entity', { type: 'project', resource: 'https://github.com/org/repo' })
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities/resourced-entity.md'))
+    const { frontmatter } = readEntity(join(VAULT, 'entities/resourced-entity.md'))
     expect(frontmatter.resource).toBe('https://github.com/org/repo')
     const { items } = await os.query({ filter: 'all' })
     expect(items.find(i => i.slug === slug)!.resource).toBe('https://github.com/org/repo')
@@ -471,10 +488,10 @@ describe('resource field', () => {
     const os = makeOS()
     await os.create('entity', 'Resource Update Target', { type: 'entity' })
     await os.update('resource-update-target', { resource: 'https://example.com/dashboard' })
-    let fm = parseFilePath(join(VAULT, 'entities/resource-update-target.md')).frontmatter
+    let fm = readEntity(join(VAULT, 'entities/resource-update-target.md')).frontmatter
     expect(fm.resource).toBe('https://example.com/dashboard')
     await os.update('resource-update-target', { resource: '' })
-    fm = parseFilePath(join(VAULT, 'entities/resource-update-target.md')).frontmatter
+    fm = readEntity(join(VAULT, 'entities/resource-update-target.md')).frontmatter
     expect(fm.resource).toBeUndefined()
   })
 
@@ -490,7 +507,7 @@ describe('resource field', () => {
     await os.batch([
       { op: 'create', kind: 'entity', name: 'Batch Resource Entity', fields: { type: 'entity', resource: 'https://example.com/batch' } },
     ])
-    expect(parseFilePath(join(VAULT, 'entities/batch-resource-entity.md')).frontmatter.resource).toBe('https://example.com/batch')
+    expect(readEntity(join(VAULT, 'entities/batch-resource-entity.md')).frontmatter.resource).toBe('https://example.com/batch')
   })
 })
 
@@ -499,7 +516,7 @@ describe('null clears description and resource', () => {
     const os = makeOS()
     await os.create('entity', 'Null Clear Target', { type: 'entity', description: 'Set', resource: 'https://example.com' })
     await os.update('null-clear-target', { description: null, resource: null })
-    const fm = parseFilePath(join(VAULT, 'entities/null-clear-target.md')).frontmatter
+    const fm = readEntity(join(VAULT, 'entities/null-clear-target.md')).frontmatter
     expect(fm.description).toBeUndefined()
     expect(fm.resource).toBeUndefined()
   })
@@ -675,7 +692,7 @@ describe('promote (memory journal)', () => {
     await os.capture('Spine Promote One', 'raw notes here')
     const slug = await os.promote('spine-promote-one', 'entity')
     expect(slug).toBe('spine-promote-one')
-    const { frontmatter, body } = parseFilePath(join(VAULT, 'entities/spine-promote-one.md'))
+    const { frontmatter, body } = readEntity(join(VAULT, 'entities/spine-promote-one.md'))
     expect(frontmatter.type).toBe('entity')
     expect(body).toContain('## Context')
     expect(body).toContain('Promoted from capture to entity')

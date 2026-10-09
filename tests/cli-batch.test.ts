@@ -1,5 +1,10 @@
 // tests/cli-batch.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { spawnSync } from 'child_process'
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { simpleGit } from 'simple-git'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { parseBatchInput } from '../src/cli/commands.js'
 import { HafezError } from '../src/types.js'
 
@@ -76,7 +81,7 @@ describe('parseBatchInput', () => {
   })
 
   it('throws VALIDATION_FAILED on unknown op', () => {
-    const input = JSON.stringify([{ op: 'delete', slug: 'foo' }])
+    const input = JSON.stringify([{ op: 'archive', slug: 'foo' }])
     expect(() => parseBatchInput(input)).toThrow(HafezError)
     try { parseBatchInput(input) } catch (e) {
       expect((e as HafezError).code).toBe('VALIDATION_FAILED')
@@ -253,6 +258,51 @@ describe('parseBatchInput', () => {
     }
   })
 
+  // #151: Zod v4 sets no `received` on an issue, so `got` comes from the op
+  // payload at the issue's path — and is left out when nothing is there.
+  function blockFor(op: unknown): string {
+    try { parseBatchInput(JSON.stringify([op])) } catch (e) {
+      return (e as HafezError).details?.join('\n') ?? ''
+    }
+    throw new Error('expected parseBatchInput to throw')
+  }
+
+  it('wrong type reports the value sent', () => {
+    const block = blockFor({ op: 'create', kind: 'knowledge', name: 'probe', fields: { domain: 5 } })
+    expect(block).toContain('issue: wrong type')
+    expect(block).toMatch(/got: +5$/m)
+    expect(block).not.toContain('undefined')
+  })
+
+  it('wrong type at a nested path reports the value at that path', () => {
+    const block = blockFor({ op: 'update', slug: 'foo', fields: {
+      session_log: { type: 'progress', summary: { x: 1 }, agent: 'claude' },
+    } })
+    expect(block).toContain('field: fields.session_log.summary')
+    expect(block).toMatch(/got: +\{"x":1\}$/m)
+  })
+
+  it('wrong type with nothing at the path has no got line', () => {
+    const block = blockFor({ op: 'create', kind: 'knowledge', fields: {} })
+    expect(block).toContain('field: name')
+    expect(block).toContain('issue: wrong type')
+    expect(block).not.toMatch(/got:/)
+  })
+
+  it('a long value sent is truncated', () => {
+    const block = blockFor({ op: 'update', slug: 'foo', fields: { session_log: 'x'.repeat(200) } })
+    const got = block.match(/got: +(.*)$/m)?.[1] ?? ''
+    expect(got.startsWith('"xxx')).toBe(true)
+    expect(got.endsWith('…')).toBe(true)
+    expect(got.length).toBe(60)
+  })
+
+  it('invalid value reports the value sent', () => {
+    const block = blockFor({ op: 'update', slug: 'foo', fields: { status: 'bogus' } })
+    expect(block).toContain('issue: invalid value')
+    expect(block).toMatch(/got: +"bogus"$/m)
+  })
+
   it('insight → synthesis alias still normalizes post-refactor', () => {
     const ops = parseBatchInput(JSON.stringify([
       { op: 'update', slug: 'k', fields: { insight: 'note text' } },
@@ -271,5 +321,59 @@ describe('parseBatchInput description/resource null-clear', () => {
     expect(ops).toHaveLength(1)
     expect((ops[0] as any).fields.description).toBeNull()
     expect((ops[0] as any).fields.resource).toBeNull()
+  })
+})
+
+// #145: the hafez skill's batch example keeps its JSON in single quotes, so a
+// straight apostrophe in a brief or an action ends the argument. The skill
+// names the apostrophe to write instead; the example, filled in that way, runs
+// in a real shell as written.
+describe('the hafez skill batch example, through a real shell', () => {
+  const skill = readFileSync(join(process.cwd(), 'skill', 'hafez', 'SKILL.md'), 'utf-8')
+  const PROSE = "Mobile isn't migrated; $HOME and `date` stay literal"
+  const SHELLS = ['bash', 'sh', 'zsh'].filter(sh => spawnSync(sh, ['-c', 'true']).status === 0)
+  const dir = join(tmpdir(), 'hafez-test-cli-batch-shell-' + Date.now())
+  const shimDir = join(dir, 'bin')
+  const CLI = join(process.cwd(), 'dist', 'cli.js')
+
+  /** The apostrophe the skill says to write inside the quoted JSON. */
+  const apostrophe = () => skill.match(/write each apostrophe as `([^`]+)`/)?.[1]
+
+  beforeAll(() => {
+    mkdirSync(shimDir, { recursive: true })
+    writeFileSync(join(shimDir, 'hafez'), `#!/bin/sh\nexec node '${CLI}' --vault "$HAFEZ_TEST_VAULT" "$@"\n`)
+    chmodSync(join(shimDir, 'hafez'), 0o755)
+  })
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  it('names an apostrophe that is not the one that ends the quotes', () => {
+    expect(apostrophe()).toBeDefined()
+    expect(apostrophe()).not.toContain("'")
+  })
+
+  it.each(SHELLS)('%s: a brief and an action with an apostrophe, a $VAR and a backtick land', async shell => {
+    const vault = join(dir, shell)
+    mkdirSync(join(vault, 'entities'), { recursive: true })
+    mkdirSync(join(vault, 'knowledge'), { recursive: true })
+    await simpleGit(vault).init()
+    await simpleGit(vault).commit('init', ['--allow-empty'])
+    const env = { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, HAFEZ_TEST_VAULT: vault }
+    // The example links to a parent it does not create.
+    expect(spawnSync('hafez', ['create', 'entity', 'Auth Refactor', '--type', 'project'], { env, encoding: 'utf-8' }).stdout.trim()).toBe('auth-refactor')
+
+    const prose = JSON.stringify(PROSE).slice(1, -1).replace(/'/g, apostrophe() ?? "'")
+    const command = skill.match(/```\n(hafez batch --data '[\s\S]*?)\n```/)![1]
+      .replace('"fields":{"type":"entity"}', `"fields":{"type":"entity","brief":"${prose}","add_action":"${prose}"}`)
+
+    expect(command).toContain('"brief"')
+
+    const result = spawnSync(shell, ['-c', command], { env, encoding: 'utf-8' })
+    expect(result.stderr).toBe('')
+    expect(result.stdout).toMatch(/^Batch complete: 2 operations/)
+    const literal = PROSE.replace(/'/g, apostrophe() ?? "'")
+    const body = readFileSync(join(vault, 'entities', 'token-rotation.md'), 'utf-8')
+    expect(body).toContain(`## Brief\n\n${literal}\n`)
+    expect(body).toContain(`- [ ] ${literal}`)
+    expect(body).toMatch(/^parent: auth-refactor$/m)
   })
 })

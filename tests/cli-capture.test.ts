@@ -9,7 +9,7 @@ import { spawnSync } from 'child_process'
 import { mkdirSync, rmSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 
 const TMP = join(tmpdir(), 'hafez-cli-capture-test-' + Date.now())
 const BARE = join(TMP, 'remote.git')

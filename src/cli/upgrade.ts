@@ -3,13 +3,19 @@
 // `hafez upgrade` — agent-directed update check. It CHECKS AND PRINTS; it
 // never installs. The printed steps install code and overwrite the user's
 // agent instructions, so the privileged step is the human's — same discipline
-// as `onboard` (writes nothing outside the vault) and as the release skill
+// as bare `onboard` (writes nothing; only `--install`/`--remove`, run after
+// the user's yes, write outside the vault) and as the release skill
 // (`npm publish` is the user's action). It also sidesteps a process replacing
 // its own binary mid-run.
 //
 // `pre-vault` on purpose: it must still work when the vault is unresolvable
 // or the native SQLite binding is unbuilt, which is exactly when someone is
 // trying to upgrade. Nothing here touches the core.
+//
+// The skills and the Block are checked by their hashes, in every place
+// `onboard --install` writes them (install.ts), and only where they are
+// installed: no Block means invoke-only, never a Block to offer. Refreshing
+// them is `onboard --install`'s job, so that is the step printed.
 //
 // Untrusted input: the registry response is rendered into a document an agent
 // will execute commands from. Only the `version` field is read, only after it
@@ -22,8 +28,9 @@ import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { UsageError } from './args.js'
-import { INTEGRATION_SNIPPET } from './onboard.js'
+import { UsageError, helpIfAsked } from './args.js'
+import { HARNESSES, detectAgent, isHarness } from '../harness.js'
+import { checkInstall, fixBrokenMarkers, type BlockCheck, type SkillCheck } from './install.js'
 
 const PLAIN_SEMVER = /^\d+\.\d+\.\d+$/
 const REGISTRY_TIMEOUT_MS = 3000
@@ -47,20 +54,29 @@ export interface UpgradeState {
   registryReachable: boolean
   npmMajor: number | null
   install: 'registry' | 'dev-checkout'
-  skill: 'present' | 'absent'
-  skillSource: string
-  skillTarget: string
+  /** Null when the installed files could not be read. */
+  integration: Integration | null
   /** Mutually exclusive with the registry install in `steps` — exposed
    * separately so an agent iterating `steps` cannot run both. */
   alternativeInstall: string | null
   steps: UpgradeStep[]
 }
 
+/** Mode is not stored: a Block present means always-on. */
+export interface Integration {
+  mode: 'always-on' | 'invoke-only'
+  blocks: BlockCheck[]
+  skills: SkillCheck[]
+}
+
 export interface UpgradeDeps {
   fetch: typeof globalThis.fetch
   registryUrl: string
   packageRoot: string
-  installedSkillPath: string
+  /** The temp-home seam, as onboard's. */
+  home: string
+  /** Names the Harness for an invoke-only `onboard --install`. */
+  env: Record<string, string | undefined>
   npmVersion: () => string
 }
 
@@ -165,34 +181,63 @@ function devCheckoutStep(packageRoot: string): UpgradeStep {
   return { kind: 'command', text: `cd '${packageRoot}' && ${DEV_CHECKOUT_WORK}` }
 }
 
-function skillCopyStep(source: string, target: string, sourceExists: boolean): UpgradeStep {
-  if (!sourceExists) {
-    // Emitting the cp anyway would hand the agent a step that fails with
-    // ENOENT and reads as a failed upgrade, for a check that found nothing.
-    return {
-      kind: 'action',
-      text:
-        `No bundled skill at ${source}, so the installed copy at ${target} cannot be refreshed from this ` +
-        'package. Re-copy it from the installed hafez package after upgrading — see the README Updating section.',
-    }
+function readIntegration(home: string): Integration | null {
+  try {
+    const { skills, blocks } = checkInstall(home)
+    return { mode: blocks.length > 0 ? 'always-on' : 'invoke-only', blocks, skills }
+  } catch {
+    return null
   }
-  if (unquotable(source) || unquotable(target)) {
-    return {
-      kind: 'action',
-      text:
-        'Copy the bundled skill file over the installed one by hand — the paths contain characters ' +
-        `that single-quoting cannot make safe. Source: ${source} — Target: ${target}`,
-    }
+}
+
+const HARNESS_IDS = Object.keys(HARNESSES).join('|')
+
+/** `onboard --install` writes both skills on every run, so a skill needs no
+ * run of its own when a Block's run is printed. Broken markers make that run
+ * refuse, so they get only the hand fix until it is done. When upgrading,
+ * every installed piece is refreshed: the new version renders new text, and
+ * this check can only compare against the running one's. */
+function integrationSteps(integration: Integration | null, upgrading: boolean, env: UpgradeDeps['env']): UpgradeStep[] {
+  if (integration === null) {
+    return [{ kind: 'action', text: 'The installed skills and Block could not be read, so they were not checked.' }]
   }
-  return { kind: 'command', text: `mkdir -p '${dirname(target)}' && cp '${source}' '${target}'` }
+  const broken = integration.blocks.filter(b => b.state === 'broken')
+  if (broken.length > 0) {
+    return broken.map(b => ({
+      kind: 'action',
+      text: fixBrokenMarkers(b.path, 'hafez upgrade'),
+    }))
+  }
+  const { blocks, skills } = integration
+  const skillDrift = skills.some(s => s.state === 'stale' || s.state === 'hand-edited')
+  const blockDrift = (b: BlockCheck) => b.state === 'stale' || (b.state === 'hand-edited' && b.renderChanged)
+  const installed = blocks.length > 0 || skills.some(s => s.state !== 'absent')
+  if (!installed || (!upgrading && !skillDrift && !blocks.some(blockDrift))) return []
+
+  if (blocks.length > 0) {
+    // Skills alone: any Block's run writes them, so pick one that run will not
+    // stop on to ask about a hand-edit the status says needs nothing.
+    const skillsOnly = [blocks.find(b => b.state !== 'hand-edited') ?? blocks[0]]
+    const targets = upgrading ? blocks : blocks.filter(blockDrift)
+    return (targets.length > 0 ? targets : skillsOnly).map(b => ({
+      kind: 'command',
+      text: `hafez onboard --install --mode always-on --harness ${b.harness}`,
+    }))
+  }
+  const harness = detectAgent(env)
+  if (isHarness(harness)) return [{ kind: 'command', text: `hafez onboard --install --mode invoke-only --harness ${harness}` }]
+  return [{
+    kind: 'action',
+    text: `Run \`hafez onboard --install --mode invoke-only --harness <${HARNESS_IDS}>\`, naming the harness you are running in.`,
+  }]
 }
 
 /** The action list, in execution order. Every command is built from static
- * constants; the only interpolated values are the regex-validated version and
- * the quoted absolute paths (package root, skill source, skill target). */
+ * constants; the only interpolated values are the regex-validated version,
+ * the quoted package root, and harness ids from the HARNESSES table. */
 function deriveSteps(
   state: Omit<UpgradeState, 'steps' | 'alternativeInstall'>,
-  ctx: { packageRoot: string; skillSourceExists: boolean },
+  ctx: { packageRoot: string; env: UpgradeDeps['env'] },
 ): Pick<UpgradeState, 'steps' | 'alternativeInstall'> {
   const steps: UpgradeStep[] = []
   let alternativeInstall: string | null = null
@@ -218,11 +263,7 @@ function deriveSteps(
     }
   }
 
-  // Unconditional when the skill exists: the bundled skill ships INSIDE the
-  // installed package, so on the main upgrade path the bundled copy is equally
-  // stale and any byte-compare reports "current" in exactly the silent-drift
-  // case detection would exist for. Copying an identical file is a no-op.
-  if (state.skill === 'present') steps.push(skillCopyStep(state.skillSource, state.skillTarget, ctx.skillSourceExists))
+  steps.push(...integrationSteps(state.integration, upgrading, ctx.env))
 
   // A SCHEMA_VERSION bump does not self-heal: the read-only path warns and
   // returns null, so the first post-upgrade query answers *empty* until a
@@ -244,14 +285,9 @@ export async function buildUpgradeState(deps: UpgradeDeps): Promise<UpgradeState
     npmMajor: probeNpmMajor(deps),
     // Published tarballs carry only dist, skill, README.md and LICENSE.
     install: exists(join(deps.packageRoot, 'src')) ? ('dev-checkout' as const) : ('registry' as const),
-    skill: exists(deps.installedSkillPath) ? ('present' as const) : ('absent' as const),
-    skillSource: join(deps.packageRoot, 'skill', 'SKILL.md'),
-    skillTarget: deps.installedSkillPath,
+    integration: readIntegration(deps.home),
   }
-  return {
-    ...base,
-    ...deriveSteps(base, { packageRoot: deps.packageRoot, skillSourceExists: exists(base.skillSource) }),
-  }
+  return { ...base, ...deriveSteps(base, { packageRoot: deps.packageRoot, env: deps.env }) }
 }
 
 function versionLines(state: UpgradeState): string[] {
@@ -276,6 +312,33 @@ function versionLines(state: UpgradeState): string[] {
   return lines
 }
 
+const BLOCK_STATE: Record<BlockCheck['state'], (b: BlockCheck) => string> = {
+  current: () => 'current',
+  stale: () => 'stale',
+  'hand-edited': b =>
+    b.renderChanged
+      ? "hand-edited, and the Block Hafez writes has changed since. `onboard --install` leaves it alone and prints a diff; replace it with --confirm only after the user's yes"
+      : 'hand-edited, over the current Block — nothing to update',
+  broken: () => 'broken markers',
+}
+
+function integrationLines(integration: Integration | null): string[] {
+  if (integration === null) return ['Skills and Block: could not be read.']
+  const lines =
+    integration.mode === 'always-on'
+      ? ['Mode: always-on (a Block is installed).']
+      : [
+          'Mode: invoke-only (no Block in any instructions file Hafez writes); installing a Block is not offered.',
+          "A Block pasted into Cursor's User Rules lives in its Settings and is not checked here.",
+        ]
+  for (const b of integration.blocks) lines.push(`- Block in ${b.path}: ${BLOCK_STATE[b.state](b)}`)
+  for (const s of integration.skills) {
+    const lost = s.state === 'hand-edited' ? ' — `onboard --install` replaces it, and the edit is lost' : ''
+    lines.push(`- ${s.path}: ${s.state}${lost}`)
+  }
+  return lines
+}
+
 export function renderUpgrade(state: UpgradeState): string {
   const out: string[] = [
     '# Hafez — Upgrade Check',
@@ -295,18 +358,7 @@ export function renderUpgrade(state: UpgradeState): string {
   }
 
   out.push('')
-  out.push(
-    state.skill === 'present'
-      ? `Skill: installed at ${state.skillTarget}. The skill ships inside the hafez package, so an upgraded package leaves this copy stale — the re-copy step is idempotent, run it either way.`
-      : `Skill: none at ${state.skillTarget} — nothing to re-copy (a non-Claude-Code harness, not drift).`,
-  )
-  out.push('')
-  out.push('Integration snippet — compare this against the Hafez section of the')
-  out.push("user's instructions file (Claude Code: ~/.claude/CLAUDE.md; any")
-  out.push('AGENTS.md harness: its global AGENTS.md) and reconcile differences')
-  out.push('with them. Do not rewrite their file unasked.')
-  out.push('')
-  out.push(INTEGRATION_SNIPPET)
+  out.push(...integrationLines(state.integration))
   out.push('')
   out.push('## Steps')
   out.push('')
@@ -341,7 +393,8 @@ function defaultDeps(): UpgradeDeps {
     // The documented escape hatch for private registries and proxied networks.
     registryUrl: process.env.HAFEZ_REGISTRY_URL || DEFAULT_REGISTRY_URL,
     packageRoot: join(here, '..', '..'),
-    installedSkillPath: join(homedir(), '.claude', 'skills', 'hafez', 'SKILL.md'),
+    home: homedir(),
+    env: process.env,
     // Bounded for the same reason the registry fetch is: a global prefix on a
     // network mount or a cold cache can hang npm, and `upgrade` has to stay
     // answerable when the environment is the thing that is broken. A timeout
@@ -364,6 +417,7 @@ export async function cmdUpgrade(
   ctx: { json: boolean },
   deps: UpgradeDeps = defaultDeps(),
 ): Promise<string> {
+  helpIfAsked(args, USAGE)
   for (const arg of args) {
     if (arg.startsWith('--')) throw new UsageError(`Unknown flag ${arg}\n${USAGE}`)
     throw new UsageError(`upgrade takes no arguments\n${USAGE}`)

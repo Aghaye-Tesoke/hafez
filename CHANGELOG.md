@@ -1,5 +1,230 @@
 # Changelog
 
+## 2.0.0 — 2026-10-09
+
+The agent contract release. Every surface an agent reads (the Block, both
+skills, and the output of `read`, `update` and `onboard`) now comes from one
+source and ends with the next command to run, and `hafez onboard` installs
+and checks the integration itself. Major version because some exported
+library types, `help --agent` and the skill file layout changed: see
+**Changed** and **Removed**.
+
+### Highlights
+
+- **Every `read` ends with a write line you can run.** At every depth,
+  `read` ends with the Footer: one `hafez update <slug> …` line filled in
+  for that note's kind, type and subtype (a capture gets the `promote`
+  line), so writing back never needs a flag lookup. `read --json` carries
+  it as a `writes` op object.
+- **Handles on open actions.** `read` shows a short hex Handle (at least
+  four characters) in front of each open next action, and
+  `--complete-action` / `--remove-action` (and the batch fields) take a
+  Handle or text. Any prefix of four or more hex characters that names
+  exactly one open line works, so handles from an earlier `read` still
+  resolve after a sibling is ticked, removed or added. `read --json` open
+  actions carry `handle`.
+- **Action lines are dated and never lost.** Every add (create, update,
+  batch, digest) stamps `(added YYYY-MM-DD)` with the local day; every
+  reader strips the stamp, and older unstamped lines are left as they are.
+  A removed or cleared action, and the oldest ticked ones once Next Actions
+  holds ten or more (nine stay), move to the entity's archive log
+  (`entities/archive/<slug>-log.md`) in the update's own commit, along with
+  any sub-bullets or notes under them.
+- **Stale actions are marked on `read` and named after an `update`** (#97).
+  An open action older than the entity's `staleness-days` (default 14)
+  since its added day reads `… (added 2026-08-01) · stale 62d`; an undated
+  one reads `… · stale, undated`, whatever the entity's status. `read
+  --json` open actions are `{handle, text, added, age_days, stale}` (undated:
+  `added` and `age_days` null, `stale` true). While Stale lines remain on the
+  entity, `update` success adds a second line: `2 stale actions remain:
+  a3f9, 7c21. Tick what landed, drop what is dead.` An existing vault shows
+  its whole undated backlog as stale on first read; expected.
+- **A `read` miss offers the closest slugs.** An unknown slug prints up to
+  five `hafez read` lines for the closest notes by name, slug and
+  description (a typo or a cut-short word still matches), else a
+  `hafez search` line, then the `create` line, on stderr with exit 1;
+  under `--json`, `{slug, closest}` on stdout. `hafez list` stays an unknown
+  command but now points at `hafez query --filter active`.
+- **`create knowledge` refuses near-duplicates.** A name sharing all but one
+  of the shorter name's significant words with an existing note (at least
+  three) is refused with exit 5, naming each match with a ready `update`
+  line; `--new` creates it anyway. A weaker resemblance creates the note and
+  suggests one relate line. `batch` warns instead of refusing, `--dry-run`
+  included.
+- **`hafez onboard` installs and checks the integration.** `onboard
+  --install --mode <always-on|invoke-only> [--harness <h>]` writes the
+  `hafez` and `hafez-save` skills to `~/.claude/skills` and
+  `~/.agents/skills` and, always-on, the Block between hash markers in the
+  harness's instructions file; nothing outside the markers is written. A
+  hand-edited Block is shown as a diff and left alone without `--confirm`.
+  `onboard --remove` deletes both skills and every Block. Cursor gets the
+  Block printed for manual paste. Bare `onboard` reports the vault and, per
+  harness found, the Block, skills, hook and allowlist, then the script the
+  agent follows; re-running walks only what is not current.
+- **`onboard --block`, for a session-start hook.** Prints the Block, then a
+  `hafez read` line for each entity whose `resource` (a path or a git
+  remote URL) or slug matches the working directory, its git root, or a
+  worktree's main repository, active first. Any failure, a bad flag
+  included, prints nothing and exits 0, so a broken hook never blocks a
+  session.
+- **`hafez delete <slug>` and a batch `delete` op, for knowledge and session
+  notes.** A duplicate note (a save that ran twice) can now be retired
+  through the CLI instead of by hand. One op, one commit; the index drops
+  the note. An entity is never deleted — the error points at
+  `hafez update <slug> --status done`. A note that another entity or
+  knowledge note links to (`parent`/`related`) is rejected, naming the
+  referrers, so `validate` stays clean after every delete that lands; an
+  `unlink` or a re-pointing `update` earlier in the same batch counts, in
+  `--dry-run` and apply alike. Library: `os.delete(slug)` resolves to the
+  kind deleted. (#88, closes #26)
+- **`<command> --help` / `-h` prints that command's usage, exit 0.** It used
+  to be an unknown flag; `update <slug> --brief x -h` wrote the brief, and
+  `sync --help` pulled and pushed.
+- **`--data` on `digest` and `batch`** takes the JSON payload as one
+  argument, so every stage of the save pipe is a plain `hafez` command a
+  harness allow rule can cover. Both skills use it, and say to write
+  apostrophes as `’` inside the single-quoted JSON.
+- **New fields:** `update --parent <slug>` (entity-only; the parent must
+  exist), `update --body` (detail for the `--log` entry) and `create
+  knowledge --confidence`. Batch `domain`, `tags` and `related` accept one
+  comma string as well as an array, split like the CLI flags.
+
+### Fixed
+
+- **Next Actions fields in one `update` op compose as prune, tick, add.**
+  `clear_actions` → `remove_action` → `complete_action` → `add_action(s)`.
+  Apply ran the adds first and the clear last, so the natural "rebuild the
+  list" payload (`clear_actions` + `add_actions`) committed an entity with
+  no Next Actions section at all, and `remove_action` + `add_actions` matched
+  the query against a list that already held the new lines — a query
+  overlapping the replacement text removed the new line and kept the old,
+  exit 0. Queries now see the list as it was before the op (so a remove
+  and a complete that name the same line is an error, not a silent
+  overwrite); the lines the op adds can never be cleared, removed or
+  mis-matched by the same op, and completing the last open line while
+  adding the next one edits the section in place — the checked line and
+  the section's position both survive.
+  `clear_actions` alongside a query field is statically contradictory and
+  is rejected in the validate phase (visible in `batch --dry-run`) rather
+  than failing at apply with "No matching action".
+- **`update` reports each action query's match under its own name.**
+  `complete_action` and `remove_action` in one op used to share a single
+  `matched_action` slot, so the completed line's text was never reported.
+  The result is now `{ completed_action?, removed_action? }` — library and
+  `--json` alike. `matched_action` is gone, not aliased.
+- **The library query path applied or dropped; now it applies or
+  rejects.** `os.query({ confidence: 'pattern' })` typechecked, validated
+  the value, was then never mapped into the query, and returned every
+  active entity with exit 0. The mirror case existed on the knowledge
+  branch, where `filter` / `type` / `parent` were neither validated nor
+  applied. The CLI had rejected these since 1.3.0 — the rule lived only
+  there, so an MCP wrapper, a library caller or an agent building opts as
+  JSON got the silence. The rule now lives behind the read surface, so
+  both callers get it; unified (`kind: 'all'`) queries still take opts
+  from both sides, because they map both. `confidence` is also no longer
+  declared on the entity opts type, so compile time and runtime say the
+  same thing.
+- **A unified query narrowed by `kind` rejects the same opts the dedicated
+  branch does.** `queryUnified` maps both sides only under `kind: 'all'`.
+  Passed `kind: 'entity'` or `kind: 'knowledge'`, the out-of-scope
+  conditions landed on columns the selected kind leaves NULL, so
+  `queryUnified({ kind: 'knowledge', filter: 'active' })` returned zero
+  results with exit 0 — the same wrong answer the dedicated branches now
+  refuse. `kind: 'all'` is unaffected, and it is the only shape the CLI
+  produces.
+- **A knowledge-only sort field on an entity query is rejected, not
+  substituted.** `hafez query --sort-by reinforcement_count` returned
+  entities in `last_touched` order and exited 0 — asking for one order
+  and getting another, silently. Reachable from the CLI as well as the
+  library. `reinforcement_count` and `last_reinforced` now fail with the
+  same validation error the out-of-scope opts throw; knowledge and
+  unified (`kind: 'all'`) queries still honour them, and the entity opts
+  type no longer declares them.
+- **Parent cycles are rejected.** `update`, `link` and `batch` refuse a
+  `parent` that is the note itself or whose chain leads back to it, naming
+  the cycle (`alpha → beta → alpha`); `validate` reports a cycle already on
+  disk under Broken Slugs.
+- **Stale entities count whole local days, like their actions.** `query`'s
+  stale filter and `stats` compared against the current UTC time, so an
+  entity exactly `staleness-days` old read as stale late in the day.
+  `stats`' `days_since_touched` is now a whole local-day count.
+- **Batch errors show the value sent**, never `got: undefined`.
+- **Slugs drop the curly apostrophe:** `Token Rotation’s` slugifies to
+  `token-rotations`, not `token-rotation-s`.
+- **Flags and commands named after JavaScript built-ins** (`--constructor`,
+  `hafez constructor`) are reported as unknown instead of failing as a
+  repeated flag or crashing.
+
+### Changed
+
+- **Every entity update writes a session log entry.** An update with no
+  `--log` gets a `progress` entry naming the fields written (`Updated
+  brief, status`), on every path: CLI, batch, library. Updates that only
+  touch actions are exempt, and knowledge notes never get one. The entry's
+  agent is detected (`codex`, `claude-code`, else `agent`); `--agent`
+  overrides it.
+- **A flag given twice is a usage error** on every command, where the last
+  value used to win silently. `--add-action` is the one repeatable flag:
+  each repeat appends. `--body` without `--log` is a usage error.
+- **`digest` fails on an unknown slug** in `entities_touched` (`NOT_FOUND`,
+  naming them) instead of dropping it with a warning. A second save of the
+  same session is recognised and skipped, so no duplicate log entries land.
+- **`hafez upgrade` checks both skills and the Block by hash**, in both
+  skill directories and each harness's instructions file, and prints the
+  `hafez onboard --install` line that refreshes them; the hand-reconcile
+  integration snippet is gone. Still writes nothing; every outcome exits 0.
+- **`hafez help --agent` prints the `hafez` skill body** (#100). One text
+  from one source, for an agent whose harness has no skill installed; the
+  op catalogue, enum lists and batch examples it used to print are gone
+  (`hafez schema <op> --examples` has them). The skill files are
+  `skill/hafez/SKILL.md` and `skill/hafez-save/SKILL.md` (the old
+  `skill/SKILL.md` is gone); `npm run install:local` copies both to
+  `~/.claude/skills` and `~/.agents/skills`. Every surface — the Block, the
+  skills, and samples of `read`, `update`, `create knowledge` and `onboard`
+  output — is rendered from the same source and checked byte for byte in
+  CI.
+- **`read`: the `parent:` line stands alone and carries the parent's
+  description** — `parent: platform (Shared services every product team
+  builds on)`; a parent with no description, or one that cannot be read,
+  is the slug alone. A plan's header shows `subtype: plan | status | domain`
+  and `created | last-touched` in place of an insight's confidence and
+  reinforcement lines.
+- **Breaking (exported type):** `UnifiedQueryOpts` is now a union
+  discriminated on `kind` rather than a single interface. `kind: 'all'`
+  (or unset) still takes opts from both sides; `kind: 'entity'` takes the
+  entity opts and `kind: 'knowledge'` the knowledge ones, so the
+  combinations the read surface rejects at runtime are a compile error
+  first. Code that wrote `interface X extends UnifiedQueryOpts` needs
+  `X extends AllQueryOpts` (newly exported) or an intersection.
+- **Exit codes moved to `hafez --help`** (#89). `--help` lists every exit
+  code with its meaning, printed from the same table the error → exit
+  adapter maps through (`EXIT_TABLE`, from which `EXIT_CODES` now
+  derives); a test fails if the printed list and the table diverge.
+  `help --agent` no longer carries an exit-codes section. The codes
+  themselves are unchanged.
+- **`hafez update` says what changed in one line, and a misuse returns the
+  Footer** (#95). Success is `Updated <slug>: log added, 1 action ticked,
+  1 action added.` — one phrase per change, the mechanised log included,
+  nothing untouched named; `--json` carries the matched action text. A
+  misuse — an unknown or repeated flag, a missing value, a bad `--log`, a
+  value the Op Spec rejects, an action query no open line or more than one
+  matches, no flag at all — prints the error, "Nothing was written.", then
+  the Footer `read` shows for that slug, exit 2; a slug that names no file
+  gets the `read` miss instead. A well-formed update to a missing slug
+  prints the `read` miss, exit 1 (under `--json`, `read`'s `{slug,
+  closest}` on stdout). Library: `UpdateResult` gains `logged` when a
+  session log entry was written; "No matching action", "Ambiguous match"
+  and a remove and complete naming the same line are now
+  `VALIDATION_FAILED` (they were untyped errors, exit 1).
+
+### Removed
+
+- **Breaking (exported type):** `ValidationReport.oversized_related` is
+  gone. It was a leftover from a removed related-list cap — always `[]`,
+  never written to, yet still rendered as an "Oversized Related" section
+  and counted toward `hafez validate`'s issue total. `validate --json`
+  no longer carries the key.
+
 ## 1.4.0 — 2026-08-08
 
 An update path that finally exists, a much faster CLI, and the largest

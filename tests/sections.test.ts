@@ -6,7 +6,7 @@ import { ALL_CONTRACTS, SUBTYPE_SECTIONS } from '../src/contracts.js'
 // Entity-union binding: these suites exercise entity-side sections (Brief,
 // Next Actions, Session Log, Current State). Knowledge-flavored tests bind
 // their own doc below.
-const { getBrief, setBrief, removeBrief, getNextActions, addNextAction, completeNextAction, removeNextAction, clearNextActions, findSection, findNextStructuralHeading } = documentFor({ kind: 'entity' })
+const { getBrief, setBrief, removeBrief, getNextActions, addNextAction, completeNextAction, removeNextAction, pruneNextActions, clearNextActions, findSection, findNextStructuralHeading } = documentFor({ kind: 'entity' })
 
 describe('Brief', () => {
   const bodyWithBrief = `## Purpose\n\nSome purpose.\n\n## Brief\n\nThis is the brief content.\nMultiple lines here.\n\n## Session Log\n\n### 2026-03-20 — claude [progress]\nSummary: Did something`
@@ -169,10 +169,14 @@ describe('Next Actions', () => {
     expect(result).toContain('## Session Log')
   })
 
-  it('clearNextActions removes section when last item completed', () => {
+  it('pruneNextActions removes the section once no open item remains', () => {
     const bodySingle = `## Purpose\n\n## Next Actions\n\n- [ ] Only item @dev\n\n## Session Log\n`
-    const { body } = removeNextAction(bodySingle, 'Only item')
-    expect(body).not.toContain('## Next Actions')
+    const removed = removeNextAction(bodySingle, 'Only item').body
+    expect(removed).toContain('## Next Actions') // the edit alone leaves the section
+    expect(pruneNextActions(removed)).not.toContain('## Next Actions')
+    const ticked = completeNextAction(bodySingle, 'Only item').body
+    expect(pruneNextActions(ticked)).not.toContain('## Next Actions')
+    expect(pruneNextActions(bodyWithActions)).toBe(bodyWithActions) // open items → untouched
   })
 })
 

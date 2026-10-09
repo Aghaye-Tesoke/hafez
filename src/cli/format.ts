@@ -1,7 +1,9 @@
 // src/cli/format.ts
 import type { QueryResult, KnowledgeQueryResult, ValidationReport, SearchResult, VaultStats, ChangelogEntry } from '../types.js'
 
-export function formatEntityHeader(fm: Record<string, any>, body: string): string {
+/** `parent` is the rendered value of the `parent:` line (the slug with the
+ * parent's description); absent, the slug alone. */
+export function formatEntityHeader(fm: Record<string, any>, body: string, parent: string | undefined = fm.parent): string {
   const lines: string[] = [`# ${fm.name}`]
   if (fm.description) lines.push(`> ${fm.description}`)
 
@@ -11,8 +13,10 @@ export function formatEntityHeader(fm: Record<string, any>, body: string): strin
   if (fm.domain?.length) meta.push(`domain: ${fm.domain.join(', ')}`)
   if (meta.length) lines.push(meta.join(' | '))
 
+  // The parent line stands alone: with its description it is a sentence.
+  if (parent) lines.push(`parent: ${parent}`)
+
   const meta2: string[] = []
-  if (fm.parent) meta2.push(`parent: ${fm.parent}`)
   if (fm['last-touched']) meta2.push(`last-touched: ${fm['last-touched']}`)
   if (fm.created) meta2.push(`created: ${fm.created}`)
   if (meta2.length) lines.push(meta2.join(' | '))
@@ -30,14 +34,24 @@ export function formatKnowledgeHeader(fm: Record<string, any>, body: string): st
   const lines: string[] = [`# ${fm.name}`]
   if (fm.description) lines.push(`> ${fm.description}`)
 
+  // A plan has a lifecycle and no reinforcement: its subtype, status and
+  // dates; an insight its confidence and reinforcement.
+  const plan = fm.subtype === 'plan'
   const meta: string[] = []
-  if (fm.confidence) meta.push(`confidence: ${fm.confidence}`)
+  if (plan) meta.push('subtype: plan')
+  if (plan && fm.status) meta.push(`status: ${fm.status}`)
+  if (!plan && fm.confidence) meta.push(`confidence: ${fm.confidence}`)
   if (fm.domain?.length) meta.push(`domain: ${Array.isArray(fm.domain) ? fm.domain.join(', ') : fm.domain}`)
   if (meta.length) lines.push(meta.join(' | '))
 
   const meta2: string[] = []
-  if (fm['reinforcement-count'] != null) meta2.push(`reinforcement-count: ${fm['reinforcement-count']}`)
-  if (fm['last-reinforced']) meta2.push(`last-reinforced: ${fm['last-reinforced']}`)
+  if (plan) {
+    if (fm.created) meta2.push(`created: ${fm.created}`)
+    if (fm['last-touched']) meta2.push(`last-touched: ${fm['last-touched']}`)
+  } else {
+    if (fm['reinforcement-count'] != null) meta2.push(`reinforcement-count: ${fm['reinforcement-count']}`)
+    if (fm['last-reinforced']) meta2.push(`last-reinforced: ${fm['last-reinforced']}`)
+  }
   if (meta2.length) lines.push(meta2.join(' | '))
 
   if (fm.related?.length) lines.push(`related: ${fm.related.join(', ')}`)
@@ -47,7 +61,9 @@ export function formatKnowledgeHeader(fm: Record<string, any>, body: string): st
   return lines.join('\n')
 }
 
-export function formatQueryTable(results: QueryResult[], total?: number): string {
+export type QueryTableRow = Pick<QueryResult, 'slug' | 'name' | 'type' | 'status' | 'next_action' | 'next_action_count'>
+
+export function formatQueryTable(results: QueryTableRow[], total?: number): string {
   if (results.length === 0) return 'No results.'
   const lines = ['| slug | name | type | status | next-action |', '|------|------|------|--------|-------------|']
   for (const r of results) {
@@ -63,7 +79,9 @@ export function formatQueryTable(results: QueryResult[], total?: number): string
   return lines.join('\n')
 }
 
-export function formatKnowledgeTable(results: KnowledgeQueryResult[], total?: number): string {
+export type KnowledgeTableRow = Pick<KnowledgeQueryResult, 'slug' | 'name' | 'confidence' | 'domain' | 'reinforcement_count'>
+
+export function formatKnowledgeTable(results: KnowledgeTableRow[], total?: number): string {
   if (results.length === 0) return 'No results.'
   const lines = ['| slug | name | confidence | domains | reinforcements |', '|------|------|------------|---------|----------------|']
   for (const r of results) {
@@ -143,7 +161,7 @@ export function formatChangelog(entries: ChangelogEntry[]): string {
 
 export function formatValidation(report: ValidationReport): string {
   const issues = report.broken_slugs.length + report.orphaned_knowledge.length +
-                 report.oversized_related.length + report.missing_fields.length
+                 report.missing_fields.length
 
   if (issues === 0) {
     return `Vault OK — ${report.total_entities} entities, ${report.total_knowledge} knowledge, 0 issues`
@@ -159,7 +177,6 @@ export function formatValidation(report: ValidationReport): string {
 
   addSection('Broken Slugs', report.broken_slugs.map(i => `${i.slug}: ${i.issue}`))
   addSection('Orphaned Knowledge', report.orphaned_knowledge.map(s => `${s} (no related links, not referenced by any entity)`))
-  addSection('Oversized Related', report.oversized_related.map(i => `${i.slug}: ${i.issue}`))
   addSection('Missing Fields', report.missing_fields.map(i => `${i.slug}: ${i.issue}`))
 
   return sections.join('\n')

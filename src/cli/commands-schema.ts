@@ -12,8 +12,10 @@
 import { HafezError } from '../types.js'
 import { listOps, zodToJsonSchema, getOpExample, getEnumValues, getOpSchema, DIGEST_DESCRIPTION, type FieldSchema } from './schema-introspect.js'
 import { didYouMean } from './batch-errors.js'
+import { helpIfAsked } from './args.js'
 
 export async function cmdSchema(_os: unknown, args: string[]): Promise<string> {
+  helpIfAsked(args, 'Usage: hafez schema [op] [--examples]')
   // args come in already-stripped of global flags; first positional is the op name (if any)
   const target = args[0]
   const wantExamples = args.includes('--examples')

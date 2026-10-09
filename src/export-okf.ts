@@ -9,7 +9,7 @@ import { readdirSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join, resolve, sep, basename } from 'path'
 import { parseFilePath, serializeFile, scanVaultDir, kindDir } from './vault.js'
 import { DEFAULT_KNOWLEDGE_SUBTYPE } from './contracts.js'
-import { deriveSummary, WIKI_LINK_RE } from './document.js'
+import { deriveSummary, documentFor, WIKI_LINK_RE } from './document.js'
 
 export interface OkfExportReport {
   outDir: string
@@ -25,8 +25,24 @@ type SourceKind = 'entity' | 'knowledge' | 'session'
 const SOURCE_KINDS: SourceKind[] = ['entity', 'knowledge', 'session']
 const KIND_DIRS: Array<{ dir: string; kind: SourceKind }> = SOURCE_KINDS.map(kind => ({ dir: kindDir(kind), kind }))
 
+const ENTITY_DOC = documentFor({ kind: 'entity' })
+
 // The shared wiki-link syntax (document.ts) — group 1 slug, group 2 display.
 const OKF_LINK_RE = new RegExp(WIKI_LINK_RE.source, 'g')
+
+/** Frontmatter of an exported OKF document. Not vault frontmatter: `name` maps
+ * to `title`, `type` is normalized per kind, `timestamp` (and `description`,
+ * when the source has none) is derived, `resource` survives only on entities,
+ * and the remaining keys are carried through verbatim. */
+export interface OkfFrontmatter {
+  type: string
+  title: string
+  description?: string
+  resource?: string
+  tags?: string[]
+  timestamp?: string
+  [key: string]: unknown
+}
 
 interface ParsedDoc {
   slug: string
@@ -63,15 +79,14 @@ function assignBundleNames(docs: ParsedDoc[]): void {
   }
 }
 
-function mapFrontmatter(doc: ParsedDoc): Record<string, any> {
+function mapFrontmatter(doc: ParsedDoc): OkfFrontmatter {
   const { fm, kind, body } = doc
-  const mapped: Record<string, any> = {}
+  let type: string
+  if (kind === 'entity') type = fm.type ?? 'entity'
+  else if (kind === 'knowledge') type = `knowledge/${fm.subtype ?? DEFAULT_KNOWLEDGE_SUBTYPE}`
+  else type = 'session'
+  const mapped: OkfFrontmatter = { type, title: fm.name }
 
-  if (kind === 'entity') mapped.type = fm.type ?? 'entity'
-  else if (kind === 'knowledge') mapped.type = `knowledge/${fm.subtype ?? DEFAULT_KNOWLEDGE_SUBTYPE}`
-  else mapped.type = 'session'
-
-  mapped.title = fm.name
   const description = deriveSummary(kind, fm, body)
   if (description) mapped.description = description
   if (kind === 'entity' && fm.resource) mapped.resource = fm.resource
@@ -174,7 +189,10 @@ export function exportOkf(vaultPath: string, outDir: string): OkfExportReport {
     const mapped = mapFrontmatter(doc)
     const outSubdir = join(resolvedOut, doc.dir)
     mkdirSync(outSubdir, { recursive: true })
-    writeFileSync(join(outSubdir, `${doc.file}.md`), serializeFile(mapped, transformBody(doc.body)))
+    // The added-date stamp is vault file format, not action text: exported
+    // Next Actions carry the unstamped text.
+    const body = doc.kind === 'entity' ? ENTITY_DOC.stripNextActionStamps(doc.body) : doc.body
+    writeFileSync(join(outSubdir, `${doc.file}.md`), serializeFile(mapped, transformBody(body)))
 
     if (doc.kind === 'entity') report.entities++
     else if (doc.kind === 'knowledge') report.knowledge++

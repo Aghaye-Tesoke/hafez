@@ -22,7 +22,6 @@ function runEnv(extraEnv: Record<string, string>, ...args: string[]): { stdout: 
   try {
     const stdout = execFileSync('node', [CLI, ...args], {
       encoding: 'utf-8',
-      stderr: 'pipe',
       env,
     }) as string
     return { stdout, stderr: '', exitCode: 0 }

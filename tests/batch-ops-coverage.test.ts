@@ -11,7 +11,7 @@ import { ALIAS_KEYS } from '../src/contracts.js'
 
 describe('Op Spec table coverage', () => {
   it('slugBearingOpNames derives exactly the slug-addressing ops from the Zod shapes', () => {
-    expect([...slugBearingOpNames()].sort()).toEqual(['link', 'promote', 'unlink', 'update'])
+    expect([...slugBearingOpNames()].sort()).toEqual(['delete', 'link', 'promote', 'unlink', 'update'])
   })
 
 
@@ -26,7 +26,7 @@ describe('Op Spec table coverage', () => {
   })
 
   it('the catalog contains nothing outside the table', () => {
-    const names = new Set(OP_SPECS.map(s => s.name))
+    const names = new Set<string>(OP_SPECS.map(s => s.name))
     for (const entry of listOps()) {
       expect(names.has(entry.name), `catalog entry ${entry.name} has no spec`).toBe(true)
     }

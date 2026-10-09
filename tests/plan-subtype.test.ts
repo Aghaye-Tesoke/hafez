@@ -17,9 +17,10 @@ import { spawnSync } from 'child_process'
 import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 import { createHafez } from '../src/index.js'
-import { parseFilePath, serializeFile } from '../src/vault.js'
+import { serializeFile } from '../src/vault.js'
+import { readKnowledge } from './helpers/vault-files.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 
 const TMP = join(tmpdir(), 'hafez-plan-subtype-' + Date.now())
@@ -37,7 +38,7 @@ function makeOS() {
 }
 
 function knowledgeFile(slug: string) {
-  return parseFilePath(join(VAULT, 'knowledge', `${slug}.md`))
+  return readKnowledge(join(VAULT, 'knowledge', `${slug}.md`))
 }
 
 // --- 1. status on plan-subtype notes ---
@@ -211,11 +212,11 @@ describe('cli: plan status and dropped-field rejection', () => {
     const created = run('create', 'knowledge', 'CLI Plan', '--subtype', 'plan', '--status', 'active')
     expect(created.exitCode).toBe(0)
     const file = join(CLI_VAULT, 'knowledge', 'cli-plan.md')
-    expect(parseFilePath(file).frontmatter.status).toBe('active')
+    expect(readKnowledge(file).frontmatter.status).toBe('active')
 
     const updated = run('update', 'cli-plan', '--status', 'done')
     expect(updated.exitCode).toBe(0)
-    expect(parseFilePath(file).frontmatter.status).toBe('done')
+    expect(readKnowledge(file).frontmatter.status).toBe('done')
   })
 
   it('rejects --status on an insight note', () => {

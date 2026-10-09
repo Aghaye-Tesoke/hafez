@@ -5,7 +5,8 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { serializeFile } from '../src/vault.js'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-cli-digest-test-' + Date.now())
 const BARE = join(TMP, 'remote.git')
@@ -36,7 +37,7 @@ beforeAll(async () => {
   mkdirSync(join(VAULT, 'entities'), { recursive: true })
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDay()
   writeFileSync(
     join(VAULT, 'entities', 'simorgh.md'),
     serializeFile(
@@ -111,6 +112,27 @@ describe('hafez digest CLI', () => {
     expect(ops.find((o: any) => o.op === 'update')?.slug).toBe('simorgh')
   })
 
+  it('reads input from --data: the one-argument form a harness allow rule on hafez covers', () => {
+    const summary = JSON.stringify({ entities_touched: ['simorgh'], decisions: [], narrative: 'Argument session.', session_date: '2026-03-29' })
+    const result = spawnSync('node', [CLI, '--vault', VAULT, 'digest', '--data', summary], { encoding: 'utf-8' })
+    expect(result.status).toBe(0)
+    const ops = JSON.parse(result.stdout)
+    expect(ops.find((o: any) => o.op === 'update')?.slug).toBe('simorgh')
+
+    const dry = spawnSync('node', [CLI, '--vault', VAULT, 'batch', '--dry-run', '--data', result.stdout], { encoding: 'utf-8' })
+    expect(dry.status).toBe(0)
+  })
+
+  it('exits 2 (usage error) when given both --data and --file', () => {
+    const payload = join(TMP, 'digest-both.json')
+    writeFileSync(payload, '{}')
+    for (const cmd of ['digest', 'batch']) {
+      const result = spawnSync('node', [CLI, '--vault', VAULT, cmd, '--data', '{}', '--file', payload], { encoding: 'utf-8' })
+      expect(result.status).toBe(2)
+      expect(result.stderr).toMatch(/--data and --file are two ways to pass one payload/)
+    }
+  })
+
   it('exits 2 (bad payload) with descriptive error when narrative is missing', () => {
     const { stderr, exitCode } = runDigest({
       entities_touched: ['simorgh'],
@@ -168,7 +190,7 @@ describe('hafez digest CLI', () => {
     expect(Array.isArray(ops)).toBe(true)
   })
 
-  it('warns to stderr for unknown entity slugs but still exits 0', () => {
+  it('exits 1 (not found) naming an unknown entity slug, and prints no ops', () => {
     const { stdout, stderr, exitCode } = runDigest({
       entities_touched: ['simorgh', 'no-such-entity'],
       decisions: [],
@@ -176,13 +198,10 @@ describe('hafez digest CLI', () => {
       session_date: '2026-03-29',
     })
 
-    expect(exitCode).toBe(0)
-    expect(stderr).toContain('no-such-entity')
-    const ops = JSON.parse(stdout)
-    // update for simorgh is present
-    const updates = ops.filter((o: any) => o.op === 'update')
-    expect(updates.map((o: any) => o.slug)).toContain('simorgh')
-    expect(updates.map((o: any) => o.slug)).not.toContain('no-such-entity')
+    expect(exitCode).toBe(1)
+    expect(stderr).toContain("'no-such-entity'")
+    expect(stderr).not.toContain('simorgh')
+    expect(stdout).toBe('')
   })
 
   it('digest output executes successfully through hafez batch', () => {

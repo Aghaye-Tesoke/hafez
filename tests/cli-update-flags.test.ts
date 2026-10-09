@@ -12,8 +12,11 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { cmdCreate, cmdUpdate, UPDATE_FLAGS, UPDATE_SPECIAL_FLAGS, UPDATE_FIELDS_WITHOUT_FLAGS } from '../src/cli/commands.js'
+import { cmdSchema } from '../src/cli/commands-schema.js'
+import { exitCodeFor } from '../src/cli/index.js'
 import { UpdateFieldsSchema } from '../src/batch-ops.js'
 import { localDay } from '../src/dates.js'
+import { detectAgent } from '../src/harness.js'
 import type { Hafez } from '../src/types.js'
 
 const TMP = join(tmpdir(), 'hafez-test-cli-update-flags-' + Date.now())
@@ -50,7 +53,7 @@ interface FlagCase {
 
 // Every target entity is seeded with these actions, so the action flags have
 // something real to match against. Two of them, because completing the last
-// pending action clears the section outright (Document.completeNextAction) —
+// pending action clears the section outright (Apply prunes it after the op) —
 // with one seed there would be no checked line left to observe.
 const SEEDED_ACTION = 'Ship it @dev'
 const SECOND_ACTION = 'Write the docs @dev'
@@ -73,18 +76,24 @@ const FLAG_CASES: FlagCase[] = [
   // The declared alias: normalized to `synthesis` before validation, so the
   // entity rejection names the canonical field.
   { flag: 'insight', value: 'The insight body', applies: ['knowledge'], rejectMatch: /synthesis/, assert: r => expect(r.body).toContain('The insight body') },
+  { flag: 'parent', value: 'alpha', applies: ['entity'], assert: r => expect(r.frontmatter.parent).toBe('alpha') },
   { flag: 'add-evidence', value: 'Fresh evidence', applies: ['knowledge'], assert: r => expect(r.body).toContain('Fresh evidence') },
   { flag: 'add-source', value: 'https://example.com/paper', applies: ['knowledge'], assert: r => expect(r.body).toContain('https://example.com/paper') },
   // session_log has no flag of its own — the pair composes it.
   {
     flag: 'log', args: ['--log', 'progress: Did the thing'], applies: ['entity'],
     rejectMatch: /session_log/,
-    assert: r => expect(r.body).toContain(`### ${localDay()} — claude [progress]`),
+    assert: r => expect(r.body).toContain(`### ${localDay()} — ${detectAgent()} [progress]`),
   },
   {
     flag: 'agent', args: ['--log', 'progress: Did the thing', '--agent', 'codex'], applies: ['entity'],
     rejectMatch: /session_log/,
     assert: r => expect(r.body).toContain(`### ${localDay()} — codex [progress]`),
+  },
+  {
+    flag: 'body', args: ['--log', 'progress: Did the thing', '--body', 'The detail'], applies: ['entity'],
+    rejectMatch: /session_log/,
+    assert: r => expect(r.body).toContain('Summary: Did the thing\nThe detail'),
   },
   // Removed flag: rejected on every kind, with the replacement named.
   { flag: 'next-action', value: 'x', applies: [], rejectMatch: /removed in v1\.0\.2/ },
@@ -97,7 +106,10 @@ async function seedTarget(kind: Kind, name: string): Promise<string> {
     await cmdUpdate(os, [slug, '--add-action', SECOND_ACTION])
     return slug
   }
-  return (await cmdCreate(os, ['knowledge', name])).trim()
+  // The matrix's names near-match one another ("Ux add-action knowledge",
+  // "Ux complete-action knowledge"): --new writes them anyway. The slug is
+  // the first line; a relate line may follow it.
+  return (await cmdCreate(os, ['knowledge', name, '--new'])).split('\n')[0]
 }
 
 function argsFor(slug: string, c: FlagCase): string[] {
@@ -142,7 +154,11 @@ describe('the flag table tracks the update shape', () => {
   const schemaKeys = Object.keys(UpdateFieldsSchema.shape)
   const flagFields = Object.keys(UPDATE_FLAGS)
     .filter(f => !UPDATE_SPECIAL_FLAGS.has(f))
-    .map(f => f.replace(/-/g, '_'))
+    // A repeatable flag also reaches the array form of its field (`add_actions`).
+    .flatMap(f => {
+      const field = f.replace(/-/g, '_')
+      return UPDATE_FLAGS[f] === 'repeat' ? [field, `${field}s`] : [field]
+    })
 
   it('covers every update-schema field except the declared exclusions', () => {
     const missing = schemaKeys.filter(k => !flagFields.includes(k) && !(k in UPDATE_FIELDS_WITHOUT_FLAGS))
@@ -223,8 +239,8 @@ describe('empty-string policy — clear on the nullable fields, reject elsewhere
     })
   }
 
-  // add_actions has no CLI flag (declared exclusion) — its elements carry the
-  // same rule, pinned at the library seam.
+  // add_actions is reached by a repeated --add-action — its elements carry
+  // the same rule, pinned here at the library seam.
   it('add_actions with a whitespace-only element is rejected as a whole', async () => {
     const slug = await seedTarget('entity', 'Ux empty add actions element')
     const before = ((await os.read(slug, 'full')) as unknown as Read).body
@@ -237,7 +253,7 @@ describe('empty-string policy — clear on the nullable fields, reject elsewhere
     const slug = await seedTarget('entity', 'Ux trimmed action')
     await cmdUpdate(os, [slug, '--add-action', '  Padded task @dev  '])
     const body = ((await os.read(slug, 'full')) as unknown as Read).body
-    expect(body).toContain('- [ ] Padded task @dev\n')
+    expect(body).toContain(`- [ ] Padded task @dev (added ${localDay()})\n`)
   })
 
   // The section-setting fields. Same class as the action/evidence flags above,
@@ -271,5 +287,82 @@ describe('empty-string policy — clear on the nullable fields, reject elsewhere
     const slug = await seedTarget('knowledge', 'Ux trimmed synthesis')
     await cmdUpdate(os, [slug, '--synthesis', '  Padded synthesis  '])
     expect(((await os.read(slug, 'full')) as unknown as Read).body).toContain('Padded synthesis\n')
+  })
+})
+
+describe('Write Line parser — repeat-append, repeated scalar, --body, --parent', () => {
+  it('--add-action repeated appends every value, in order', async () => {
+    const slug = await seedTarget('entity', 'Wl repeat add')
+    await cmdUpdate(os, [slug, '--add-action', 'First new @dev', '--add-action', 'Second new @dev'])
+    const body = ((await os.read(slug, 'full')) as unknown as Read).body
+    expect(body).toContain(`- [ ] First new @dev (added ${localDay()})\n- [ ] Second new @dev (added ${localDay()})`)
+    expect(body).toContain(SEEDED_ACTION)
+  })
+
+  // Every scalar flag, never last-wins: the second value would otherwise
+  // overwrite the first with exit 0.
+  for (const [flag, type] of Object.entries(UPDATE_FLAGS)) {
+    if (type === 'repeat') continue
+    it(`--${flag} given twice is a usage error naming the flag, nothing written`, async () => {
+      const slug = await seedTarget('entity', `Wl twice ${flag}`)
+      const before = await os.read(slug, 'full') as unknown as Read
+      const once = type === 'boolean' ? [`--${flag}`] : [`--${flag}`, 'x']
+      const err = await cmdUpdate(os, [slug, ...once, ...once]).then(() => null, e => e)
+      expect(exitCodeFor(err)).toBe(2)
+      expect(err.message).toContain(`--${flag}`)
+      expect(await os.read(slug, 'full')).toEqual(before)
+    })
+  }
+
+  it('--body without --log is a usage error, nothing written', async () => {
+    const slug = await seedTarget('entity', 'Wl body alone')
+    const before = await os.read(slug, 'full') as unknown as Read
+    const err = await cmdUpdate(os, [slug, '--body', 'detail']).then(() => null, e => e)
+    expect(exitCodeFor(err)).toBe(2)
+    expect(err.message).toMatch(/--body.*--log/)
+    expect(await os.read(slug, 'full')).toEqual(before)
+  })
+
+  it('--body "" is rejected by name instead of silently dropped', async () => {
+    const slug = await seedTarget('entity', 'Wl body empty')
+    for (const value of ['', '   ']) {
+      expect(await errorText(cmdUpdate(os, [slug, '--log', 'progress: x', '--body', value]))).toMatch(/body/)
+    }
+  })
+
+  it('--parent replaces an existing parent and shows it under Related', async () => {
+    const slug = await seedTarget('entity', 'Wl parent swap')
+    await cmdUpdate(os, [slug, '--parent', 'alpha'])
+    await cmdUpdate(os, [slug, '--parent', 'beta'])
+    const read = await os.read(slug, 'full') as unknown as Read
+    expect(read.frontmatter.parent).toBe('beta')
+    expect(read.body).toContain('[[beta]]')
+    expect(read.body).not.toContain('[[alpha]]')
+  })
+
+  it('--parent with a slug that does not exist is rejected by name, nothing written', async () => {
+    const slug = await seedTarget('entity', 'Wl parent missing')
+    expect(await errorText(cmdUpdate(os, [slug, '--parent', 'no-such-slug']))).toMatch(/Parent 'no-such-slug' does not exist/)
+    expect(((await os.read(slug)) as unknown as Read).frontmatter.parent).toBeUndefined()
+  })
+
+  it('the batch update op accepts parent', async () => {
+    const slug = await seedTarget('entity', 'Wl batch parent')
+    await os.batch([{ op: 'update', slug, fields: { parent: 'alpha' } }])
+    expect(((await os.read(slug)) as unknown as Read).frontmatter.parent).toBe('alpha')
+  })
+
+  it('a batch can parent onto an entity created earlier in the same batch', async () => {
+    const slug = await seedTarget('entity', 'Wl batch parent fresh')
+    await os.batch([
+      { op: 'create', kind: 'entity', name: 'Wl Fresh Parent', fields: { type: 'project' } },
+      { op: 'update', slug, fields: { parent: 'wl-fresh-parent' } },
+    ])
+    expect(((await os.read(slug)) as unknown as Read).frontmatter.parent).toBe('wl-fresh-parent')
+  })
+
+  it('schema update reflects parent', async () => {
+    const out = JSON.parse(await cmdSchema(null, ['update']))
+    expect(out.fields.fields.fields.parent).toBeDefined()
   })
 })

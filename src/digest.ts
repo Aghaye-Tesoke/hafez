@@ -1,13 +1,16 @@
 // src/digest.ts
+import { createHash } from 'crypto'
 import { z } from 'zod'
-import type { BatchOperation, UpdateFields } from './types.js'
+import { HafezError, type BatchOperation, type UpdateFields } from './types.js'
 import type { CreateSessionFieldsInput } from './batch-ops.js'
+import { detectAgent } from './harness.js'
+import { ITEMS } from './surfaces/items.js'
 
 // --- Schema ---
 
 export const DigestInputSchema = z.object({
   entities_touched: z.array(z.string())
-    .describe('Slugs of entities worked on. Each gets a session log entry; the session note links them all. Unknown slugs warn on stderr and are omitted.'),
+    .describe('Slugs of entities worked on. Each gets a session log entry; the session note links them all. An unknown slug fails the digest and is named.'),
   decisions: z.array(z.string())
     .describe('Key decisions made this session (may be empty). Recorded in the session note.')
     .default([]),
@@ -16,8 +19,8 @@ export const DigestInputSchema = z.object({
   session_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be YYYY-MM-DD')
     .describe('Session date, YYYY-MM-DD.'),
   agent: z.string()
-    .describe('Agent identifier recorded in session logs.')
-    .default('claude'),
+    .describe('Agent identifier recorded in session logs. Detected from the Harness when absent.')
+    .optional(),
 })
 
 export type DigestInput = z.infer<typeof DigestInputSchema>
@@ -48,29 +51,34 @@ export function parseDigestInput(raw: unknown): { success: true; data: DigestInp
 /**
  * Convert session context into a hafez batch payload.
  * Pure function — no file I/O, no vault access.
- * Unknown slugs in entities_touched are silently omitted (caller should warn).
+ * An unknown slug in entities_touched is a NOT_FOUND naming it (and only the
+ * unknown ones), never a session log that points nowhere. A knowledge slug is
+ * known: the note links it, but a session log is entity-only.
  */
-export function digest(input: DigestInput, existingSlugs: Set<string>, now: Date = new Date()): BatchOperation[] {
-  const ops: BatchOperation[] = []
+export function digest(input: DigestInput, entitySlugs: Set<string>, knowledgeSlugs: Set<string> = new Set()): BatchOperation[] {
+  const touched = [...new Set(input.entities_touched)]
+  const unknown = touched.filter(s => !entitySlugs.has(s) && !knowledgeSlugs.has(s))
+  if (unknown.length > 0) throw new HafezError('NOT_FOUND', ITEMS.unknownSlugAtSave.render(unknown))
 
-  // 1. Session log updates for each known slug
-  const knownTouched = input.entities_touched.filter(s => existingSlugs.has(s))
-  for (const slug of knownTouched) {
+  const ops: BatchOperation[] = []
+  const agent = input.agent || detectAgent()
+
+  // 1. Session log updates for each touched entity
+  for (const slug of touched.filter(s => entitySlugs.has(s))) {
     const sessionLogSummary = buildSessionLogSummary(input)
     const fields: UpdateFields = {
       session_log: {
         type: 'progress',
         summary: sessionLogSummary,
-        agent: input.agent,
+        agent,
       },
     }
     ops.push({ op: 'update', slug, fields })
   }
 
-  // 2. Session note — built from known slugs only, so unknown slugs never
-  //    leak into the note body (the schema promises they are omitted).
-  const noteBody = buildSessionNoteBody(input, knownTouched)
-  const related = knownTouched
+  // 2. Session note
+  const noteBody = buildSessionNoteBody(input, touched)
+  const related = touched
   // Typechecked against the Op Spec's session-create schema so digest output
   // can never silently diverge from what batch validation accepts.
   const noteFields: CreateSessionFieldsInput = {
@@ -78,7 +86,9 @@ export function digest(input: DigestInput, existingSlugs: Set<string>, now: Date
     'session-date': input.session_date,
     ...(related.length > 0 ? { related } : {}),
   }
-  const noteName = `Session ${input.session_date} ${now.toISOString().slice(11, 19)}`
+  // Named by the session date and its note, so a second save of the same
+  // session derives the same slug and batch skips it as a duplicate.
+  const noteName = `Session ${input.session_date} ${createHash('sha256').update(noteBody).digest('hex').slice(0, 8)}`
   ops.push({ op: 'create', kind: 'session', name: noteName, fields: noteFields })
 
   return ops
@@ -94,7 +104,7 @@ function buildSessionLogSummary(input: DigestInput): string {
   return parts.join(' | ')
 }
 
-function buildSessionNoteBody(input: DigestInput, knownTouched: string[]): string {
+function buildSessionNoteBody(input: DigestInput, touched: string[]): string {
   const lines: string[] = [input.narrative.trim()]
 
   if (input.decisions.length > 0) {
@@ -105,9 +115,9 @@ function buildSessionNoteBody(input: DigestInput, knownTouched: string[]): strin
     }
   }
 
-  if (knownTouched.length > 0) {
+  if (touched.length > 0) {
     lines.push('')
-    lines.push(`**Entities touched:** ${knownTouched.join(', ')}`)
+    lines.push(`**Entities touched:** ${touched.join(', ')}`)
   }
 
   return lines.join('\n')

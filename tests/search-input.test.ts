@@ -19,14 +19,15 @@ import { spawnSync } from 'child_process'
 import { writeFileSync, mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 import { createIndex } from '../src/db.js'
 import { serializeFile } from '../src/vault.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-search-input-test-' + Date.now())
 const VAULT = join(TMP, 'vault')
 const CLI = join(process.cwd(), 'dist', 'cli.js')
-const today = new Date().toISOString().slice(0, 10)
+const today = localDay()
 
 function runCli(...args: string[]): { stdout: string; stderr: string; exitCode: number } {
   const result = spawnSync('node', [CLI, '--vault', VAULT, ...args], { encoding: 'utf-8' })

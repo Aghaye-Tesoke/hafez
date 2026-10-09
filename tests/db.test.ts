@@ -5,6 +5,7 @@ import { serializeFile } from '../src/vault.js'
 import { writeFileSync, mkdirSync, rmSync, existsSync, unlinkSync, utimesSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-test-db-' + Date.now())
 
@@ -16,7 +17,7 @@ function writeKnowledge(slug: string, fm: Record<string, any>, body = '## Insigh
   writeFileSync(join(TMP, 'knowledge', `${slug}.md`), serializeFile(fm, body))
 }
 
-const today = new Date().toISOString().slice(0, 10)
+const today = localDay()
 
 beforeAll(() => {
   mkdirSync(join(TMP, 'entities'), { recursive: true })
@@ -55,7 +56,7 @@ beforeAll(() => {
   }, '## Purpose\n\nTest\n\n## Next Actions\n\n- [ ] Task one\n- [ ] Task two\n\n## Session Log\n')
 
   // Stale entity: active, touched 20 days ago
-  const twentyDaysAgo = new Date(Date.now() - 20 * 86400000).toISOString().slice(0, 10)
+  const twentyDaysAgo = localDay(new Date(Date.now() - 20 * 86400000))
   writeEntity('stale-entity', {
     name: 'Stale Entity', type: 'entity', status: 'active',
     created: '2026-01-01', 'last-touched': twentyDaysAgo,
@@ -238,7 +239,7 @@ describe('queryItems time filters', () => {
     const index = createIndex(TMP)
     const { items } = index.queryItems({ kind: 'entity', since: '2026-01-01' })
     expect(items.length).toBeGreaterThan(0)
-    expect(items.every(r => r.last_touched >= '2026-01-01')).toBe(true)
+    expect(items.every(r => r.last_touched !== null && r.last_touched >= '2026-01-01')).toBe(true)
     index.close()
   })
 
@@ -246,7 +247,7 @@ describe('queryItems time filters', () => {
     const index = createIndex(TMP)
     const { items } = index.queryItems({ kind: 'entity', before: '2025-12-31' })
     expect(items.length).toBeGreaterThan(0)
-    expect(items.every(r => r.last_touched <= '2025-12-31')).toBe(true)
+    expect(items.every(r => r.last_touched !== null && r.last_touched <= '2025-12-31')).toBe(true)
     index.close()
   })
 
@@ -275,7 +276,7 @@ describe('queryItems time filters', () => {
     })
     expect(items.length).toBeGreaterThan(0)
     expect(items.every(r =>
-      r.last_touched >= '2025-06-01' && r.last_touched <= '2025-12-31'
+      r.last_touched !== null && r.last_touched >= '2025-06-01' && r.last_touched <= '2025-12-31'
     )).toBe(true)
     index.close()
   })
@@ -455,15 +456,12 @@ describe('queryItems sort/limit/offset', () => {
     db.close()
   })
 
-  it('falls back to last_touched for invalid sort on entities (reinforcement_count)', () => {
+  it('rejects a knowledge-only sort on entities (reinforcement_count)', () => {
     const db = createIndex(TMP)
-    // reinforcement_count is knowledge-only; entity query should fall back to last_touched desc
-    const { items } = db.queryItems({ kind: 'entity', sort_by: 'reinforcement_count' })
-    for (let i = 1; i < items.length; i++) {
-      const a = items[i - 1].last_touched ?? ''
-      const b = items[i].last_touched ?? ''
-      expect(a >= b).toBe(true)
-    }
+    // reinforcement_count is knowledge-only. This used to fall back to
+    // last_touched desc and report success — asking for one order and getting
+    // another is a wrong answer, so the request is refused instead.
+    expect(() => db.queryItems({ kind: 'entity', sort_by: 'reinforcement_count' })).toThrow(/reinforcement_count/)
     db.close()
   })
 

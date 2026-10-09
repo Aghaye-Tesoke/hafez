@@ -8,17 +8,18 @@ import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createHafez } from '../src/index.js'
-import { createIndex, type HafezIndex } from '../src/db.js'
+import { createIndex, ENTITY_ONLY_OPTS, KNOWLEDGE_ONLY_OPTS, type HafezIndex } from '../src/db.js'
 import { serializeFile } from '../src/vault.js'
 import { cmdQuery, QUERY_FLAG_NAMES, QUERY_FLAG_SUPPORT, type QueryBranch } from '../src/cli/commands.js'
 import { UsageError } from '../src/cli/args.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-test-query-surface-' + Date.now())
 const VAULT = join(TMP, 'vault')
 const CLI = join(process.cwd(), 'dist', 'cli.js')
 
-const today = new Date().toISOString().slice(0, 10)
+const today = localDay()
 
 function writeEntity(slug: string, fm: Record<string, any>) {
   writeFileSync(join(VAULT, 'entities', `${slug}.md`), serializeFile(fm, '## Purpose\n\n## Session Log\n'))
@@ -133,6 +134,96 @@ describe('--kind entity rejects the knowledge-only flags', () => {
   })
 })
 
+// --- (b2) the same rule below the CLI: the library path rejects too ---
+//
+// The matrix above stops at cmdQuery, which rejects the flag before the read
+// surface ever sees it — so it never reached the branch that used to drop.
+// These go through the factory, the way an MCP wrapper or an agent building
+// opts as JSON does.
+
+describe('the read surface rejects opts its branch cannot map', () => {
+  it('an entity query rejects the knowledge-only opts', async () => {
+    const os = makeOS()
+    await expect(os.query({ filter: 'active', confidence: 'pattern' } as any)).rejects.toThrow(/confidence/)
+    await expect(os.query({ subtype: 'plan' } as any)).rejects.toThrow(/subtype/)
+  })
+
+  it('a knowledge query rejects the entity-only opts', async () => {
+    const os = makeOS()
+    await expect(os.query_knowledge({ filter: 'active' } as any)).rejects.toThrow(/filter/)
+    await expect(os.query_knowledge({ type: 'project' } as any)).rejects.toThrow(/type/)
+    await expect(os.query_knowledge({ parent: 'active-proj' } as any)).rejects.toThrow(/parent/)
+  })
+
+  it('the unified query still accepts opts from both sides — it maps both', async () => {
+    const out = await makeOS().queryUnified({ kind: 'all', filter: 'active', confidence: 'pattern' })
+    expect(out.items.some(i => i.slug === 'kn-pattern')).toBe(true)
+  })
+
+  it('but a unified query narrowed by kind is that kind, and rejects the same opts', async () => {
+    // `kind: 'all'` maps both sides; `kind: 'entity'` / `kind: 'knowledge'`
+    // narrow to one, and a narrowed branch maps no more than the dedicated
+    // one does — the conditions land on columns the selected kind leaves
+    // NULL, so every row is excluded and the caller gets 0 results, exit 0.
+    //
+    // UnifiedQueryOpts is a union discriminated on `kind`, so every call below
+    // is a compile error without the cast. The runtime check is what an
+    // untyped caller hits — JS, or JSON opts over an MCP wrapper.
+    const os = makeOS()
+    await expect(os.queryUnified({ kind: 'entity', confidence: 'pattern' } as any)).rejects.toThrow(/confidence/)
+    await expect(os.queryUnified({ kind: 'entity', subtype: 'insight' } as any)).rejects.toThrow(/subtype/)
+    await expect(os.queryUnified({ kind: 'knowledge', filter: 'active' } as any)).rejects.toThrow(/filter/)
+    await expect(os.queryUnified({ kind: 'knowledge', type: 'project' } as any)).rejects.toThrow(/type/)
+    await expect(os.queryUnified({ kind: 'knowledge', parent: 'active-proj' } as any)).rejects.toThrow(/parent/)
+    await expect(os.queryUnified({ kind: 'entity', sort_by: 'reinforcement_count' } as any)).rejects.toThrow(/reinforcement_count/)
+  })
+
+  it('a kind-narrowed unified query still answers when its opts are in scope', async () => {
+    // These need no cast — they are what the union permits.
+    const os = makeOS()
+    await expect(os.queryUnified({ kind: 'entity', filter: 'active' })).resolves.toHaveProperty('items')
+    await expect(os.queryUnified({ kind: 'knowledge', confidence: 'pattern' })).resolves.toHaveProperty('items')
+    await expect(os.queryUnified({ kind: 'knowledge', sort_by: 'reinforcement_count' })).resolves.toHaveProperty('items')
+  })
+
+  it('an explicit undefined is not a request, so it is not a rejection', async () => {
+    await expect(makeOS().query({ filter: 'active', confidence: undefined } as any)).resolves.toHaveProperty('items')
+  })
+
+  it('rejects with VALIDATION_FAILED, so the CLI exit-code table needs no change', () => {
+    const index: HafezIndex = createIndex(VAULT)
+    try {
+      expect(() => index.queryEntities({ confidence: 'pattern' } as any)).toThrow(
+        expect.objectContaining({ code: 'VALIDATION_FAILED' }),
+      )
+    } finally {
+      index.close()
+    }
+  })
+})
+
+// --- (b3) knowledge-only sort fields are rejected, not substituted ---
+
+describe('sort fields are applied or rejected, never substituted', () => {
+  it('an entity query rejects a knowledge-only sort field', async () => {
+    const os = makeOS()
+    await expect(os.query({ sort_by: 'reinforcement_count' } as any)).rejects.toThrow(/reinforcement_count/)
+    await expect(os.query({ sort_by: 'last_reinforced' } as any)).rejects.toThrow(/last_reinforced/)
+  })
+
+  it('the knowledge and unified branches still accept them', async () => {
+    const os = makeOS()
+    await expect(os.query_knowledge({ sort_by: 'reinforcement_count' })).resolves.toHaveProperty('items')
+    await expect(os.queryUnified({ kind: 'all', sort_by: 'reinforcement_count' } as any)).resolves.toHaveProperty('items')
+  })
+
+  it('the CLI exits non-zero instead of exiting 0 in the wrong order', () => {
+    const { stderr, exitCode } = runCli('query', '--sort-by', 'reinforcement_count')
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toMatch(/reinforcement_count/)
+  })
+})
+
 describe('--related-to rejects the flags it cannot apply', () => {
   it('still returns linked items on its own', async () => {
     const out = await queryJson(['--related-to', 'active-proj'])
@@ -226,6 +317,28 @@ describe('query flag × kind branch matrix', () => {
     limit: '5',
     offset: '0',
   }
+
+  // Flag name → opt name. Declared, because the CLI speaks kebab-case flags
+  // and the read surface speaks opts; the parity assertion below is what makes
+  // the two tables one rule instead of two that can drift.
+  const FLAG_TO_OPT: Record<string, string> = {
+    filter: 'filter', type: 'type', parent: 'parent',
+    confidence: 'confidence', subtype: 'subtype',
+  }
+
+  it('the CLI flag matrix and the read surface opt matrix are the same rule', () => {
+    const rejected: Record<'entity' | 'knowledge', readonly string[]> = {
+      entity: KNOWLEDGE_ONLY_OPTS,
+      knowledge: ENTITY_ONLY_OPTS,
+    }
+    for (const branch of ['entity', 'knowledge'] as const) {
+      const cliRejects = Object.keys(FLAG_TO_OPT)
+        .filter(f => !QUERY_FLAG_SUPPORT[branch].includes(f))
+        .map(f => FLAG_TO_OPT[f])
+        .sort()
+      expect([...rejected[branch]].sort(), `${branch}: CLI flag scope and read-surface opt scope disagree`).toEqual(cliRejects)
+    }
+  })
 
   it('the support table covers every declared query flag in every branch', () => {
     for (const branch of Object.keys(QUERY_FLAG_SUPPORT) as QueryBranch[]) {

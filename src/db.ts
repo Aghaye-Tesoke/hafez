@@ -6,8 +6,11 @@ import { parseFilePath, scanVaultDir, kindDir, INDEXED_KINDS } from './vault.js'
 import { ensureLocalExclude, type VaultIndexRow } from './knowledge-index.js'
 import { WIKI_LINK_RE, documentForFile } from './document.js'
 import { ENTITY_STATUSES, ENTITY_TYPES, CONFIDENCE_LEVELS, VALID_SUBTYPES, DEFAULT_KNOWLEDGE_SUBTYPE } from './contracts.js'
-import type { SearchResult, VaultStats, EntityStatus, EntityType, QueryResult, KnowledgeQueryResult, UnifiedResult, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts } from './types.js'
+import type { SearchResult, VaultStats, EntityStatus, EntityType, QueryResult, KnowledgeQueryResult, UnifiedResult, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, SortField } from './types.js'
 import { HafezError } from './types.js'
+import { STOPWORDS } from './stopwords.js'
+import { ENTITY_AGE_DAYS_SQL, ENTITY_STALE_SQL } from './stale.js'
+import { localDay } from './dates.js'
 
 // Bump this when indexing logic changes to force a full rebuild.
 // v5: wiki link harvesting (mention relations), parent link indexing, relation filter on queries.
@@ -20,8 +23,10 @@ import { HafezError } from './types.js'
 // v10: re-indexing an externally changed file is delete-then-insert instead of
 //     INSERT OR REPLACE. Indexes written by v9 and earlier may hold ghost FTS
 //     rows (REPLACE never fired the delete trigger) and must be rebuilt, not reused.
+// v11: next_action and the searchable body store action text with its
+//     added-date stamp stripped.
 // Existing instances will fully rebuild the index on first access after upgrade.
-export const SCHEMA_VERSION = '10'
+export const SCHEMA_VERSION = '11'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS items (
@@ -82,19 +87,6 @@ CREATE TABLE IF NOT EXISTS meta (
   value TEXT NOT NULL
 );
 `
-
-const STOPWORDS = new Set([
-  'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of',
-  'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should',
-  'may', 'might', 'can', 'shall', 'not', 'no', 'nor', 'so', 'if', 'then', 'than',
-  'that', 'this', 'these', 'those', 'it', 'its', 'my', 'your', 'his', 'her',
-  'our', 'their', 'what', 'which', 'who', 'whom', 'how', 'when', 'where', 'why',
-  'all', 'each', 'every', 'both', 'few', 'more', 'most', 'some', 'any', 'such',
-  'about', 'into', 'over', 'after', 'before',
-  'work', 'works', 'working', 'use', 'using', 'used', 'get', 'got', 'make', 'made',
-  'need', 'want', 'like', 'just', 'also', 'still', 'already', 'very', 'much',
-])
 
 function hashContent(content: string): string {
   return createHash('sha256').update(content).digest('hex')
@@ -304,13 +296,8 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
   if (opts.filter === 'stale') {
     conditions.push("i.kind = 'entity'")
     conditions.push("i.status = 'active'")
-    conditions.push(`(
-      julianday('now') - julianday(i.last_touched) >
-      CASE
-        WHEN i.staleness_days IS NOT NULL THEN i.staleness_days
-        ELSE 14
-      END
-    )`)
+    conditions.push(`(${ENTITY_STALE_SQL})`)
+    params.today = localDay()
   }
   if (opts.filter === 'capture') {
     conditions.push("i.type = 'capture'")
@@ -352,13 +339,12 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
 
   let sortCol = 'i.last_touched'
   if (opts.sort_by) {
-    const isKnowledgeOnly = KNOWLEDGE_ONLY_SORTS.has(opts.sort_by)
-    const isEntityQuery = opts.kind === 'entity'
-    if (isKnowledgeOnly && isEntityQuery) {
-      sortCol = 'i.last_touched'
-    } else if (SORT_COL_MAP[opts.sort_by]) {
-      sortCol = SORT_COL_MAP[opts.sort_by]
+    // Same rule as the unmappable opts, one code path over: a sort field the
+    // branch cannot honour is rejected, not quietly swapped for recency.
+    if (KNOWLEDGE_ONLY_SORTS.has(opts.sort_by) && opts.kind === 'entity') {
+      outOfScope('sort_by', opts.sort_by, 'entity')
     }
+    if (SORT_COL_MAP[opts.sort_by]) sortCol = SORT_COL_MAP[opts.sort_by]
   }
 
   let sortOrder: 'ASC' | 'DESC'
@@ -486,16 +472,11 @@ function getStatsFn(db: InstanceType<typeof Database>): VaultStats {
   }
 
   const stale = db.prepare(`
-    SELECT slug, name, type, CAST(julianday('now') - julianday(last_touched) AS INTEGER) as days_since_touched
-    FROM items
-    WHERE kind = 'entity' AND status = 'active'
-      AND julianday('now') - julianday(last_touched) >
-        CASE
-          WHEN staleness_days IS NOT NULL THEN staleness_days
-          ELSE 14
-        END
+    SELECT slug, name, type, ${ENTITY_AGE_DAYS_SQL} as days_since_touched
+    FROM items i
+    WHERE kind = 'entity' AND status = 'active' AND ${ENTITY_STALE_SQL}
     ORDER BY days_since_touched DESC
-  `).all() as Array<{ slug: string; name: string; type: EntityType; days_since_touched: number }>
+  `).all({ today: localDay() }) as Array<{ slug: string; name: string; type: EntityType; days_since_touched: number }>
 
   const no_next_action = db.prepare(`
     SELECT slug, name, type FROM items
@@ -742,7 +723,8 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       last_reinforced: fm['last-reinforced'] ?? null,
       created: fm.created,
       last_touched: fm['last-touched'] ?? null,
-      body,
+      // Search sees action text, not the added-date stamp (file format only).
+      body: doc.stripNextActionStamps(body),
       file_hash: hash,
       subtype: kind === 'knowledge' ? (fm.subtype ?? DEFAULT_KNOWLEDGE_SUBTYPE) : null,
       description: fm.description ?? null,
@@ -976,9 +958,11 @@ const STATUS_FILTERS = new Set<string>(ENTITY_STATUSES)
 // query shares. Each opt maps in exactly one place, so the filtered and
 // unified views can't silently diverge. Domain appears in both filter mappers
 // (both kinds carry it) — mapping it twice is idempotent.
-type ListOpts = Pick<EntityQueryOpts, 'tags' | 'sort_by' | 'sort_order' | 'limit' | 'offset'>
+// Keyed off the knowledge opts, which carry the full sort field set — the
+// entity opts declare only the subset that branch can honour.
+type ListOpts = Pick<KnowledgeQueryOpts, 'tags' | 'sort_by' | 'sort_order' | 'limit' | 'offset'>
 
-function mapEntityFilterOpts(qopts: QueryOpts, opts?: EntityQueryOpts): void {
+function mapEntityFilterOpts(qopts: QueryOpts, opts?: Pick<EntityQueryOpts, 'filter' | 'type' | 'parent' | 'domain'>): void {
   if (opts?.filter && STATUS_FILTERS.has(opts.filter)) qopts.status = opts.filter
   if (opts?.filter === 'stale') qopts.filter = 'stale'
   if (opts?.filter === 'capture') qopts.filter = 'capture'
@@ -1008,9 +992,45 @@ function mapKnowledgeFilterOpts(qopts: QueryOpts, opts?: { domain?: string; conf
   if (opts?.subtype) qopts.subtype = opts.subtype
 }
 
-function validateEntityFilterOpts(opts?: EntityQueryOpts): void {
+function validateEntityFilterOpts(opts?: Pick<EntityQueryOpts, 'filter' | 'type'>): void {
   assertEnum(opts?.filter, QUERY_FILTERS, 'filter')
   assertEnum(opts?.type, ENTITY_TYPES, 'type')
+}
+
+/** Opts a branch cannot map into SQL. Declared per branch and rejected on
+ * sight: the CLI has rejected these since 43124ba, but the rule lived only
+ * there, so a library caller got the silent drop the CLI had already closed.
+ * Asserted against the CLI's flag matrix in query-surface.test.ts. */
+export const ENTITY_ONLY_OPTS = ['filter', 'type', 'parent'] as const
+export const KNOWLEDGE_ONLY_OPTS = ['confidence', 'subtype'] as const
+
+/** The one sentence both scope rejections speak — opts here, sort fields in
+ * queryItemsFn — so a caller sees the same shape whichever one they hit. */
+function outOfScope(label: string, name: string, branch: 'entity' | 'knowledge'): never {
+  const belongsTo = branch === 'entity' ? 'knowledge notes only' : 'entities only'
+  throw new HafezError(
+    'VALIDATION_FAILED',
+    `Invalid ${label} for a ${branch} query: "${name}" — ${belongsTo}. Use kind: 'all' to query both.`,
+  )
+}
+
+/** Every opt any branch might carry, flattened. Only the unified read uses it,
+ * and only to check: the checks must see an opt the caller's own type forbids,
+ * because an untyped caller can still send it. */
+export type UnmappableCheckOpts =
+  Omit<EntityQueryOpts, 'sort_by'>
+  & Omit<KnowledgeQueryOpts, 'sort_by'>
+  & { kind?: 'entity' | 'knowledge' | 'all'; sort_by?: SortField }
+
+function rejectUnmappableOpts(
+  opts: Partial<Record<string, unknown>> | undefined,
+  reject: readonly string[],
+  branch: 'entity' | 'knowledge',
+): void {
+  if (!opts) return
+  // Only a *defined* value is a request — an explicit `undefined` (what a
+  // spread of unset CLI flags produces) asks for nothing.
+  for (const name of reject) if (opts[name] !== undefined) outOfScope('opt', name, branch)
 }
 
 function validateKnowledgeFilterOpts(opts?: { confidence?: string; subtype?: string }): void {
@@ -1021,7 +1041,9 @@ function validateKnowledgeFilterOpts(opts?: { confidence?: string; subtype?: str
 function queryEntitiesFn(index: HafezIndex, opts?: EntityQueryOpts): { items: QueryResult[], total: number } {
   index.syncIfStale()
   validateEntityFilterOpts(opts)
-  validateKnowledgeFilterOpts(opts)
+  // Was validateKnowledgeFilterOpts — it checked the *value* of an opt this
+  // branch then discarded, so a valid-looking one returned unfiltered.
+  rejectUnmappableOpts(opts as Record<string, unknown> | undefined, KNOWLEDGE_ONLY_OPTS, 'entity')
   validateTimeOpts(opts)
   validateListOpts(opts)
   const qopts: QueryOpts = { kind: 'entity' }
@@ -1048,6 +1070,7 @@ function queryRelatedToFn(index: HafezIndex, slug: string, relation?: string): {
 function queryKnowledgeFn(index: HafezIndex, opts?: KnowledgeQueryOpts): { items: KnowledgeQueryResult[], total: number } {
   index.syncIfStale()
   validateKnowledgeFilterOpts(opts)
+  rejectUnmappableOpts(opts as Record<string, unknown> | undefined, ENTITY_ONLY_OPTS, 'knowledge')
   validateTimeOpts(opts)
   validateListOpts(opts)
   const qopts: QueryOpts = { kind: 'knowledge' }
@@ -1063,18 +1086,30 @@ function queryUnifiedFn(
   opts?: UnifiedQueryOpts,
 ): { items: UnifiedResult[], total: number } {
   index.syncIfStale()
-  assertEnum(opts?.kind, ['entity', 'knowledge', 'all'], 'kind')
-  validateEntityFilterOpts(opts)
-  validateKnowledgeFilterOpts(opts)
-  validateTimeOpts(opts)
-  validateListOpts(opts)
+  // The public type is a union discriminated on `kind`, so an out-of-scope opt
+  // is a compile error. The runtime still has to see every opt to reject it —
+  // an untyped caller (JS, JSON over MCP) reaches here regardless — so widen
+  // once, here, and let the checks below speak for both.
+  const o = opts as UnmappableCheckOpts | undefined
+  assertEnum(o?.kind, ['entity', 'knowledge', 'all'], 'kind')
+  validateEntityFilterOpts(o)
+  validateKnowledgeFilterOpts(o)
+  // Only `kind: 'all'` (or unset) maps both sides. `kind` also narrows this
+  // query to one of them, and a narrowed branch maps no more than the
+  // dedicated one does: the out-of-scope conditions land on columns the
+  // selected kind leaves NULL, so every row is excluded and the caller gets
+  // 0 results with exit 0 — the same wrong answer, one function over.
+  if (o?.kind === 'entity') rejectUnmappableOpts(o, KNOWLEDGE_ONLY_OPTS, 'entity')
+  if (o?.kind === 'knowledge') rejectUnmappableOpts(o, ENTITY_ONLY_OPTS, 'knowledge')
+  validateTimeOpts(o)
+  validateListOpts(o)
   const qopts: QueryOpts = {}
-  if (opts?.kind && opts.kind !== 'all') qopts.kind = opts.kind
+  if (o?.kind && o.kind !== 'all') qopts.kind = o.kind
   // When kind is 'all' or unset, no kind filter — both entities and knowledge are returned
-  mapEntityFilterOpts(qopts, opts)
-  mapKnowledgeFilterOpts(qopts, opts)
-  mapTimeOpts(qopts, opts)
-  mapListOpts(qopts, opts)
+  mapEntityFilterOpts(qopts, o)
+  mapKnowledgeFilterOpts(qopts, o)
+  mapTimeOpts(qopts, o)
+  mapListOpts(qopts, o)
 
   const result = index.queryItems(qopts)
   const items: UnifiedResult[] = result.items.map(i => {

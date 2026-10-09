@@ -4,18 +4,27 @@ import { join, resolve } from 'path'
 import { homedir } from 'os'
 import { execSync } from 'child_process'
 import { kindDir } from '../vault.js'
+import { helpIfAsked } from './args.js'
 
-export function getConfigDir(): string {
-  const xdg = process.env.XDG_CONFIG_HOME
-  return join(xdg || join(homedir(), '.config'), 'hafez')
+/** Where the config is looked for. The environment and home are inputs so the
+ * `onboard --block` hook runs against a temporary home in tests. */
+export interface ConfigHome {
+  env: Record<string, string | undefined>
+  home: string
 }
 
-export function getConfigPath(): string {
-  return join(getConfigDir(), 'vault')
+const processHome = (): ConfigHome => ({ env: process.env, home: homedir() })
+
+export function getConfigDir({ env, home }: ConfigHome = processHome()): string {
+  return join(env.XDG_CONFIG_HOME || join(home, '.config'), 'hafez')
 }
 
-export function readVaultConfig(): string | null {
-  const configPath = getConfigPath()
+export function getConfigPath(at: ConfigHome = processHome()): string {
+  return join(getConfigDir(at), 'vault')
+}
+
+export function readVaultConfig(at: ConfigHome = processHome()): string | null {
+  const configPath = getConfigPath(at)
   if (!existsSync(configPath)) return null
   try {
     const content = readFileSync(configPath, 'utf-8').trim()
@@ -31,7 +40,7 @@ export function saveVaultConfig(vaultPath: string): void {
   writeFileSync(join(dir, 'vault'), resolve(vaultPath) + '\n')
 }
 
-function isVault(dirPath: string): boolean {
+export function isVault(dirPath: string): boolean {
   return existsSync(dirPath) && statSync(dirPath).isDirectory() && existsSync(join(dirPath, kindDir('entity')))
 }
 
@@ -39,17 +48,17 @@ function isVault(dirPath: string): boolean {
  * Resolve vault path. Returns string or null.
  * If config exists but points to a bad path, returns an error object instead.
  */
-export function resolveVaultPath(flagValue?: string): string | null | { error: string } {
+export function resolveVaultPath(flagValue?: string, at: ConfigHome = processHome()): string | null | { error: string } {
   // 1. Explicit flag
   if (flagValue) return flagValue
 
   // 2. Config file
-  const configValue = readVaultConfig()
+  const configValue = readVaultConfig(at)
   if (configValue) {
     if (isVault(configValue)) return configValue
     // Config exists but points to bad path — loud failure
     return {
-      error: `Config (${getConfigPath()}) points to ${configValue} but it doesn't look like a vault.\nRun 'hafez init --register /correct/path' to fix.`,
+      error: `Config (${getConfigPath(at)}) points to ${configValue} but it doesn't look like a vault.\nRun 'hafez init --register /correct/path' to fix.`,
     }
   }
 
@@ -72,6 +81,7 @@ Get started:
 }
 
 export function cmdInit(args: string[], flagValue?: string): void {
+  helpIfAsked(args, 'Usage: hafez init [--register <path>]')
   const registerIdx = args.indexOf('--register')
 
   if (registerIdx !== -1) {

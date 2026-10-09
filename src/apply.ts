@@ -22,11 +22,12 @@ import { join, relative, dirname } from 'path'
 import { parseFilePath, serializeFile, slugify, resolveFilePath, kindFromPath, kindDir, archiveLogPath, findVaultFile, vaultFileExists } from './vault.js'
 import { validateEntityFrontmatter, validateKnowledgeFrontmatter } from './schema.js'
 import { bodyTemplate, knowledgeBodyTemplate, sessionBodyTemplate } from './templates.js'
-import { formatSessionLogEntry, documentFor, documentForFile, type Doc } from './document.js'
+import { formatSessionLogEntry, stampAction, documentFor, documentForFile, type Doc } from './document.js'
 import { sectionsFor, statusesFor, unreachableFields, describeTarget, type DocTarget } from './contracts.js'
 import { localDay } from './dates.js'
-import { specFor, type OpSpecName } from './batch-ops.js'
-import type { BatchOperation, BatchResult, CreateEntityFields, CreateKnowledgeFields, KnowledgeSubtype, UpdateFields } from './types.js'
+import { detectAgent } from './harness.js'
+import { specFor, loggedFields, type OpSpecName } from './batch-ops.js'
+import type { BatchOperation, BatchResult, CreateEntityFields, DeletableKind, CreateKnowledgeFields, KnowledgeSubtype, UpdateFields, UpdateResult } from './types.js'
 import { HafezError } from './types.js'
 
 // One applied mutation: what was written/deleted (repo-relative, ready to
@@ -40,7 +41,10 @@ export interface AppliedOp {
   commitMessage: string
   indexRemovals: string[]
   indexUpserts: Array<{ slug: string; kind: 'entity' | 'knowledge' }>
-  matchedAction?: string
+  /** Set by the update arm: the line each Next Actions query matched. */
+  updateResult?: UpdateResult
+  /** Set by the delete arm: the kind of note it removed. */
+  deletedKind?: DeletableKind
 }
 
 /** Everything an apply arm needs from its caller: where the vault is, and how
@@ -78,7 +82,7 @@ function today(): string { return localDay() }
 
 // --- Field policy ---
 
-const ENTITY_ONLY_FIELDS: (keyof UpdateFields)[] = ['status', 'add_action', 'add_actions', 'complete_action', 'remove_action', 'clear_actions', 'brief', 'current_state', 'session_log', 'resource']
+const ENTITY_ONLY_FIELDS: (keyof UpdateFields)[] = ['status', 'add_action', 'add_actions', 'complete_action', 'remove_action', 'clear_actions', 'brief', 'current_state', 'session_log', 'agent', 'resource', 'parent']
 const KNOWLEDGE_ONLY_FIELDS: (keyof UpdateFields)[] = ['confidence', 'synthesis', 'add_evidence', 'add_source']
 
 // An entity-only field is still reachable on a knowledge note when THAT
@@ -163,21 +167,27 @@ export function buildEntityFrontmatter(name: string, ef: CreateEntityFields, exi
   return fm
 }
 
+// Every action add — create, update, batch, digest — lands here, so this is
+// the one place the added-date stamp is written (local day, never twice).
+function addStampedAction(doc: Doc, body: string, action: string): string {
+  return doc.addNextAction(body, stampAction(action, today()))
+}
+
 // Body-side optional fields (brief, actions) must behave identically in both
 // paths, like buildEntityFrontmatter's.
 function buildEntityBody(ef: CreateEntityFields): string {
   const doc = documentFor({ kind: 'entity' })
   let body = bodyTemplate(ef.type, { purpose: ef.purpose })
   if (ef.brief) body = doc.setBrief(body, ef.brief)
-  if (ef.add_action !== undefined) body = doc.addNextAction(body, ef.add_action)
-  for (const action of ef.add_actions ?? []) body = doc.addNextAction(body, action)
+  if (ef.add_action !== undefined) body = addStampedAction(doc, body, ef.add_action)
+  for (const action of ef.add_actions ?? []) body = addStampedAction(doc, body, action)
   return body
 }
 
 export function buildKnowledgeFrontmatter(name: string, kf: CreateKnowledgeFields, existsFn: (slug: string) => boolean): Record<string, any> {
   const target: DocTarget = { kind: 'knowledge', subtype: kf.subtype }
   assertFieldsReachable(target, kf as unknown as Record<string, unknown>)
-  const fm: Record<string, any> = { name, confidence: 'observation', 'reinforcement-count': 0, created: today() }
+  const fm: Record<string, any> = { name, confidence: kf.confidence ?? 'observation', 'reinforcement-count': 0, created: today() }
   if (kf.domain?.length) fm.domain = kf.domain
   if (kf.related?.length) {
     for (const r of kf.related) {
@@ -201,10 +211,70 @@ export function buildKnowledgeFrontmatter(name: string, kf: CreateKnowledgeField
   return fm
 }
 
+// The Next Actions fields are the one group in UpdateFields that all touch
+// the same section, so their order within an op IS their meaning. The
+// contract: prune, tick, add — clear_actions → remove_action →
+// complete_action → add_action → add_actions. Every query is resolved
+// against the list as it stands after the clear and before any edit, so a
+// query never sees a line another field of the same op removed or added;
+// two queries naming one line is a collision, not a silent overwrite. The
+// section is pruned once at the end, after the adds — a tick that empties
+// the open list and an add in the same op edit the section in place rather
+// than removing and recreating it. The "rebuild the list" payload
+// (`clear_actions` + `add_actions`) does what it reads as. Contradictory
+// payloads (clear + a query) are rejected in the validate phase, not here.
+//
+// Lines leaving the list go to the archive log, never nowhere: the removed
+// line, a cleared list, the ticked lines a prune takes with the section, and
+// — once the section holds ARCHIVE_LIMIT or more ticked lines — the oldest of
+// them, leaving one fewer than the limit (the session log's rule). Each line
+// takes the lines nested under it (up to the next checkbox line). Run on
+// every update, so a list grown by hand is trimmed by the next write; never
+// on read.
+const ARCHIVE_LIMIT = 10
+
+/** Action lines an update took out of Next Actions, as the file held them. */
+interface ArchivedActions { cleared: string[]; removed?: string; ticked: string[] }
+
+function applyNextActionFields(doc: Doc, body: string, fields: UpdateFields): { body: string; result: UpdateResult; archived: ArchivedActions } {
+  const result: UpdateResult = {}
+  const cleared = fields.clear_actions ? doc.actionLines(body) : []
+  let removedLine: string | undefined
+  if (fields.clear_actions) body = doc.clearNextActions(body)
+  const removed = fields.remove_action !== undefined ? doc.matchNextAction(body, fields.remove_action) : undefined
+  const completed = fields.complete_action !== undefined ? doc.matchNextAction(body, fields.complete_action) : undefined
+  // Caller misuse, not a Spine bug: like no-match and ambiguous (matchNextAction),
+  // it depends on the list as the earlier ops of a batch leave it, so it is
+  // resolved here rather than in the validate phase.
+  if (removed && completed && removed.line === completed.line) {
+    throw new HafezError('VALIDATION_FAILED', `remove_action and complete_action both match "${removed.text}" — one line, one field`)
+  }
+  if (removed) result.removed_action = removed.text
+  if (completed) result.completed_action = completed.text
+  // Both matches are line positions in the pre-edit list. A tick leaves every
+  // position where it was; a removal shifts the lines below it — so tick first.
+  if (completed) body = doc.completeNextAction(body, completed).body
+  if (removed) ({ body, line: removedLine } = doc.removeNextAction(body, removed))
+  if (fields.add_action !== undefined) body = addStampedAction(doc, body, fields.add_action)
+  if (fields.add_actions !== undefined) {
+    for (const action of fields.add_actions) {
+      body = addStampedAction(doc, body, action)
+    }
+  }
+  const overflow = doc.extractOldestTickedActions(body, ARCHIVE_LIMIT - 1)
+  // With no open line left the prune takes the section, ticked lines and all.
+  const pruned = doc.getNextActions(overflow.body).length === 0 ? doc.actionLines(overflow.body) : []
+  return {
+    body: doc.pruneNextActions(overflow.body),
+    result,
+    archived: { cleared, removed: removedLine, ticked: [...overflow.lines, ...pruned] },
+  }
+}
+
 // Pure field application, like every arm above it: the Spine has already run
 // Op Spec validation (shape + semantics). `doc` is the Document bound to the
 // file's kind (see documentFor).
-function applyUpdateFields(doc: Doc, fm: Record<string, any>, body: string, fields: UpdateFields): { fm: Record<string, any>; body: string; matchedAction?: string } {
+function applyUpdateFields(doc: Doc, fm: Record<string, any>, body: string, fields: UpdateFields): { fm: Record<string, any>; body: string; updateResult: UpdateResult; archivedActions: string[] } {
   if (fields.status !== undefined) fm.status = fields.status
   if (fields.current_state !== undefined) {
     body = doc.setSection(body, 'Current State', fields.current_state, 'Session Log')
@@ -212,20 +282,8 @@ function applyUpdateFields(doc: Doc, fm: Record<string, any>, body: string, fiel
   if (fields.brief !== undefined) {
     body = fields.brief === null ? doc.removeBrief(body) : doc.setBrief(body, fields.brief)
   }
-  let matchedAction: string | undefined
-  if (fields.add_action !== undefined) body = doc.addNextAction(body, fields.add_action)
-  if (fields.add_actions !== undefined) {
-    for (const action of fields.add_actions) {
-      body = doc.addNextAction(body, action)
-    }
-  }
-  if (fields.complete_action !== undefined) {
-    const r = doc.completeNextAction(body, fields.complete_action); body = r.body; matchedAction = r.matched
-  }
-  if (fields.remove_action !== undefined) {
-    const r = doc.removeNextAction(body, fields.remove_action); body = r.body; matchedAction = r.matched
-  }
-  if (fields.clear_actions) body = doc.clearNextActions(body)
+  const actions = applyNextActionFields(doc, body, fields)
+  body = actions.body
   if (fields.session_log) {
     body = doc.prependSessionLogEntry(body, formatSessionLogEntry(fields.session_log))
   }
@@ -243,6 +301,7 @@ function applyUpdateFields(doc: Doc, fm: Record<string, any>, body: string, fiel
     else fm.resource = fields.resource
   }
   if (fields.confidence !== undefined) fm.confidence = fields.confidence
+  if (fields.parent !== undefined) fm.parent = fields.parent
   if (fields.tags !== undefined) fm.tags = fields.tags
   if (fields.related !== undefined) fm.related = fields.related
   if (fields.synthesis !== undefined) {
@@ -260,96 +319,46 @@ function applyUpdateFields(doc: Doc, fm: Record<string, any>, body: string, fiel
     body = doc.appendToSection(body, 'Sources', fields.add_source)
   }
   if (fm['last-touched'] !== today()) fm['last-touched'] = today()
-  return { fm, body, matchedAction }
+  const updateResult: UpdateResult = { ...actions.result, ...(fields.session_log && { logged: true }) }
+  return { fm, body, updateResult, archivedActions: archivedActionEntries(actions.archived) }
 }
 
-function promoteCore(
-  ctx: ApplyContext,
-  slug: string,
-  target: 'entity' | 'project' | 'knowledge',
-  filePath: string,
-  fm: Record<string, any>,
-  body: string,
-  kind: 'entity' | 'knowledge'
-): { modifiedFiles: string[]; deletedFiles: string[] } {
-  const { vaultPath } = ctx
-  const currentType = kind === 'knowledge' ? 'knowledge' : (fm.type as string)
-
-  const modifiedFiles: string[] = []
-  const deletedFiles: string[] = []
-
-  if (target === 'knowledge') {
-    // Cross-kind: move file from entities/ to knowledge/. The source body
-    // is read under the entity Document binding.
-    const sourceDoc = documentFor({ kind: 'entity' })
-    const newPath = knowledgePath(vaultPath, slug)
-    // Promote must behave like create AT THE TARGET. A diverged vault can
-    // hold the same slug as both an entity and a knowledge note (findFile
-    // resolves entities first, so the validate phase sees only the entity);
-    // without this check the write below silently destroys the note.
-    if (existsSync(newPath)) {
-      throw new HafezError('SLUG_EXISTS', `Slug '${slug}' already exists in ${kindDir('knowledge')}/`)
-    }
-    const notesSection = sourceDoc.findSection(body, 'Notes')
-    const notesContent = notesSection?.content ?? ''
-    const newFm: Record<string, any> = {
-      name: fm.name, subtype: 'insight', confidence: 'observation', created: fm.created || today(),
-    }
-    if (fm.description) newFm.description = fm.description
-    // resource is intentionally dropped on entity→knowledge promote (entity-only field)
-    if (fm.domain) newFm.domain = fm.domain
-    if (fm.related) newFm.related = fm.related
-    if (fm.tags) newFm.tags = fm.tags
-
-    const knBody = knowledgeBodyTemplate('insight', { synthesis: notesContent || undefined })
-    const finalBody = documentFor({ kind: 'knowledge' }).syncRelatedSection(knBody, newFm)
-    // An entities-only vault has no knowledge/ yet — create it like the
-    // create-knowledge arm does, and map any fs failure onto a HafezError
-    // so no raw ENOENT/ENOTDIR escapes the promote path.
-    try {
-      mkdirSync(join(vaultPath, kindDir('knowledge')), { recursive: true })
-      writeFileSync(newPath, serializeFile(newFm, finalBody))
-      unlinkSync(filePath)
-    } catch (err) {
-      throw new HafezError(
-        'VALIDATION_FAILED',
-        `Failed to promote '${slug}' to knowledge: ${err instanceof Error ? err.message : String(err)}`,
-      )
-    }
-    modifiedFiles.push(relative(vaultPath, newPath))
-    // The deletion must be staged too — `git add` of a removed path stages
-    // the removal; omitting it leaves the vault permanently dirty.
-    deletedFiles.push(relative(vaultPath, filePath))
-  } else {
-    // Same-kind: capture→entity, capture→project, entity→project
-    fm.type = target
-    fm['last-touched'] = today()
-
-    // All body reshaping goes through Document — structural sections only,
-    // so quoted heading mentions inside content can no longer suppress or
-    // hijack the splice points.
-    const doc = documentFor({ kind: 'entity' })
-    let newBody = body
-    if (target === 'entity') {
-      newBody = doc.renameSection(newBody, 'Notes', 'Context')
-    } else {
-      // project
-      newBody = doc.renameSection(newBody, 'Notes', 'Purpose')
-      newBody = doc.renameSection(newBody, 'Context', 'Purpose')
-      newBody = doc.ensureSection(newBody, 'Goals', { after: 'Purpose' })
-    }
-    newBody = doc.prependSessionLogEntry(newBody, formatSessionLogEntry({
-      type: 'decision',
-      agent: 'system',
-      summary: `Promoted from ${currentType} to ${target}`,
-    }))
-
-    newBody = doc.syncRelatedSection(newBody, fm)
-    writeFileSync(filePath, serializeFile(fm, newBody))
-    modifiedFiles.push(relative(vaultPath, filePath))
+/** The archive log's entries for action lines leaving the list. Entry-shaped
+ * like the session log entries archived beside them, so the file stays one
+ * entry stream (merge.ts unions it by entry). */
+function archivedActionEntries(archived: ArchivedActions): string[] {
+  const entries: string[] = []
+  const plural = (n: number) => n === 1 ? '' : 's'
+  if (archived.cleared.length > 0) {
+    const n = archived.cleared.length
+    entries.push(formatSessionLogEntry({ type: 'progress', agent: 'system', summary: `Cleared ${n} action${plural(n)}`, body: archived.cleared.join('\n') }))
   }
+  if (archived.removed !== undefined) {
+    entries.push(formatSessionLogEntry({ type: 'progress', agent: 'system', summary: 'Removed action', body: archived.removed }))
+  }
+  const n = archived.ticked.length
+  if (n > 0) {
+    entries.push(formatSessionLogEntry({ type: 'progress', agent: 'system', summary: `Archived ${n} ticked action${plural(n)}`, body: archived.ticked.join('\n') }))
+  }
+  return entries
+}
 
-  return { modifiedFiles, deletedFiles }
+/** Mechanised session log (#85, moved into the Spine by #107): an entity
+ * update with no session_log gets a `progress` entry naming the fields
+ * written, so history is complete whichever caller wrote it. Action-only
+ * updates are exempt, and only entities carry a Session Log. */
+function withMechanisedLog(kind: 'entity' | 'knowledge', fields: UpdateFields): UpdateFields {
+  if (kind !== 'entity' || fields.session_log) return fields
+  const logged = loggedFields(fields)
+  if (logged.length === 0) return fields
+  return {
+    ...fields,
+    session_log: {
+      type: 'progress',
+      summary: `Updated ${logged.map(f => f.replace(/_/g, '-')).join(', ')}`,
+      agent: fields.agent ?? detectAgent(),
+    },
+  }
 }
 
 // --- The arms ---
@@ -364,22 +373,25 @@ function applyUpdate(op: Extract<BatchOperation, { op: 'update' }>, ctx: ApplyCo
   const doc = documentForFile(parsedFile)
   let fm = parsedFile.frontmatter as Record<string, any>
   let body = parsedFile.body
-  const applied = applyUpdateFields(doc, fm, body, op.fields)
+  const applied = applyUpdateFields(doc, fm, body, withMechanisedLog(kind, op.fields))
   fm = applied.fm
   body = applied.body
 
-  // Session log archival
-  const archivePath = archiveLogPath(vaultPath, op.slug)
-  let archived = false
-  if (doc.countSessionLogEntries(body) >= 10) {
+  // Archival: action lines that left the list, and the oldest session log entry
+  const archiveEntries = [...applied.archivedActions]
+  if (doc.countSessionLogEntries(body) >= ARCHIVE_LIMIT) {
     const extracted = doc.extractOldestSessionLogEntry(body)
     if (extracted) {
-      ctx.captureOriginal(archivePath)
-      mkdirSync(dirname(archivePath), { recursive: true })
-      appendFileSync(archivePath, extracted.entry + '\n\n')
+      archiveEntries.push(extracted.entry)
       body = extracted.remaining
-      archived = true
     }
+  }
+  const archivePath = archiveLogPath(vaultPath, op.slug)
+  const wroteArchive = archiveEntries.length > 0
+  if (wroteArchive) {
+    ctx.captureOriginal(archivePath)
+    mkdirSync(dirname(archivePath), { recursive: true })
+    appendFileSync(archivePath, archiveEntries.map(e => e + '\n\n').join(''))
   }
 
   body = doc.syncRelatedSection(body, fm)
@@ -389,7 +401,7 @@ function applyUpdate(op: Extract<BatchOperation, { op: 'update' }>, ctx: ApplyCo
   // existing swept any external hand-edit sitting in entities/archive/
   // into an unrelated commit.
   const files = [relative(vaultPath, filePath)]
-  if (archived) files.push(relative(vaultPath, archivePath))
+  if (wroteArchive) files.push(relative(vaultPath, archivePath))
 
   return {
     filesWritten: files,
@@ -398,7 +410,7 @@ function applyUpdate(op: Extract<BatchOperation, { op: 'update' }>, ctx: ApplyCo
     commitMessage: `update: ${op.slug}`,
     indexRemovals: [],
     indexUpserts: [{ slug: op.slug, kind }],
-    matchedAction: applied.matchedAction,
+    updateResult: applied.updateResult,
   }
 }
 
@@ -577,7 +589,81 @@ function applyPromote(op: Extract<BatchOperation, { op: 'promote' }>, ctx: Apply
   const fm = parsedFile.frontmatter as Record<string, any>
   const body = parsedFile.body
   const sourceType = kind === 'knowledge' ? 'knowledge' : (fm.type as string)
-  const { modifiedFiles, deletedFiles } = promoteCore(ctx, op.slug, op.target, filePath, fm, body, kind)
+
+  const modifiedFiles: string[] = []
+  const deletedFiles: string[] = []
+
+  if (op.target === 'knowledge') {
+    // Cross-kind: move file from entities/ to knowledge/. The source body
+    // is read under the entity Document binding.
+    const sourceDoc = documentFor({ kind: 'entity' })
+    const newPath = knowledgePath(vaultPath, op.slug)
+    // Promote must behave like create AT THE TARGET. A diverged vault can
+    // hold the same slug as both an entity and a knowledge note (findFile
+    // resolves entities first, so the validate phase sees only the entity);
+    // without this check the write below silently destroys the note.
+    if (existsSync(newPath)) {
+      throw new HafezError('SLUG_EXISTS', `Slug '${op.slug}' already exists in ${kindDir('knowledge')}/`)
+    }
+    const notesSection = sourceDoc.findSection(body, 'Notes')
+    const notesContent = notesSection?.content ?? ''
+    const newFm: Record<string, any> = {
+      name: fm.name, subtype: 'insight', confidence: 'observation', created: fm.created || today(),
+    }
+    if (fm.description) newFm.description = fm.description
+    // resource is intentionally dropped on entity→knowledge promote (entity-only field)
+    if (fm.domain) newFm.domain = fm.domain
+    if (fm.related) newFm.related = fm.related
+    if (fm.tags) newFm.tags = fm.tags
+
+    const knBody = knowledgeBodyTemplate('insight', { synthesis: notesContent || undefined })
+    const finalBody = documentFor({ kind: 'knowledge' }).syncRelatedSection(knBody, newFm)
+    // An entities-only vault has no knowledge/ yet — create it like the
+    // create-knowledge arm does, and map any fs failure onto a HafezError
+    // so no raw ENOENT/ENOTDIR escapes the promote path.
+    try {
+      mkdirSync(join(vaultPath, kindDir('knowledge')), { recursive: true })
+      writeFileSync(newPath, serializeFile(newFm, finalBody))
+      unlinkSync(filePath)
+    } catch (err) {
+      throw new HafezError(
+        'VALIDATION_FAILED',
+        `Failed to promote '${op.slug}' to knowledge: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+    modifiedFiles.push(relative(vaultPath, newPath))
+    // The deletion must be staged too — `git add` of a removed path stages
+    // the removal; omitting it leaves the vault permanently dirty.
+    deletedFiles.push(relative(vaultPath, filePath))
+  } else {
+    // Same-kind: capture→entity, capture→project, entity→project
+    fm.type = op.target
+    fm['last-touched'] = today()
+
+    // All body reshaping goes through Document — structural sections only,
+    // so quoted heading mentions inside content can no longer suppress or
+    // hijack the splice points.
+    const doc = documentFor({ kind: 'entity' })
+    let newBody = body
+    if (op.target === 'entity') {
+      newBody = doc.renameSection(newBody, 'Notes', 'Context')
+    } else {
+      // project
+      newBody = doc.renameSection(newBody, 'Notes', 'Purpose')
+      newBody = doc.renameSection(newBody, 'Context', 'Purpose')
+      newBody = doc.ensureSection(newBody, 'Goals', { after: 'Purpose' })
+    }
+    newBody = doc.prependSessionLogEntry(newBody, formatSessionLogEntry({
+      type: 'decision',
+      agent: 'system',
+      summary: `Promoted from ${sourceType} to ${op.target}`,
+    }))
+
+    newBody = doc.syncRelatedSection(newBody, fm)
+    writeFileSync(filePath, serializeFile(fm, newBody))
+    modifiedFiles.push(relative(vaultPath, filePath))
+  }
+
   return {
     filesWritten: modifiedFiles,
     filesDeleted: deletedFiles,
@@ -585,6 +671,29 @@ function applyPromote(op: Extract<BatchOperation, { op: 'promote' }>, ctx: Apply
     commitMessage: `promote: ${op.slug} ${sourceType} → ${op.target}`,
     indexRemovals: op.target === 'knowledge' ? [op.slug] : [],
     indexUpserts: [{ slug: op.slug, kind: op.target === 'knowledge' ? 'knowledge' : 'entity' }],
+  }
+}
+
+function applyDelete(op: Extract<BatchOperation, { op: 'delete' }>, ctx: ApplyContext): AppliedOp {
+  const { vaultPath } = ctx
+  // By path, not findVaultFile's entity-first order: the Op Spec ruled out
+  // an entity, and resolved the slug to exactly one of these two.
+  const knowledgeFile = knowledgePath(vaultPath, op.slug)
+  const kind: DeletableKind = existsSync(knowledgeFile) ? 'knowledge' : 'session'
+  const filePath = kind === 'knowledge' ? knowledgeFile : resolveFilePath(vaultPath, op.slug, 'session')
+  if (!existsSync(filePath)) vanished(op.slug)
+  // The snapshot is the rollback: a commit-stage failure writes it back.
+  ctx.captureOriginal(filePath)
+  unlinkSync(filePath)
+  return {
+    filesWritten: [],
+    filesDeleted: [relative(vaultPath, filePath)],
+    result: { op: 'delete', slug: op.slug, status: 'ok' },
+    commitMessage: `delete: ${op.slug} (${kind})`,
+    // Sessions are not indexed; a knowledge row goes with its file.
+    indexRemovals: kind === 'knowledge' ? [op.slug] : [],
+    indexUpserts: [],
+    deletedKind: kind,
   }
 }
 
@@ -611,6 +720,7 @@ const APPLY: ApplyTable = {
   'link': applyLink,
   'unlink': applyUnlink,
   'promote': applyPromote,
+  'delete': applyDelete,
 }
 
 /** The single apply path for every mutation. Writes vault files but never

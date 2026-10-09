@@ -8,6 +8,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
 import { execSync } from 'child_process'
+import { asEntity, asKnowledge } from './helpers/vault-files.js'
 
 function createTestVault(dirs: string[] = ['entities', 'knowledge']): string {
   const vaultPath = join(tmpdir(), `hafez-test-${randomUUID()}`)
@@ -30,7 +31,7 @@ describe('promote', () => {
   it('promotes capture to entity and preserves content', async () => {
     const slug = await os.capture('My Bug', 'Important finding about auth')
     await os.promote(slug, 'entity')
-    const summary = await os.read(slug)
+    const summary = asEntity(await os.read(slug))
     const full = await os.read(slug, 'full')
     expect(summary.frontmatter.type).toBe('entity')
     expect(summary.body).toContain('## Context')
@@ -42,7 +43,7 @@ describe('promote', () => {
   it('promotes capture to project', async () => {
     const slug = await os.capture('My Feature')
     await os.promote(slug, 'project')
-    const file = await os.read(slug)
+    const file = asEntity(await os.read(slug))
     expect(file.frontmatter.type).toBe('project')
     expect(file.body).toContain('## Purpose')
     expect(file.body).toContain('## Goals')
@@ -53,7 +54,7 @@ describe('promote', () => {
     await os.promote(slug, 'knowledge')
     expect(existsSync(join(vaultPath, 'knowledge', `${slug}.md`))).toBe(true)
     expect(existsSync(join(vaultPath, 'entities', `${slug}.md`))).toBe(false)
-    const file = await os.read(slug)
+    const file = asKnowledge(await os.read(slug))
     expect(file.body).toContain('## Synthesis')
     expect(file.frontmatter.status).toBeUndefined()
     expect(file.frontmatter['last-touched']).toBeUndefined()
@@ -63,7 +64,7 @@ describe('promote', () => {
   it('promotes entity to project', async () => {
     await os.create('entity', 'Fix auth', { type: 'entity' })
     await os.promote('fix-auth', 'project')
-    const file = await os.read('fix-auth')
+    const file = asEntity(await os.read('fix-auth'))
     expect(file.frontmatter.type).toBe('project')
     expect(file.body).toContain('## Purpose')
   })
@@ -104,8 +105,8 @@ describe('promote', () => {
     const slug = await os.capture('Resourced capture')
     await os.update(slug, { resource: 'https://example.com/repo' })
     await os.promote(slug, 'knowledge')
-    const file = await os.read(slug)
-    expect(file.frontmatter.resource).toBeUndefined()
+    const file = asKnowledge(await os.read(slug))
+    expect(file.frontmatter).not.toHaveProperty('resource')
   })
 
   it('works in batch', async () => {
@@ -114,7 +115,7 @@ describe('promote', () => {
       { op: 'promote', slug, target: 'entity' }
     ])
     expect(results[0].status).toBe('ok')
-    const file = await os.read(slug)
+    const file = asEntity(await os.read(slug))
     expect(file.frontmatter.type).toBe('entity')
   })
 })
@@ -149,7 +150,7 @@ describe('promote to knowledge — target hardening', () => {
     await expect(os.promote(slug, 'knowledge')).resolves.toBe(slug)
     expect(existsSync(join(vaultPath, 'knowledge', `${slug}.md`))).toBe(true)
     expect(existsSync(join(vaultPath, 'entities', `${slug}.md`))).toBe(false)
-    const file = await os.read(slug)
+    const file = asKnowledge(await os.read(slug))
     expect(file.frontmatter.subtype).toBe('insight')
   })
 

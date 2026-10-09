@@ -5,7 +5,8 @@ import { serializeFile } from '../src/vault.js'
 import { writeFileSync, mkdirSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import type { EntityQueryOpts, KnowledgeQueryOpts, UnifiedResult } from '../src/types.js'
+import type { EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, UnifiedResult } from '../src/types.js'
+import { localDay } from '../src/dates.js'
 
 // S5: the read surface lives on HafezIndex now — these wrappers keep the
 // suite's call shape while exercising the real index methods.
@@ -13,7 +14,7 @@ const queryEntities = (index: HafezIndex, opts?: EntityQueryOpts) => index.query
 const queryChildren = (index: HafezIndex, parentSlug: string) => index.queryChildren(parentSlug)
 const queryRelatedTo = (index: HafezIndex, slug: string, relation?: string) => index.queryRelatedTo(slug, relation)
 const queryKnowledge = (index: HafezIndex, opts?: KnowledgeQueryOpts) => index.queryKnowledge(opts)
-const queryUnified = (index: HafezIndex, opts?: EntityQueryOpts & { kind?: 'entity' | 'knowledge' | 'all' }) => index.queryUnified(opts)
+const queryUnified = (index: HafezIndex, opts?: UnifiedQueryOpts) => index.queryUnified(opts)
 
 const TMP = join(tmpdir(), 'hafez-test-query-' + Date.now())
 
@@ -25,10 +26,10 @@ function writeKnowledge(slug: string, fm: Record<string, any>, body = '') {
   writeFileSync(join(TMP, 'knowledge', `${slug}.md`), serializeFile(fm, body || '## Insight\n\n## Evidence\n'))
 }
 
-const today = new Date().toISOString().slice(0, 10)
+const today = localDay()
 const daysAgo = (n: number) => {
   const d = new Date(); d.setDate(d.getDate() - n)
-  return d.toISOString().slice(0, 10)
+  return localDay(d)
 }
 
 let index: HafezIndex

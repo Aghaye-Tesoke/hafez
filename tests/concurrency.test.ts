@@ -9,10 +9,11 @@ import { promisify } from 'util'
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 import { serializeFile } from '../src/vault.js'
 import { createHafez } from '../src/index.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
+import { localDay } from '../src/dates.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -24,7 +25,7 @@ beforeAll(async () => {
   mkdirSync(join(VAULT, 'entities'), { recursive: true })
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDay()
   writeFileSync(
     join(VAULT, 'entities', 'race-target.md'),
     serializeFile(
@@ -64,7 +65,7 @@ describe('cross-process write lock (COR-2)', () => {
     // so the serialization under test is purely the vault lockfile.
     const VAULT2 = join(TMP, 'vault-nogit')
     mkdirSync(join(VAULT2, 'entities'), { recursive: true })
-    const today = new Date().toISOString().slice(0, 10)
+    const today = localDay()
     writeFileSync(
       join(VAULT2, 'entities', 'race-target.md'),
       serializeFile(

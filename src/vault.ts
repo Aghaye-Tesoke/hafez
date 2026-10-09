@@ -14,7 +14,7 @@ export function slugify(name: string): string {
   // real slug instead of collapsing to ''.
   return name
     .toLowerCase()
-    .replace(/['']/g, '')
+    .replace(/['’]/g, '')
     .replace(/[^\p{L}\p{N}]+/gu, '-')
     .replace(/^-|-$/g, '')
     .replace(/-{2,}/g, '-')

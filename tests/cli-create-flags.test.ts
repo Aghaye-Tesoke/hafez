@@ -11,8 +11,11 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { cmdCreate, cmdUpdate, CREATE_FLAGS } from '../src/cli/commands.js'
-import { splitList } from '../src/cli/args.js'
+import { cmdSchema } from '../src/cli/commands-schema.js'
+import { CreateEntityFieldsSchema } from '../src/batch-ops.js'
+import { splitList, UsageError } from '../src/cli/args.js'
 import type { Hafez } from '../src/types.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-test-cli-create-flags-' + Date.now())
 const VAULT = join(TMP, 'vault')
@@ -34,7 +37,8 @@ type Kind = 'entity' | 'knowledge'
 interface FlagCase {
   /** Declared CLI flag, without the leading dashes. */
   flag: string
-  value: string
+  /** Absent for a switch. */
+  value?: string
   /** Kinds the flag is applicable to — every other kind must reject it. */
   applies: Kind[]
   /** Observable proof the flag reached the file. */
@@ -55,10 +59,12 @@ const FLAG_CASES: FlagCase[] = [
   { flag: 'subtype', value: 'insight', applies: ['knowledge'], assert: r => expect(r.frontmatter.subtype).toBe('insight') },
   { flag: 'synthesis', value: 'The synthesis body', applies: ['knowledge'], assert: r => expect(r.body).toContain('The synthesis body') },
   { flag: 'insight', value: 'The insight body', applies: ['knowledge'], assert: r => expect(r.body).toContain('The insight body') },
+  { flag: 'confidence', value: 'pattern', applies: ['knowledge'], assert: r => expect(r.frontmatter.confidence).toBe('pattern') },
   // Plan-subtype only: the matrix's bare kinds (entity; subtype-less knowledge,
   // which defaults to insight) both reject it. The applied path is covered by
   // tests/plan-subtype.test.ts.
   { flag: 'status', value: 'done', applies: [], assert: () => { throw new Error('unreachable') } },
+  { flag: 'new', applies: ['knowledge'], assert: r => expect(r.frontmatter.name).toMatch(/^Mx new/) },
 ]
 
 /** Args for `create <kind> <name>` with one flag under test. Entity creation
@@ -66,8 +72,11 @@ const FLAG_CASES: FlagCase[] = [
 function argsFor(kind: Kind, name: string, c: FlagCase): string[] {
   const base = [kind, name]
   if (kind === 'entity' && c.flag !== 'type') base.push('--type', 'project')
-  return [...base, `--${c.flag}`, c.value]
+  return [...base, `--${c.flag}`, ...(c.value === undefined ? [] : [c.value])]
 }
+
+/** The slug: create prints it first, maybe followed by a relate line. */
+const firstLine = (out: string) => out.split('\n')[0]
 
 /** Message plus details — batch reports the offending field in `details`. */
 async function errorText(p: Promise<unknown>): Promise<string> {
@@ -88,7 +97,7 @@ describe('create flag × kind matrix — applied or rejected, never dropped', ()
         const name = `Mx ${c.flag} ${kind}`
         if (applicable) {
           const slug = await cmdCreate(os, argsFor(kind, name, c))
-          c.assert(await os.read(slug.trim(), 'full') as any)
+          c.assert(await os.read(firstLine(slug), 'full') as any)
         } else {
           expect(await errorText(cmdCreate(os, argsFor(kind, name, c))))
             .toMatch(new RegExp(c.flag.replace(/-/g, '[-_]')))
@@ -177,7 +186,7 @@ describe('one comma-list parser — trimmed, empty segments dropped', () => {
   })
 
   it('create knowledge --domain "ai, ml" is findable by domain ml', async () => {
-    const slug = (await cmdCreate(os, ['knowledge', 'Spaced Domain Note', '--domain', 'ai, ml'])).trim()
+    const slug = firstLine(await cmdCreate(os, ['knowledge', 'Spaced Domain Note', '--domain', 'ai, ml']))
     const { frontmatter } = await os.read(slug) as any
     expect(frontmatter.domain).toEqual(['ai', 'ml'])
     const { items } = await os.query_knowledge({ domain: 'ml' })
@@ -210,5 +219,61 @@ describe('one comma-list parser — trimmed, empty segments dropped', () => {
     const { frontmatter } = await os.read('trailing-update-proj') as any
     expect(frontmatter.domain).toEqual(['eng'])
     expect(frontmatter.tags).toEqual(['x', 'y'])
+  })
+})
+
+describe('Write Line parser on create — repeat-append, repeated scalar, --confidence', () => {
+  it('--add-action repeated appends every value, in order', async () => {
+    const slug = (await cmdCreate(os, ['entity', 'Cw Repeat Add', '--type', 'project', '--add-action', 'First @dev', '--add-action', 'Second @dev'])).trim()
+    const { body } = await os.read(slug, 'full') as any
+    expect(body).toContain(`- [ ] First @dev (added ${localDay()})\n- [ ] Second @dev (added ${localDay()})`)
+  })
+
+  for (const [flag, type] of Object.entries(CREATE_FLAGS)) {
+    if (type === 'repeat') continue
+    it(`--${flag} given twice is a usage error naming the flag, nothing written`, async () => {
+      const name = `Cw Twice ${flag}`
+      const once = [`--${flag}`, flag === 'type' ? 'project' : 'x']
+      const base = flag === 'type' ? ['entity', name] : ['entity', name, '--type', 'project']
+      const err = await cmdCreate(os, [...base, ...once, ...once]).then(() => null, e => e)
+      expect(err).toBeInstanceOf(UsageError)
+      expect(err.message).toContain(`--${flag}`)
+      await expect(os.read(`cw-twice-${flag}`)).rejects.toThrow()
+    })
+  }
+
+  // A repeated flag maps to the array form of its field — that field must exist.
+  it('every repeatable create flag has an array field on the entity shape', () => {
+    const keys = Object.keys(CreateEntityFieldsSchema.shape)
+    for (const [flag, type] of Object.entries(CREATE_FLAGS)) {
+      if (type === 'repeat') expect(keys).toContain(`${flag.replace(/-/g, '_')}s`)
+    }
+  })
+
+  it('create knowledge --confidence observation writes it', async () => {
+    const slug = firstLine(await cmdCreate(os, ['knowledge', 'Cw Observed Note', '--confidence', 'observation']))
+    expect(((await os.read(slug)) as any).frontmatter.confidence).toBe('observation')
+  })
+
+  it('create knowledge --confidence principle overrides the observation default', async () => {
+    const slug = firstLine(await cmdCreate(os, ['knowledge', 'Cw Principled Note', '--confidence', 'principle']))
+    expect(((await os.read(slug)) as any).frontmatter.confidence).toBe('principle')
+  })
+
+  it('an invalid --confidence is rejected by name, nothing written', async () => {
+    const text = await errorText(cmdCreate(os, ['knowledge', 'Cw Bad Confidence', '--confidence', 'certain']))
+    expect(text).toMatch(/confidence/)
+    expect(text).toMatch(/observation/)
+    await expect(os.read('cw-bad-confidence')).rejects.toThrow()
+  })
+
+  it('the batch create-knowledge shape accepts confidence', async () => {
+    await os.batch([{ op: 'create', kind: 'knowledge', name: 'Cw Batch Confidence', fields: { confidence: 'pattern' } }])
+    expect(((await os.read('cw-batch-confidence')) as any).frontmatter.confidence).toBe('pattern')
+  })
+
+  it('schema create-knowledge reflects confidence', async () => {
+    const out = JSON.parse(await cmdSchema(null, ['create-knowledge']))
+    expect(out.fields.fields.fields.confidence.enum).toEqual(['observation', 'pattern', 'principle'])
   })
 })

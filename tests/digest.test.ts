@@ -1,7 +1,7 @@
 // tests/digest.test.ts
 import { describe, it, expect } from 'vitest'
 import { parseDigestInput, digest } from '../src/digest.js'
-import type { BatchOperation } from '../src/types.js'
+import { HafezError, type BatchOperation } from '../src/types.js'
 
 describe('parseDigestInput', () => {
   it('accepts valid input with all fields', () => {
@@ -89,7 +89,6 @@ describe('parseDigestInput', () => {
 
 describe('digest()', () => {
   const KNOWN_SLUGS = new Set(['simorgh', 'hafez', 'command-center'])
-  const FIXED_NOW = new Date('2026-03-29T14:30:00Z')
 
   it('produces session log updates for each known slug', () => {
     const ops = digest(
@@ -101,7 +100,6 @@ describe('digest()', () => {
         agent: 'claude',
       },
       KNOWN_SLUGS,
-      FIXED_NOW,
     )
 
     const updates = ops.filter(o => o.op === 'update')
@@ -120,7 +118,6 @@ describe('digest()', () => {
         agent: 'claude',
       },
       KNOWN_SLUGS,
-      FIXED_NOW,
     )
 
     const update = ops.find(o => o.op === 'update' && (o as any).slug === 'simorgh') as any
@@ -141,7 +138,6 @@ describe('digest()', () => {
         agent: 'custom-agent',
       },
       KNOWN_SLUGS,
-      FIXED_NOW,
     )
 
     const update = ops.find(o => o.op === 'update' && (o as any).slug === 'simorgh') as any
@@ -158,14 +154,13 @@ describe('digest()', () => {
         agent: 'claude',
       },
       KNOWN_SLUGS,
-      FIXED_NOW,
     )
 
     const creates = ops.filter(o => o.op === 'create') as any[]
     const sessionNote = creates.find(o => o.kind === 'session')
     expect(sessionNote).toBeDefined()
-    // Deterministic name with injected timestamp: "Session YYYY-MM-DD HH:MM:SS"
-    expect(sessionNote.name).toBe('Session 2026-03-29 14:30:00')
+    // Named by session date and note, so the same session derives the same slug
+    expect(sessionNote.name).toMatch(/^Session 2026-03-29 [0-9a-f]{8}$/)
     expect(sessionNote.fields['session-date']).toBe('2026-03-29')
   })
 
@@ -179,7 +174,6 @@ describe('digest()', () => {
         agent: 'claude',
       },
       KNOWN_SLUGS,
-      FIXED_NOW,
     )
 
     const creates = ops.filter(o => o.op === 'create') as any[]
@@ -200,7 +194,6 @@ describe('digest()', () => {
         agent: 'claude',
       },
       KNOWN_SLUGS,
-      FIXED_NOW,
     )
 
     const creates = ops.filter(o => o.op === 'create') as any[]
@@ -220,7 +213,6 @@ describe('digest()', () => {
         agent: 'claude',
       },
       manySlugs,
-      FIXED_NOW,
     )
 
     const creates = ops.filter(o => o.op === 'create') as any[]
@@ -228,42 +220,25 @@ describe('digest()', () => {
     expect(sessionNote.fields.related.length).toBe(7)
   })
 
-  it('skips unknown slugs in entity updates (creates note only)', () => {
-    const ops = digest(
-      {
-        entities_touched: ['simorgh', 'does-not-exist'],
-        decisions: [],
-        narrative: 'Some session.',
-        session_date: '2026-03-29',
-        agent: 'claude',
-      },
-      KNOWN_SLUGS,
-      FIXED_NOW,
-    )
-
-    const updates = ops.filter(o => o.op === 'update')
-    const slugs = updates.map(o => (o as any).slug)
-    expect(slugs).toContain('simorgh')
-    expect(slugs).not.toContain('does-not-exist')
+  it('throws NOT_FOUND naming only the unknown slugs', () => {
+    const input = {
+      entities_touched: ['simorgh', 'does-not-exist', 'nor-this'],
+      decisions: [],
+      narrative: 'Some session.',
+      session_date: '2026-03-29',
+      agent: 'claude',
+    }
+    expect(() => digest(input, KNOWN_SLUGS)).toThrow(HafezError)
+    expect(() => digest(input, KNOWN_SLUGS)).toThrow("Unknown slugs in entities_touched: 'does-not-exist', 'nor-this'.")
+    expect(() => digest(input, KNOWN_SLUGS)).not.toThrow(/simorgh/)
   })
 
-  it('omits unknown slugs from the session note body too', () => {
-    const ops = digest(
-      {
-        entities_touched: ['simorgh', 'does-not-exist'],
-        decisions: [],
-        narrative: 'Some session.',
-        session_date: '2026-03-29',
-        agent: 'claude',
-      },
-      KNOWN_SLUGS,
-      FIXED_NOW,
-    )
-
-    const note = ops.find(o => o.op === 'create') as any
-    expect(note.fields.synthesis).toContain('simorgh')
-    expect(note.fields.synthesis).not.toContain('does-not-exist')
-    expect(note.fields.related).toEqual(['simorgh'])
+  it('the same session date and note derive the same session name; a different note does not', () => {
+    const input = { entities_touched: ['simorgh'], decisions: [], narrative: 'Some session.', session_date: '2026-03-29' }
+    const name = (i: typeof input & { agent?: string }) => (digest(i, KNOWN_SLUGS).find(o => o.op === 'create') as any).name
+    expect(name({ ...input, agent: 'a' })).toBe(name({ ...input, agent: 'b' }))
+    expect(name({ ...input, narrative: 'Another session.' })).not.toBe(name(input))
+    expect(name({ ...input, session_date: '2026-03-30' })).not.toBe(name(input))
   })
 
   it('on empty entities_touched: creates only the session knowledge note, no updates', () => {
@@ -276,7 +251,6 @@ describe('digest()', () => {
         agent: 'claude',
       },
       KNOWN_SLUGS,
-      FIXED_NOW,
     )
 
     const updates = ops.filter(o => o.op === 'update')
@@ -295,7 +269,6 @@ describe('digest()', () => {
         agent: 'claude',
       },
       KNOWN_SLUGS,
-      FIXED_NOW,
     )
 
     for (const op of ops) {

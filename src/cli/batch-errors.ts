@@ -110,13 +110,23 @@ function formatPath(path: readonly PropertyKey[]): string {
   return path.map(p => (typeof p === 'number' ? `[${p}]` : typeof p === 'symbol' ? p.toString() : p)).join('.')
 }
 
-function lookupByPath(obj: unknown, path: readonly PropertyKey[]): unknown {
-  let cur: any = obj
+const GOT_MAX = 60
+
+/**
+ * What the op sent at `path`, as one JSON line capped at GOT_MAX chars. Zod v4
+ * attaches no received value to an issue, so the raw op is walked instead.
+ * Null when nothing is at the path (a missing field) — the caller then omits
+ * its `got:` line rather than print `undefined`.
+ */
+function gotAt(raw: unknown, path: readonly PropertyKey[]): string | null {
+  let cur: unknown = raw
   for (const p of path) {
-    if (cur == null) return undefined
-    cur = cur[p as any]
+    if (cur === null || typeof cur !== 'object' || !Object.hasOwn(cur, p)) return null
+    cur = (cur as Record<PropertyKey, unknown>)[p]
   }
-  return cur
+  const s = JSON.stringify(cur)
+  if (s === undefined) return null // raw itself absent — never print `undefined`
+  return s.length > GOT_MAX ? `${s.slice(0, GOT_MAX - 1)}…` : s
 }
 
 function toStr(v: unknown): string {
@@ -194,28 +204,26 @@ export function formatIssue(
   if (code === 'invalid_enum_value' || code === 'invalid_value') {
     // Zod v3 uses `options`, Zod v4 uses `values`.
     const expected = anyIssue.options ?? anyIssue.values
-    // Zod v4 doesn't attach the received value to the issue, so walk the raw
-    // input by path to find it.
-    const received = anyIssue.received ?? anyIssue.input ?? lookupByPath(raw, issue.path)
+    const got = gotAt(raw, issue.path)
     return [
       header,
       `  field: ${fieldPath}`,
       `  issue: invalid value`,
       ...(expected ? [`  expected: one of [${(expected as string[]).join(', ')}]`] : []),
-      `  got:      ${toStr(received)}`,
+      ...(got !== null ? [`  got:      ${got}`] : []),
       `  ${tip}`,
     ].join('\n')
   }
 
   if (code === 'invalid_type') {
     const expected = (issue as any).expected
-    const received = (issue as any).received
+    const got = gotAt(raw, issue.path)
     return [
       header,
       `  field: ${fieldPath}`,
       `  issue: wrong type`,
       `  expected: ${expected}`,
-      `  got:      ${received}`,
+      ...(got !== null ? [`  got:      ${got}`] : []),
       `  ${tip}`,
     ].join('\n')
   }

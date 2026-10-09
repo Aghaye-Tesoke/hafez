@@ -80,8 +80,10 @@ function walk(node: any): FieldSchema {
     return inner
   }
   if (type === 'pipe' || type === 'effects' || type === 'transform' || type === 'readonly') {
-    // Zod effects / transforms / pipes — descend to the inner schema.
-    const inner = def.in ?? def.schema ?? def.innerType
+    // Zod effects / transforms / pipes — descend to the inner schema. A
+    // z.preprocess is a pipe whose input is the bare transform: its shape is
+    // the output side.
+    const inner = def.in?._def?.type === 'transform' ? def.out : def.in ?? def.schema ?? def.innerType
     if (inner) return walk(inner)
   }
 
@@ -214,7 +216,6 @@ export const DIGEST_EXAMPLE: Record<string, unknown> = {
   decisions: ['Decision made'],
   narrative: 'One to three sentence cross-cutting summary.',
   session_date: '2026-01-15',
-  agent: 'claude',
 }
 
 // Descriptions live in the Op Spec table (src/batch-ops.ts) — one row per op.

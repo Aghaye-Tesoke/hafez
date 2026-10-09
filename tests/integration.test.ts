@@ -1,13 +1,13 @@
 // tests/integration.test.ts
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createHafez } from '../src/index.js'
-import { parseFilePath } from '../src/vault.js'
 import { knowledgeBodyTemplate } from '../src/templates.js'
-import type { BatchOperation } from '../src/types.js'
+import type { BatchOperation, KnowledgeSubtype } from '../src/types.js'
+import { asEntity, asKnowledge, readEntity } from './helpers/vault-files.js'
 import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 
 const TMP = join(tmpdir(), 'hafez-integration-' + Date.now())
 const BARE = join(TMP, 'remote.git')
@@ -119,7 +119,7 @@ describe('Integration: Capture and Triage', () => {
     const os = makeOS()
     const slug = await os.capture('Quick Note', 'Some context')
 
-    const before = await os.read(slug, 'frontmatter')
+    const before = asEntity(await os.read(slug, 'frontmatter'))
     expect(before.frontmatter.type).toBe('capture')
 
     // Triage: change to project status
@@ -136,14 +136,14 @@ describe('Integration: Knowledge Lifecycle', () => {
     const os = makeOS()
     await os.create('knowledge', 'Emerging Pattern', { domain: ['engineering'] })
 
-    const before = await os.read('emerging-pattern', 'frontmatter')
+    const before = asKnowledge(await os.read('emerging-pattern', 'frontmatter'))
     expect(before.frontmatter.confidence).toBe('observation')
 
     await os.update('emerging-pattern', { add_evidence: 'First evidence' })
     await os.update('emerging-pattern', { add_evidence: 'Second evidence' })
     await os.update('emerging-pattern', { add_evidence: 'Third evidence' })
 
-    const after = await os.read('emerging-pattern', 'frontmatter')
+    const after = asKnowledge(await os.read('emerging-pattern', 'frontmatter'))
     // No auto-promotion — confidence stays observation
     expect(after.frontmatter.confidence).toBe('observation')
     expect(after.frontmatter['reinforcement-count']).toBe(3)
@@ -163,7 +163,7 @@ describe('Integration: Batch', () => {
       { op: 'link', slug: 'batch-child', target: 'batch-parent', relation: 'parent' },
     ])
 
-    const child = await os.read('batch-child', 'frontmatter')
+    const child = asEntity(await os.read('batch-child', 'frontmatter'))
     expect(child.frontmatter.parent).toBe('batch-parent')
 
     // Verify single git commit for batch
@@ -236,7 +236,7 @@ describe('Integration: Knowledge metadata updates', () => {
     const os = makeOS()
     await os.create('knowledge', 'Confidence Update Test')
     await os.update('confidence-update-test', { confidence: 'principle' })
-    const fm = (await os.read('confidence-update-test', 'frontmatter')).frontmatter
+    const fm = asKnowledge(await os.read('confidence-update-test', 'frontmatter')).frontmatter
     expect(fm.confidence).toBe('principle')
   })
 
@@ -366,7 +366,7 @@ describe('knowledge compiler integration', () => {
 
     // Add evidence
     await os.update(note, { add_evidence: 'Confirmed in production 2026-04-06' })
-    const updated = await os.read(note, 'full')
+    const updated = asKnowledge(await os.read(note, 'full'))
     expect(updated.body).toContain('Confirmed in production')
     expect(updated.frontmatter['reinforcement-count']).toBe(1)
 
@@ -385,7 +385,9 @@ describe('knowledge compiler integration', () => {
 
 describe('knowledge compiler — gap coverage', () => {
   it('stale callers passing subtype session to knowledgeBodyTemplate get clear error', () => {
-    expect(() => knowledgeBodyTemplate('session'))
+    // Deliberately outside KnowledgeSubtype: this guards untyped (JS / stale
+    // batch payload) callers, so the test has to smuggle the value past the type.
+    expect(() => knowledgeBodyTemplate('session' as unknown as KnowledgeSubtype))
       .toThrow(/no longer supported/)
   })
 
@@ -485,7 +487,7 @@ describe('Integration: Description round-trip', () => {
     expect(items.find(i => i.slug === slug)!.description).toBe('Round-trip summary')
 
     await os.update(slug, { description: '' })
-    const { frontmatter } = parseFilePath(join(VAULT, 'entities', `${slug}.md`))
+    const { frontmatter } = readEntity(join(VAULT, 'entities', `${slug}.md`))
     expect(frontmatter.description).toBeUndefined()
     const after = await os.query({ filter: 'active' })
     expect(after.items.find(i => i.slug === slug)!.description).toBeNull()

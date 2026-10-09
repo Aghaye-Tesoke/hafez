@@ -5,18 +5,19 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { serializeFile } from '../src/vault.js'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-cli-test-' + Date.now())
 const BARE = join(TMP, 'remote.git')
 const VAULT = join(TMP, 'vault')
 const CLI = join(process.cwd(), 'dist', 'cli.js')
 
-function run(...args: string[]): { stdout: string; stderr: string; exitCode: number } {
+function runWithStdin(input: string | undefined, ...args: string[]): { stdout: string; stderr: string; exitCode: number } {
   try {
     const stdout = execFileSync('node', [CLI, '--vault', VAULT, ...args], {
       encoding: 'utf-8',
-      stderr: 'pipe',
+      input,
     }) as string
     return { stdout, stderr: '', exitCode: 0 }
   } catch (err: any) {
@@ -28,6 +29,10 @@ function run(...args: string[]): { stdout: string; stderr: string; exitCode: num
   }
 }
 
+function run(...args: string[]): { stdout: string; stderr: string; exitCode: number } {
+  return runWithStdin(undefined, ...args)
+}
+
 beforeAll(async () => {
   mkdirSync(TMP, { recursive: true })
   mkdirSync(BARE, { recursive: true })
@@ -36,7 +41,7 @@ beforeAll(async () => {
   mkdirSync(join(VAULT, 'entities'), { recursive: true })
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = localDay()
   writeFileSync(
     join(VAULT, 'entities', 'test-proj.md'),
     serializeFile(
@@ -95,17 +100,17 @@ describe('install:local', () => {
   })
 
   it('linked binary is executable and responds to --help', () => {
-    const { stdout, exitCode } = (() => {
+    const { stdout, stderr, exitCode } = (() => {
       try {
         const out = execFileSync('node', [join(INSTALL_HOME, '.local', 'bin', 'hafez'), '--help'], {
-          encoding: 'utf-8', stderr: 'pipe',
+          encoding: 'utf-8',
         }) as string
-        return { stdout: out, exitCode: 0 }
+        return { stdout: out, stderr: '', exitCode: 0 }
       } catch (err: any) {
-        return { stdout: err.stdout ?? '', exitCode: err.status ?? 1 }
+        return { stdout: err.stdout ?? '', stderr: err.stderr ?? '', exitCode: err.status ?? 1 }
       }
     })()
-    expect(exitCode).toBe(0)
+    expect(exitCode, stderr).toBe(0)
     expect(stdout).toContain('Usage: hafez')
   })
 })
@@ -156,9 +161,60 @@ describe('CLI', () => {
     expect(exitCode).toBe(1)
   })
 
+  // #91: the miss render, on stderr, exit 1 (the not-found code).
+  const CREATE_TAIL = '--type <project|entity> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"'
+
+  it('read miss with close slugs prints them read-ready, then the create line', () => {
+    const { stdout, stderr, exitCode } = run('read', 'test-projects')
+    expect(exitCode).toBe(1)
+    expect(stdout).toBe('')
+    expect(stderr).toBe([
+      "Error: no entity or knowledge note 'test-projects'.",
+      'hafez read test-proj',
+      'hafez read test-insight',
+      `hafez create entity "test projects" ${CREATE_TAIL}`,
+      '',
+    ].join('\n'))
+  })
+
+  it('read miss with no close slug prints the search line and the create line, nothing else', () => {
+    const { stdout, stderr, exitCode } = run('read', 'launchpads')
+    expect(exitCode).toBe(1)
+    expect(stdout).toBe('')
+    expect(stderr).toBe([
+      "Error: no entity or knowledge note 'launchpads'.",
+      'hafez search "launchpads"',
+      `hafez create entity "launchpads" ${CREATE_TAIL}`,
+      '',
+    ].join('\n'))
+  })
+
+  it('read miss --json returns the candidates as a list on stdout, exit 1', () => {
+    const hit = run('--json', 'read', 'test-projects')
+    expect(hit.exitCode).toBe(1)
+    expect(JSON.parse(hit.stdout)).toEqual({ slug: 'test-projects', closest: ['test-proj', 'test-insight'] })
+    const none = run('--json', 'read', 'launchpads')
+    expect(none.exitCode).toBe(1)
+    expect(JSON.parse(none.stdout)).toEqual({ slug: 'launchpads', closest: [] })
+  })
+
+  it('list is an unknown command that names query (#30)', () => {
+    const { stderr, exitCode } = run('list')
+    expect(exitCode).toBe(1)
+    expect(stderr.split('\n')[0]).toBe('Unknown command: list. To list the vault: hafez query --filter active')
+  })
+
   it('unknown command exits 1', () => {
     const { exitCode } = run('badcommand')
     expect(exitCode).toBe(1)
+  })
+
+  it('a command named after an Object.prototype member is unknown (#134)', () => {
+    for (const name of ['constructor', 'toString', '__proto__']) {
+      const { stderr, exitCode } = run(name)
+      expect(exitCode).toBe(1)
+      expect(stderr.split('\n')[0]).toBe(`Unknown command: ${name}`)
+    }
   })
 
   it('create entity with --brief and --add-action', () => {
@@ -199,7 +255,9 @@ describe('CLI', () => {
   it('create knowledge --insight (alias) sets synthesis field', () => {
     const { stdout, exitCode } = run('create', 'knowledge', 'CLI Insight Alias Test', '--insight', 'Insight alias content')
     expect(exitCode).toBe(0)
-    const slug = stdout.trim()
+    // The slug is the first line; a relate line follows it, since this name
+    // resembles the note the previous test created.
+    const slug = stdout.split('\n')[0]
     expect(slug).toBe('cli-insight-alias-test')
   })
 
@@ -212,24 +270,16 @@ describe('CLI', () => {
     expect(existsSync(join(VAULT, 'entities', 'cli-insight-on-entity.md'))).toBe(false)
   })
 
-  it('help --agent output contains hard-rules prompt-gate section', () => {
-    // Migrated from the old --synthesis/--add-evidence assertions. Help is now a
-    // prompt-gate, not a flat CLI reference — the individual update flags live
-    // in `hafez schema update`, not here.
+  it('help --agent prints the hafez skill body (#100)', () => {
+    // The one text from one source: the byte-for-byte check against the
+    // committed skill file is in tests/surfaces.test.ts; the old op catalogue
+    // lives in `hafez schema`.
     const { stdout, exitCode } = run('help', '--agent')
     expect(exitCode).toBe(0)
-    expect(stdout).toContain('Hard rules')
-    expect(stdout).toContain('ALWAYS batch')
-    expect(stdout).toContain('NEVER invent field names')
-  })
-
-  it('help --agent contains every op from the schema in the op-catalog section', () => {
-    const { stdout, exitCode } = run('help', '--agent')
-    expect(exitCode).toBe(0)
-    expect(stdout).toContain('<!-- SECTION:op-catalog -->')
-    for (const name of ['update', 'create-entity', 'create-knowledge', 'create-session', 'capture', 'link', 'unlink', 'promote']) {
-      expect(stdout).toContain(name)
-    }
+    expect(stdout.startsWith('# Hafez\n')).toBe(true)
+    expect(stdout).toContain('## Less common operations')
+    expect(stdout).toContain('hafez schema <op>')
+    expect(stdout).not.toContain('<!-- SECTION:')
   })
 
   it('HafezError details appear in stderr', () => {
@@ -242,18 +292,6 @@ describe('CLI', () => {
     expect(stderr).toContain('"progress"|"decision"|"blocker"|"research"')
   })
 
-  it('help --agent contains session-log enum values from the live schema', () => {
-    const { stdout, exitCode } = run('help', '--agent')
-    expect(exitCode).toBe(0)
-    // Enum values must come from schema-introspect.ts, not hardcoded prose.
-    // The critical-enums section is delimited for machine parsing.
-    expect(stdout).toContain('<!-- SECTION:critical-enums -->')
-    expect(stdout).toContain('progress')
-    expect(stdout).toContain('decision')
-    expect(stdout).toContain('blocker')
-    expect(stdout).toContain('research')
-  })
-
   it('help without --agent shows usage', () => {
     const { stdout, exitCode } = run('help')
     expect(exitCode).toBe(0)
@@ -264,18 +302,7 @@ describe('CLI', () => {
     const input = JSON.stringify([
       { op: 'create', kind: 'entity', name: 'CLI Batch Slug Test', fields: { type: 'entity' } },
     ])
-    const { stdout, exitCode } = (() => {
-      try {
-        const out = execFileSync('node', [CLI, '--vault', VAULT, 'batch'], {
-          input,
-          encoding: 'utf-8',
-          stderr: 'pipe',
-        }) as string
-        return { stdout: out, stderr: '', exitCode: 0 }
-      } catch (err: any) {
-        return { stdout: err.stdout ?? '', stderr: err.stderr ?? '', exitCode: err.status ?? 1 }
-      }
-    })()
+    const { stdout, exitCode } = runWithStdin(input, 'batch')
     expect(exitCode).toBe(0)
     expect(stdout).toContain('cli-batch-slug-test')
     expect(stdout).toContain('created:')
@@ -392,11 +419,85 @@ describe('exit-code contract (C5)', () => {
     expect(readFileSync(join(VAULT, 'entities', 'test-proj.md'), 'utf-8')).not.toContain('bananas')
   })
 
-  it('help --agent documents the exit codes', () => {
-    const { stdout, exitCode } = run('help', '--agent')
-    expect(exitCode).toBe(0)
-    expect(stdout).toContain('## Exit codes')
-    expect(stdout).toContain('vault locked')
+  it('hafez --help documents the exit codes; help --agent does not (#89)', () => {
+    const help = run('--help')
+    expect(help.exitCode).toBe(0)
+    expect(help.stdout).toContain('Exit codes:')
+    expect(help.stdout).toContain('vault locked')
+    const agent = run('help', '--agent')
+    expect(agent.exitCode).toBe(0)
+    expect(agent.stdout).not.toMatch(/exit codes/i)
+  })
+
+  it('<command> --help or -h prints that command\'s usage on stdout, exit 0 (#32)', () => {
+    const digest = run('digest', '--help')
+    expect(digest.exitCode, digest.stderr).toBe(0)
+    expect(digest.stdout).toContain('Usage: hafez digest')
+    expect(digest.stdout).not.toContain('Unknown flag')
+    const update = run('update', '-h')
+    expect(update.exitCode, update.stderr).toBe(0)
+    expect(update.stdout).toContain('Usage: hafez update <slug>')
+    const read = run('read', 'test-proj', '--help')
+    expect(read.exitCode, read.stderr).toBe(0)
+    expect(read.stdout.trim()).toBe('Usage: hafez read <slug> [--depth frontmatter|summary|full]')
+    for (const [args, usage] of [
+      [['upgrade', '-h'], 'Usage: hafez upgrade [--json]'],
+      [['index', '--help'], 'Usage: hafez index rebuild'],
+      [['stats', '--help'], 'Usage: hafez stats'],
+      [['validate', '-h'], 'Usage: hafez validate'],
+      [['schema', '--help'], 'Usage: hafez schema [op] [--examples]'],
+      [['init', '--help'], 'Usage: hafez init [--register <path>]'],
+    ] as const) {
+      const r = run(...args)
+      expect(r.exitCode, r.stderr).toBe(0)
+      expect(r.stdout.trim()).toBe(usage)
+    }
+  })
+
+  it('sync --help prints usage and never pulls or pushes (#32)', async () => {
+    // A scratch vault one commit ahead of its remote: a real sync would push it.
+    const root = join(TMP, 'sync-help')
+    const bare = join(root, 'remote.git')
+    const vault = join(root, 'vault')
+    mkdirSync(bare, { recursive: true })
+    await simpleGit(bare).init(true)
+    await simpleGit().clone(bare, vault)
+    mkdirSync(join(vault, 'entities'), { recursive: true })
+    writeFileSync(join(vault, 'entities', '.keep'), '')
+    const git = simpleGit(vault)
+    await git.add('.')
+    await git.commit('init')
+    const branch = (await git.branchLocal()).current
+    await git.push('origin', branch)
+    writeFileSync(join(vault, 'entities', '.keep'), 'ahead')
+    await git.add('.')
+    await git.commit('unpushed')
+    const local = await git.revparse(['HEAD'])
+    const remote = await simpleGit(bare).revparse([branch])
+
+    for (const flag of ['--help', '-h']) {
+      let stdout = ''
+      let exitCode = 0
+      try {
+        stdout = execFileSync('node', [CLI, '--vault', vault, 'sync', flag], { encoding: 'utf-8' })
+      } catch (err: any) {
+        stdout = err.stdout ?? ''
+        exitCode = err.status ?? 1
+      }
+      expect(exitCode).toBe(0)
+      expect(stdout).toContain('Usage: hafez sync')
+    }
+    expect(await git.revparse(['HEAD'])).toBe(local)
+    expect(await simpleGit(bare).revparse([branch])).toBe(remote)
+    expect((await git.status()).isClean()).toBe(true)
+  })
+
+  it('update <slug> -h writes nothing (#32)', () => {
+    const before = readFileSync(join(VAULT, 'entities', 'test-proj.md'), 'utf-8')
+    const r = run('update', 'test-proj', '--brief', 'not written', '-h')
+    expect(r.exitCode, r.stderr).toBe(0)
+    expect(r.stdout).toContain('Usage: hafez update <slug>')
+    expect(readFileSync(join(VAULT, 'entities', 'test-proj.md'), 'utf-8')).toBe(before)
   })
 
   it('an invalid subtype on direct create exits 2, not a crash (Spine strictness)', () => {

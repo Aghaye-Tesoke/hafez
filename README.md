@@ -29,18 +29,15 @@ Set up Hafez, an agent-native knowledge vault (github.com/shrvn-r/hafez):
 3. Create my vault — a git repo with entities/ and knowledge/ directories and an
    initial commit. Suggest ~/vault but ask me where I want it first.
 4. Register it: hafez init --register <vault-path>
-5. If you are Claude Code, install the bundled skill: copy skill/SKILL.md
-   from the installed package ("$(npm root -g)/hafez/skill/SKILL.md") to
-   ~/.claude/skills/hafez/SKILL.md. Any other harness: skip this — step 7
-   covers integration.
-6. Read hafez help --agent, then verify end-to-end: create a test capture,
+5. Read hafez help --agent, then verify end-to-end: create a test capture,
    hafez read it back, and show me hafez stats.
-7. Run hafez onboard and follow what it prints: interview me to seed the
-   vault with my current projects, then help me choose how deeply to
-   integrate Hafez into my agent setup.
+6. Run hafez onboard and follow what it prints: ask me how Hafez should
+   run, install it (the two skills, and the Block in your instructions
+   file), and, if the vault is empty, interview me to seed it with my
+   current projects.
 ```
 
-From then on, just mention your projects by name in any session — the skill
+From then on, just mention your projects by name in any session — the Block
 teaches the agent when to read and write the vault, no commands required.
 
 Upgrading from an earlier name of this tool? Remove the old skill directory
@@ -67,13 +64,9 @@ cd ~/vault && git init && git commit --allow-empty -m "init vault"
 hafez init --register ~/vault           # remember this vault (one-time)
 hafez init                              # show current vault resolution
 
-# Claude Code only (optional): the bundled skill
-mkdir -p ~/.claude/skills/hafez
-cp "$(npm root -g)/hafez/skill/SKILL.md" ~/.claude/skills/hafez/SKILL.md
-
-# Then, in your agent — any harness: "run hafez onboard and follow it" —
-# guided first run (seed the vault with your current projects, choose an
-# integration level)
+# Then, in Claude Code or Codex: "run hafez onboard and follow it" —
+# guided setup (choose how Hafez runs, install the two skills and the Block,
+# seed an empty vault)
 ```
 
 Prefer installing without the npm registry? The GitHub release tarball is the
@@ -107,14 +100,11 @@ npm install -g hafez@<version> --allow-scripts=better-sqlite3
 #    From the GitHub release tarball instead (npm 12+ needs --allow-remote):
 npm install -g https://github.com/shrvn-r/hafez/releases/download/v<version>/hafez.tgz --allow-scripts=better-sqlite3 --allow-remote=root
 
-# 2. Claude Code only: re-copy the bundled skill. It ships inside the package,
-#    so an upgraded package leaves the installed copy stale.
-mkdir -p ~/.claude/skills/hafez
-cp "$(npm root -g)/hafez/skill/SKILL.md" ~/.claude/skills/hafez/SKILL.md
-
-#    Under nvm, or for a symlinked dev install, `npm root -g` points at the
-#    wrong tree. Resolve it from the binary you actually run instead:
-cp "$(dirname "$(dirname "$(readlink -f "$(which hafez)")")")/skill/SKILL.md" ~/.claude/skills/hafez/SKILL.md
+# 2. The skills, and the Block if you have one, ship inside the package, so
+#    an upgraded package leaves the installed copies stale. The new binary
+#    has `hafez upgrade`: it checks them by hash and prints the
+#    `hafez onboard --install` line that refreshes them.
+hafez upgrade
 
 # 3. Rebuild the read index. A schema bump invalidates it rather than
 #    rebuilding it, so the first query after an upgrade can answer empty.
@@ -126,8 +116,9 @@ probe your npm — `hafez upgrade` does probe it and prints the exact form your
 npm accepts. Same instruction, two renderings; the extra flags are harmless
 (`npm warn Unknown cli config`, then it proceeds).
 
-Also compare the Hafez block in your global agent instructions against the one
-`hafez upgrade` prints, and reconcile any differences.
+A Hafez section pasted into your instructions file by hand, before the Block
+had markers, is not checked: delete it, then install the Block with
+`hafez onboard`.
 
 Your vault is untouched by an upgrade: the files, the git history, and the
 registered vault path all survive. Only the read index is invalidated.
@@ -158,7 +149,7 @@ hafez query --kind knowledge --domain security
 hafez search "token rotation"
 
 # Record progress
-hafez update auth-refactor --log "progress: JWT flow implemented" --agent claude
+hafez update auth-refactor --log "progress: JWT flow implemented"
 hafez update auth-refactor --complete-action "migration plan"
 ```
 
@@ -196,18 +187,20 @@ Links (`parent`, `related`) are validated — they must point at slugs that exis
 | `hafez create <entity\|knowledge> <name> [flags]` | Create a document |
 | `hafez capture <name> [--notes]` | Quick inbox capture |
 | `hafez promote <slug> <entity\|project\|knowledge>` | Promote a capture upward |
+| `hafez delete <slug>` | Delete a knowledge or session note (entities retire with `--status done`) |
 | `hafez update <slug> [flags]` | Status, brief, actions, session log, synthesis, evidence… |
 | `hafez link / unlink <slug> <target> --relation <parent\|related>` | Manage relationships |
-| `hafez batch [--dry-run] [--file payload.json]` | JSON ops (stdin or `--file`) → atomic multi-op, single git commit, rollback on failure; dry-run runs the same validation as apply and reports derived slugs |
+| `hafez batch [--dry-run] [--data '<json>' \| --file payload.json]` | JSON ops (stdin, `--data` or `--file`) → atomic multi-op, single git commit, rollback on failure; dry-run runs the same validation as apply and reports derived slugs |
 | `hafez stats` | Vault summary: counts, stale items, recents |
 | `hafez changelog --since 7.days.ago` | Git-derived change history |
 | `hafez sync` | Pull remote, push local commits (semantic merge on conflicts) |
 | `hafez validate` / `hafez index rebuild` | Integrity check / rebuild the read index |
-| `hafez onboard` | Agent-directed first run: seeding interview + integration setup |
+| `hafez onboard` | Setup status, then the script your agent follows: Mode, install, permissions, seeding |
+| `hafez onboard --install --mode <always-on\|invoke-only>` / `--remove` | Write (or remove) the two skills and, always-on, the marked Block in the harness's instructions file |
 | `hafez schema [op] [--examples]` | Machine-readable JSON schema for every operation |
 | `hafez export --okf [--out <dir>]` | Read-only OKF v0.1 bundle export |
 
-This is not exhaustive — `hafez help --agent` prints the full, always-current reference. Add `--json` to any command for structured output.
+This is not exhaustive — `hafez --help` lists every command, and `hafez schema <op>` prints the machine-readable shape of any op. Add `--json` to any command for structured output.
 
 ## Library usage
 
@@ -246,9 +239,9 @@ for everything on the [AGENTS.md standard](https://agents.md) (Codex, Cursor,
 Copilot, …). This repo follows the same convention: `AGENTS.md` is canonical
 and `CLAUDE.md` imports it.
 
-- **`hafez onboard`** — an agent-directed first-run guide: a seeding interview for the empty vault, then a choice of integration level (an always-active block for the harness's global instructions file, or invoke-only). Re-running it later is the intended way to seed newly started work — on a set-up vault it's just the interview.
-- **`hafez help --agent`** — a complete API reference designed to be loaded into an agent's context.
-- **Claude Code skill** — an optional adapter for one harness: the package bundles a skill (installed in [Setup](#setup)) covering the full session lifecycle: loading context at session start, vault ops mid-session, and a session-end digest.
+- **`hafez onboard`** — agent-directed setup, run from inside Claude Code or Codex (any other harness: `onboard --install --harness <h>`): where things stand (the vault, and per harness found the Block, skills, hook and allowlist), then the script the agent follows — choose always-on or invoke-only, install, allow the command, optionally add the session-start hook, seed an empty vault, and four lines for the user. Re-running it is reconfigure: it walks only what is not current.
+- **`hafez help --agent`** — the `hafez` skill body, one text from the same source: the reference an agent reads when the skill is not installed.
+- **Two skills, `hafez` and `hafez-save`** — written by `hafez onboard --install` to `~/.claude/skills` and `~/.agents/skills`, so every harness reading either directory gets them: the less common operations and the tool itself, and the session save. The Block, the skills and every sample of command output are rendered from one source and checked byte for byte in CI; the samples are in [`tests/fixtures/surfaces/`](tests/fixtures/surfaces/).
 - **`hafez schema <op> --examples`** — JSON schemas with working examples for every batch operation, so agents can self-correct.
 - **`hafez batch`** — apply a whole session's worth of updates atomically from a single JSON payload. Validation errors report every bad op at once with did-you-mean hints.
 - **Markdown-native output** by default, `--json` everywhere for machine consumption.

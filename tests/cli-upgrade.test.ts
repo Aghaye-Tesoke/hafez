@@ -6,42 +6,64 @@
 //      with a throwing stub, so a forgotten injection fails loudly instead of
 //      hitting the real registry (the suite is a release gate via preflight).
 //   2. No test reads the real $HOME or the repo's own files — every case
-//      builds a tmpdir packageRoot, because tools/release.sh rewrites the
-//      repo's package.json and skill between the private and public trees.
+//      builds a tmpdir packageRoot and a tmpdir home (the temp-home seam),
+//      because tools/release.sh rewrites the repo's package.json and skill
+//      between the private and public trees.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'fs'
 import { tmpdir } from 'os'
 import { join, dirname } from 'path'
 import { cmdUpgrade, compareVersions, type UpgradeDeps, type UpgradeState } from '../src/cli/upgrade.js'
 import { UsageError } from '../src/cli/args.js'
+import { cmdOnboard } from '../src/cli/onboard.js'
+import { contentHash, renderBlock, renderHafezSkill } from '../src/surfaces/surfaces.js'
 
 const roots: string[] = []
 
-function makeRoot(opts: { version?: string; withSrc?: boolean; withSkill?: boolean } = {}): string {
+function makeRoot(opts: { version?: string; withSrc?: boolean } = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'hafez-upgrade-'))
   roots.push(root)
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'hafez', version: opts.version ?? '1.0.0' }))
-  if (opts.withSkill !== false) {
-    mkdirSync(join(root, 'skill'), { recursive: true })
-    writeFileSync(join(root, 'skill', 'SKILL.md'), '# skill')
-  }
   if (opts.withSrc) mkdirSync(join(root, 'src'), { recursive: true })
   return root
 }
 
-/** An installed-skill path under a tmpdir; `present: false` returns a path
- * that does not exist. */
-function makeSkillTarget(present: boolean, dirName = 'claude-home'): string {
-  const base = mkdtempSync(join(tmpdir(), 'hafez-skillhome-'))
-  roots.push(base)
-  const target = join(base, dirName, 'skills', 'hafez', 'SKILL.md')
-  if (present) {
-    mkdirSync(dirname(target), { recursive: true })
-    writeFileSync(target, '# installed skill')
+/** A temporary home. `mode` installs through `onboard --install` itself, so
+ * "current" is whatever this build writes. */
+function makeHome(opts: { mode?: 'always-on' | 'invoke-only'; harness?: string; files?: Record<string, string> } = {}): string {
+  const home = mkdtempSync(join(tmpdir(), 'hafez-home-'))
+  roots.push(home)
+  if (opts.mode) {
+    cmdOnboard(['--install', '--mode', opts.mode, '--harness', opts.harness ?? 'claude-code'], { home, env: {} })
   }
-  return target
+  for (const [rel, text] of Object.entries(opts.files ?? {})) {
+    mkdirSync(dirname(join(home, rel)), { recursive: true })
+    writeFileSync(join(home, rel), text)
+  }
+  return home
 }
+
+/** Every file under `dir` with its bytes, to prove a run wrote nothing. */
+function snapshot(dir: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+    if (entry.isFile()) out[join(entry.parentPath, entry.name)] = readFileSync(join(entry.parentPath, entry.name), 'utf-8')
+  }
+  return out
+}
+
+const CLAUDE_MD = '.claude/CLAUDE.md'
+const BLOCK_INNER = renderBlock().split('\n').slice(1, -2).join('\n') + '\n'
+/** A Block region whose marker carries `hash` over `inner`. */
+const region = (inner: string, hash = contentHash(inner)) => `<!-- hafez:begin ${hash} -->\n${inner}<!-- hafez:end -->\n`
+/** A skill an older build wrote: its own hash matches, the render does not. */
+const OLD_SKILL = (() => {
+  const body = '# An older hafez skill\n'
+  return `---\nname: hafez\ndescription: old\nhash: ${contentHash(body)}\n---\n${body}`
+})()
+const ONBOARD = (mode: string, harness = 'claude-code') => `hafez onboard --install --mode ${mode} --harness ${harness}`
+const onboardSteps = (s: UpgradeState) => s.steps.filter(x => x.text.includes('onboard --install'))
 
 function jsonFetch(body: unknown): UpgradeDeps['fetch'] {
   return (async () => ({ ok: true, json: async () => body })) as unknown as UpgradeDeps['fetch']
@@ -52,7 +74,8 @@ function makeDeps(overrides: Partial<UpgradeDeps> = {}): UpgradeDeps {
     fetch: jsonFetch({ version: '1.0.0' }),
     registryUrl: 'https://registry.invalid/hafez/latest',
     packageRoot: makeRoot(),
-    installedSkillPath: makeSkillTarget(false),
+    home: makeHome(),
+    env: {},
     npmVersion: () => '10.9.2\n',
     ...overrides,
   }
@@ -68,8 +91,8 @@ async function text(overrides: Partial<UpgradeDeps> = {}): Promise<string> {
 }
 
 const JSON_KEYS = [
-  'alternativeInstall', 'comparison', 'current', 'install', 'latest',
-  'npmMajor', 'registryReachable', 'skill', 'skillSource', 'skillTarget', 'steps',
+  'alternativeInstall', 'comparison', 'current', 'install', 'integration', 'latest',
+  'npmMajor', 'registryReachable', 'steps',
 ]
 
 let realFetch: typeof globalThis.fetch
@@ -248,11 +271,9 @@ describe('npm probe → flag set', () => {
 
 describe('pinning', () => {
   it('behind on npm 11 produces exactly this step list', async () => {
-    const skillTarget = makeSkillTarget(true)
-    const packageRoot = makeRoot({ version: '1.0.0' })
     const s = await state({
-      packageRoot,
-      installedSkillPath: skillTarget,
+      packageRoot: makeRoot({ version: '1.0.0' }),
+      home: makeHome({ mode: 'always-on' }),
       fetch: jsonFetch({ version: '1.2.3' }),
       npmVersion: () => '11.4.2',
     })
@@ -262,7 +283,7 @@ describe('pinning', () => {
         kind: 'action',
         text: 'If the install fails with ETARGET, your configured registry (a mirror or proxy) does not have the pinned version — append `--registry=https://registry.npmjs.org` to the install command.',
       },
-      { kind: 'command', text: `mkdir -p '${dirname(skillTarget)}' && cp '${join(packageRoot, 'skill', 'SKILL.md')}' '${skillTarget}'` },
+      { kind: 'command', text: 'hafez onboard --install --mode always-on --harness claude-code' },
       { kind: 'command', text: 'hafez index rebuild' },
       { kind: 'action', text: 'Re-run `hafez upgrade` to verify.' },
     ])
@@ -282,40 +303,171 @@ describe('pinning', () => {
   })
 })
 
-describe('skill re-copy', () => {
-  it('present: the re-copy command is emitted with both absolute paths quoted', async () => {
-    const skillTarget = makeSkillTarget(true)
-    const packageRoot = makeRoot()
-    const s = await state({ packageRoot, installedSkillPath: skillTarget })
-    expect(s.skill).toBe('present')
-    expect(s.skillSource).toBe(join(packageRoot, 'skill', 'SKILL.md'))
-    expect(s.skillTarget).toBe(skillTarget)
-    expect(s.steps.some(x => x.kind === 'command' && x.text.startsWith('mkdir -p '))).toBe(true)
+describe('the Block and the skills', () => {
+  it('a current always-on install reports current for the Block and both skills, and offers nothing', async () => {
+    const home = makeHome({ mode: 'always-on' })
+    const s = await state({ home })
+    expect(s.integration).toEqual({
+      mode: 'always-on',
+      blocks: [{ harness: 'claude-code', path: '~/.claude/CLAUDE.md', state: 'current', renderChanged: false }],
+      skills: [
+        { path: '~/.claude/skills/hafez/SKILL.md', state: 'current' },
+        { path: '~/.claude/skills/hafez-save/SKILL.md', state: 'current' },
+        { path: '~/.agents/skills/hafez/SKILL.md', state: 'current' },
+        { path: '~/.agents/skills/hafez-save/SKILL.md', state: 'current' },
+      ],
+    })
+    expect(s.steps).toEqual([])
+    const out = await text({ home })
+    expect(out).toContain('- Block in ~/.claude/CLAUDE.md: current')
+    expect(out).toContain('- ~/.agents/skills/hafez-save/SKILL.md: current')
   })
 
-  it('absent: nothing is printed — a non-Claude-Code harness is not drift', async () => {
-    const s = await state({ installedSkillPath: makeSkillTarget(false) })
-    expect(s.skill).toBe('absent')
-    expect(s.steps.some(x => x.text.includes('cp '))).toBe(false)
-    expect(await text({ installedSkillPath: makeSkillTarget(false) })).toContain('nothing to re-copy')
+  it('a stale skill is named, points at onboard --install, and nothing is written', async () => {
+    const home = makeHome({ mode: 'always-on', files: { '.agents/skills/hafez/SKILL.md': OLD_SKILL } })
+    const before = snapshot(home)
+    const s = await state({ home })
+    expect(s.integration!.skills.find(x => x.path === '~/.agents/skills/hafez/SKILL.md')!.state).toBe('stale')
+    expect(s.steps).toEqual([
+      { kind: 'command', text: ONBOARD('always-on') },
+      { kind: 'action', text: 'Re-run `hafez upgrade` to verify.' },
+    ])
+    expect(await text({ home })).toContain('- ~/.agents/skills/hafez/SKILL.md: stale')
+    expect(snapshot(home)).toEqual(before)
   })
 
-  it('spaces and $( in the path stay inside single quotes', async () => {
-    const skillTarget = makeSkillTarget(true, 'my $(whoami) home')
-    const s = await state({ installedSkillPath: skillTarget })
-    const step = s.steps.find(x => x.text.includes('cp '))!
-    expect(step.kind).toBe('command')
-    expect(step.text).toContain(`'${skillTarget}'`)
+  it('a stale Block is named and points at onboard --install for its harness; nothing is written', async () => {
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: `# Mine\n${region('## Hafez\n\nAn older Block.\n')}` } })
+    const before = snapshot(home)
+    const s = await state({ home })
+    expect(s.integration!.blocks).toEqual([{ harness: 'claude-code', path: '~/.claude/CLAUDE.md', state: 'stale', renderChanged: true }])
+    expect(onboardSteps(s)).toEqual([{ kind: 'command', text: ONBOARD('always-on') }])
+    expect(await text({ home })).toContain('- Block in ~/.claude/CLAUDE.md: stale')
+    expect(snapshot(home)).toEqual(before)
   })
 
-  it("a single quote in the path drops to the descriptive branch", async () => {
-    const skillTarget = makeSkillTarget(true, "someone's home")
-    const s = await state({ installedSkillPath: skillTarget })
-    const step = s.steps.find(x => x.text.includes(skillTarget))!
+  it('a Codex Block points at the Codex install', async () => {
+    const home = makeHome({ mode: 'always-on', harness: 'codex', files: { '.codex/AGENTS.md': region('## Hafez\n\nOld.\n') } })
+    const s = await state({ home })
+    expect(s.integration!.blocks.map(b => [b.harness, b.path, b.state])).toEqual([['codex', '~/.codex/AGENTS.md', 'stale']])
+    expect(onboardSteps(s)).toEqual([{ kind: 'command', text: ONBOARD('always-on', 'codex') }])
+  })
+
+  it('no Block and both skills is invoke-only, and installing the Block is never suggested', async () => {
+    const home = makeHome({ mode: 'invoke-only' })
+    const s = await state({ home })
+    expect(s.integration!.mode).toBe('invoke-only')
+    expect(s.integration!.blocks).toEqual([])
+    expect(s.steps).toEqual([])
+    const out = await text({ home })
+    expect(out).toContain('invoke-only')
+    expect(out).not.toContain('always-on')
+  })
+
+  it('invoke-only with a stale skill refreshes the skills in invoke-only, never always-on', async () => {
+    const home = makeHome({ mode: 'invoke-only', files: { '.claude/skills/hafez/SKILL.md': OLD_SKILL } })
+    const s = await state({ home, env: { CLAUDECODE: '1' } })
+    expect(onboardSteps(s)).toEqual([{ kind: 'command', text: ONBOARD('invoke-only') }])
+    expect(JSON.stringify(s)).not.toContain('always-on')
+  })
+
+  it('invoke-only with no detectable harness asks for one in prose, not a command that fails', async () => {
+    const home = makeHome({ mode: 'invoke-only', files: { '.claude/skills/hafez/SKILL.md': OLD_SKILL } })
+    const [step] = onboardSteps(await state({ home, env: {} }))
     expect(step.kind).toBe('action')
-    expect(step.text).toContain('Source:')
-    expect(step.text).toContain('Target:')
-    expect(s.steps.some(x => x.kind === 'command' && x.text.startsWith('mkdir -p'))).toBe(false)
+    expect(step.text).toContain('hafez onboard --install --mode invoke-only --harness <')
+  })
+
+  it('a hand-edited Block over the current render is reported as such and offered nothing', async () => {
+    const edited = region(BLOCK_INNER.replace('## Hafez', '## Hafez (mine)'), contentHash(BLOCK_INNER))
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: edited } })
+    const s = await state({ home })
+    expect(s.integration!.blocks[0]).toMatchObject({ state: 'hand-edited', renderChanged: false })
+    expect(s.steps).toEqual([])
+    expect(await text({ home })).toContain('- Block in ~/.claude/CLAUDE.md: hand-edited')
+  })
+
+  it('a hand-edited Block over an older render is reported and points at onboard --install, which asks first', async () => {
+    const old = '## Hafez\n\nAn older Block.\n'
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: region(old + 'my line\n', contentHash(old)) } })
+    const s = await state({ home })
+    expect(s.integration!.blocks[0]).toMatchObject({ state: 'hand-edited', renderChanged: true })
+    expect(onboardSteps(s)).toEqual([{ kind: 'command', text: ONBOARD('always-on') }])
+    expect(await text({ home })).toMatch(/hand-edited.*--confirm/)
+  })
+
+  it('a stale skill beside a hand-edited Block refreshes through a Block that needs no question', async () => {
+    const edited = region(BLOCK_INNER.replace('## Hafez', '## Hafez (mine)'), contentHash(BLOCK_INNER))
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: edited, '.claude/skills/hafez/SKILL.md': OLD_SKILL } })
+    cmdOnboard(['--install', '--mode', 'always-on', '--harness', 'codex'], { home, env: {} })
+    writeFileSync(join(home, '.claude/skills/hafez/SKILL.md'), OLD_SKILL)
+    const s = await state({ home })
+    expect(onboardSteps(s)).toEqual([{ kind: 'command', text: ONBOARD('always-on', 'codex') }])
+  })
+
+  it('a hand-edited skill is reported with the warning that the install replaces it', async () => {
+    const body = renderHafezSkill().split('\n---\n').slice(1).join('\n---\n')
+    const edited = renderHafezSkill().replace(body, body + 'my line\n')
+    const home = makeHome({ mode: 'invoke-only', files: { '.claude/skills/hafez/SKILL.md': edited } })
+    const s = await state({ home, env: { CLAUDECODE: '1' } })
+    expect(s.integration!.skills[0].state).toBe('hand-edited')
+    expect(await text({ home, env: { CLAUDECODE: '1' } })).toContain('- ~/.claude/skills/hafez/SKILL.md: hand-edited — `onboard --install` replaces it, and the edit is lost')
+  })
+
+  it('an older single-file install (no hash) is stale', async () => {
+    const home = makeHome({ files: { '.claude/skills/hafez/SKILL.md': '# installed skill' } })
+    const s = await state({ home, env: { CLAUDECODE: '1' } })
+    expect(s.integration!.skills[0]).toEqual({ path: '~/.claude/skills/hafez/SKILL.md', state: 'stale' })
+    expect(s.integration!.skills.slice(1).every(x => x.state === 'absent')).toBe(true)
+    expect(onboardSteps(s)).toEqual([{ kind: 'command', text: ONBOARD('invoke-only') }])
+  })
+
+  it('nothing installed: nothing is offered, even when behind', async () => {
+    const s = await state({ packageRoot: makeRoot({ version: '1.0.0' }), fetch: jsonFetch({ version: '1.2.3' }), env: { CLAUDECODE: '1' } })
+    expect(s.integration!.skills.every(x => x.state === 'absent')).toBe(true)
+    expect(onboardSteps(s)).toEqual([])
+  })
+
+  it('behind: a current install is refreshed after the package install, since the new version renders new text', async () => {
+    const s = await state({ packageRoot: makeRoot({ version: '1.0.0' }), fetch: jsonFetch({ version: '1.2.3' }), home: makeHome({ mode: 'always-on' }) })
+    const texts = s.steps.map(x => x.text)
+    const at = texts.indexOf(ONBOARD('always-on'))
+    expect(at).toBeGreaterThan(texts.findIndex(t => t.startsWith('npm install -g')))
+    expect(at).toBeLessThan(texts.indexOf('hafez index rebuild'))
+  })
+
+  it('broken markers are reported for a hand fix, never an install that would refuse', async () => {
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: '<!-- hafez:begin nothash -->\n' } })
+    const s = await state({ home })
+    expect(s.integration!.blocks).toEqual([{ harness: 'claude-code', path: '~/.claude/CLAUDE.md', state: 'broken', renderChanged: false }])
+    expect(onboardSteps(s)).toEqual([])
+    expect(s.steps[0]).toMatchObject({ kind: 'action' })
+    expect(s.steps[0].text).toContain('~/.claude/CLAUDE.md')
+  })
+
+  it('broken markers: upgrade and bare onboard agree on the state and the hand fix', async () => {
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: renderBlock().split('<!-- hafez:end -->')[0] } })
+    const vault = mkdtempSync(join(tmpdir(), 'hafez-vault-'))
+    roots.push(vault)
+    const why = 'The Hafez markers in ~/.claude/CLAUDE.md are broken: expected one "<!-- hafez:begin <hash> -->" line followed by one "<!-- hafez:end -->" line. Fix or delete them by hand, then re-run'
+    const up = await text({ home })
+    const on = cmdOnboard([], { home, env: { CLAUDECODE: '1' }, vaultFlag: vault }) as string
+    expect(up).toContain('- Block in ~/.claude/CLAUDE.md: broken markers')
+    expect(on).toContain('Claude Code (this harness): Block broken markers |')
+    expect(up).toContain(`${why} \`hafez upgrade\`.`)
+    expect(on).toContain(`${why} \`hafez onboard\`.`)
+  })
+
+  it('an unreadable install still exits 0 with a full report', async () => {
+    const home = makeHome()
+    mkdirSync(join(home, CLAUDE_MD), { recursive: true }) // a directory where the file goes: EISDIR
+    const s = await state({ home })
+    expect(Object.keys(s).sort()).toEqual(JSON_KEYS)
+    expect(s.integration).toBeNull()
+  })
+
+  it('no longer prints an integration snippet to reconcile by hand', async () => {
+    expect(await text({ home: makeHome({ mode: 'always-on' }) })).not.toContain('## Hafez — Session Memory')
   })
 })
 
@@ -348,9 +500,7 @@ describe('dev checkout', () => {
     roots.push(base)
     const packageRoot = join(base, "dev's tree")
     mkdirSync(join(packageRoot, 'src'), { recursive: true })
-    mkdirSync(join(packageRoot, 'skill'), { recursive: true })
     writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({ version: '1.0.0' }))
-    writeFileSync(join(packageRoot, 'skill', 'SKILL.md'), '# skill')
     const s = await state({ packageRoot, fetch: jsonFetch({ version: '1.2.3' }) })
     expect(s.steps[0].kind).toBe('action')
     expect(s.steps[0].text).toContain(packageRoot)
@@ -363,24 +513,6 @@ describe('dev checkout', () => {
 })
 
 describe('fault isolation', () => {
-  it('a missing bundled skill file still exits 0 with a full report', async () => {
-    const s = await state({ packageRoot: makeRoot({ withSkill: false }), fetch: jsonFetch({ version: '1.2.3' }) })
-    expect(Object.keys(s).sort()).toEqual(JSON_KEYS)
-  })
-
-  it('never emits a cp from a bundled skill that does not exist', async () => {
-    // The cp would fail with ENOENT and read as a failed upgrade, for a check
-    // that found nothing wrong with the skill at all.
-    const s = await state({
-      packageRoot: makeRoot({ version: '1.0.0', withSkill: false }),
-      installedSkillPath: makeSkillTarget(true),
-      fetch: jsonFetch({ version: '1.2.3' }),
-    })
-    expect(s.skill).toBe('present')
-    expect(s.steps.some(x => x.kind === 'command' && x.text.includes('cp '))).toBe(false)
-    expect(s.steps.some(x => x.kind === 'action' && x.text.startsWith('No bundled skill at'))).toBe(true)
-  })
-
   it('an unreadable packageRoot degrades the version to unknown, never throws', async () => {
     const s = await state({ packageRoot: join(tmpdir(), 'hafez-does-not-exist-xyz'), fetch: jsonFetch({ version: '1.2.3' }) })
     expect(s.current).toBe('unknown')
@@ -448,11 +580,9 @@ describe('README stays in step with what upgrade prints', () => {
     expect(updating).toContain(s.alternativeInstall!.replace(/9\.9\.9/g, '<version>'))
   })
 
-  it('offers the binary-relative skill path fallback beside npm root -g', () => {
-    // The nvm user for whom `npm root -g` is wrong is exactly the user with no
-    // `hafez upgrade` yet to print the resolved path for them.
-    expect(updating).toContain('npm root -g')
-    expect(updating).toContain('readlink -f "$(which hafez)"')
+  it('refreshes the skills and the Block through upgrade, not a hand copy', () => {
+    expect(updating).toContain('hafez onboard --install')
+    expect(updating).not.toContain('cp ')
   })
 
   it('says the vault survives and the index does not', () => {
@@ -468,14 +598,9 @@ describe('invocation', () => {
   })
 
   it('the rendered report tells the agent to get approval before running anything', async () => {
-    const out = await text({ packageRoot: makeRoot({ version: '1.0.0' }), fetch: jsonFetch({ version: '1.2.3' }), installedSkillPath: makeSkillTarget(true) })
+    const out = await text({ packageRoot: makeRoot({ version: '1.0.0' }), fetch: jsonFetch({ version: '1.2.3' }), home: makeHome({ mode: 'always-on' }) })
     expect(out).toContain('never installs anything')
     expect(out).toMatch(/explicit yes/)
     expect(out).toContain('Never run them unattended.')
-  })
-
-  it('embeds the integration snippet verbatim', async () => {
-    const { INTEGRATION_SNIPPET } = await import('../src/cli/onboard.js')
-    expect(await text()).toContain(INTEGRATION_SNIPPET)
   })
 })

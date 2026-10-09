@@ -4,6 +4,7 @@ import { parseFilePath, parseContent, serializeFile, slugify, resolveFilePath, k
 import { writeFileSync, mkdirSync, rmSync } from 'fs'
 import { join, posix, win32 } from 'path'
 import { tmpdir } from 'os'
+import { asEntity } from './helpers/vault-files.js'
 
 const TMP = join(tmpdir(), 'hafez-test-vault-' + Date.now())
 
@@ -13,6 +14,9 @@ describe('slugify', () => {
   })
   it('handles special characters', () => {
     expect(slugify("Parisa's 30K Business")).toBe('parisas-30k-business')
+  })
+  it('drops a curly apostrophe like a straight one (the skills teach ’)', () => {
+    expect(slugify('Parisa’s 30K Business')).toBe('parisas-30k-business')
   })
   it('collapses multiple hyphens', () => {
     expect(slugify('foo  --  bar')).toBe('foo-bar')
@@ -140,8 +144,9 @@ describe('parseFilePath', () => {
 
   it('parses frontmatter and body', () => {
     const result = parseFilePath(join(TMP, 'entities/test-entity.md'))
+    expect(result.kind).toBe('entity')
     expect(result.frontmatter.name).toBe('Test Entity')
-    expect(result.frontmatter.type).toBe('project')
+    expect(asEntity(result).frontmatter.type).toBe('project')
     expect(result.body).toContain('## Purpose')
   })
   it('preserves date fields as strings, not Date objects', () => {

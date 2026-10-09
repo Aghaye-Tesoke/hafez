@@ -23,9 +23,9 @@ Requires Node.js 22+ and git.
 - `src/vault.ts` / `src/schema.ts` — file I/O and frontmatter validation
 - `src/db.ts` — SQLite FTS5 read index (rebuilt from files; never source of truth)
 - `src/git.ts` / `src/merge.ts` — commit/push with semantic conflict merging
-- `skill/SKILL.md` — the bundled Claude Code skill (optional adapter; the CLI is the whole interface)
+- `skill/hafez/SKILL.md`, `skill/hafez-save/SKILL.md` — the two skills `hafez onboard --install` writes to `~/.claude/skills` and `~/.agents/skills`; rendered, never hand-edited (the CLI is the whole interface)
 
-`hafez help --agent` prints the full operation reference; `hafez schema <op>
+`hafez help --agent` prints the `hafez` skill body; `hafez schema <op>
 --examples` gives machine-readable schemas. Trust those over prose.
 
 This repo receives squash-snapshot releases; development history lives in a

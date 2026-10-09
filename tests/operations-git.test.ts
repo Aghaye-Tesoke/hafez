@@ -8,7 +8,7 @@ import { createHafez } from '../src/index.js'
 import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import simpleGit from 'simple-git'
+import { simpleGit } from 'simple-git'
 import Database from 'better-sqlite3'
 
 const TMP = join(tmpdir(), 'hafez-test-ops-git-' + Date.now())
@@ -245,8 +245,9 @@ describe('a commit carries only the files its mutation wrote', () => {
 
     const git = simpleGit(VAULT)
     try {
-      // An unrelated update — no session log, so nothing is archived.
-      await os.update(SLUG, { brief: 'Unrelated handoff note' })
+      // An unrelated update — action-only, so no session log entry (not even
+      // the mechanised one) and nothing is archived.
+      await os.update(SLUG, { add_action: 'Unrelated follow-up' })
 
       const touched = (await git.raw(['show', '--name-only', '--pretty=format:', 'HEAD']))
         .split('\n').map(s => s.trim()).filter(Boolean)

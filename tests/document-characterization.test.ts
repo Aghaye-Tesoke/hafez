@@ -19,10 +19,11 @@ import { mkdirSync, rmSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-test-doc-char-' + Date.now())
 const VAULT = join(TMP, 'vault')
-const TODAY = new Date().toISOString().slice(0, 10)
+const TODAY = localDay()
 
 beforeAll(() => {
   mkdirSync(join(VAULT, 'entities'), { recursive: true })

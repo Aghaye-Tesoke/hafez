@@ -1,12 +1,19 @@
 // src/cli/commands.ts
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
-import { parseArgs, splitList, str, UsageError, type FlagSpec } from './args.js'
-import type { Hafez, ReadDepth, EntityType, QueryFilter, ConfidenceLevel, KnowledgeSubtype, CreateEntityFields, CreateKnowledgeFields, BatchOperation, KnowledgeQueryOpts, QueryResult, KnowledgeQueryResult } from '../types.js'
+import { helpIfAsked, parseArgs, splitList, str, MisuseError, RenderedError, UnknownFlagError, UsageError, type FlagSpec, type FlagValue } from './args.js'
+import type { Hafez, ParsedFile, ReadDepth, UpdateFields, UpdateResult, EntityType, QueryFilter, ConfidenceLevel, KnowledgeSubtype, CreateEntityFields, CreateKnowledgeFields, BatchOperation, KnowledgeQueryOpts, QueryResult, KnowledgeQueryResult } from '../types.js'
 import { HafezError } from '../types.js'
 import { BatchOperationSchema, normalizeAliases, opErrorLine, batchInvalidHeader } from '../batch-ops.js'
 import { formatBatchError } from './batch-errors.js'
 import { parseDigestInput, digest } from '../digest.js'
+import { detectAgent } from '../harness.js'
+import { getActionItems } from '../document.js'
+import { resemblances } from '../near-match.js'
+import { actionAge, agedActions, staleHandles, stalenessDaysOf } from '../stale.js'
+import { slugify } from '../vault.js'
+import { ITEMS, footerOp, type FooterInput, type MisuseRetry, type NearMatchNote } from '../surfaces/items.js'
+import { placeIn } from '../surfaces/surfaces.js'
 import { formatEntityHeader, formatKnowledgeHeader, formatQueryTable, formatKnowledgeTable, formatSearchResults, formatValidation, formatStats, formatChangelog } from './format.js'
 
 export interface CommandOpts {
@@ -28,11 +35,63 @@ export async function cmdRead(os: Hafez, args: string[], opts: CommandOpts = {})
   const slug = positionals[0]
   if (!slug) throw new UsageError(READ_USAGE)
   const depth = (str(flags.depth) ?? 'summary') as ReadDepth
-  const result = await os.read(slug, depth)
-  if (opts.json) return jsonOut(result)
+  const result = await os.read(slug, depth).catch(err => {
+    if (!(err instanceof HafezError) || err.code !== 'NOT_FOUND') throw err
+    const closest = err.details ?? []
+    throw opts.json
+      ? new RenderedError('NOT_FOUND', jsonOut({ slug, closest }), 'stdout')
+      : new RenderedError('NOT_FOUND', ITEMS.slugMissRecovery.render({ slug, closest }), 'stderr')
+  })
+  const footer = await footerFor(os, slug, result, depth)
+  if (opts.json) {
+    const writes = footerOp(footer)
+    // A frontmatter-depth read carries no body, so it has no actions to list.
+    if (result.kind !== 'entity' || depth === 'frontmatter') return jsonOut({ ...result, writes })
+    return jsonOut({ ...result, actions: agedActions(result.body, result.frontmatter), writes })
+  }
   const fm = result.frontmatter as Record<string, any>
-  if (result.kind === 'entity') return formatEntityHeader(fm, result.body)
-  return formatKnowledgeHeader(fm, result.body)
+  const days = stalenessDaysOf(fm)
+  const staleMark = (added: string | null) => ITEMS.staleMarker.render(actionAge(added, days))
+  const text = result.kind === 'entity'
+    ? formatEntityHeader(fm, ITEMS.handles.render(result.body, staleMark), await parentLine(os, fm.parent))
+    : formatKnowledgeHeader(fm, result.body)
+  // Trailing newlines only: the Footer brings its own blank line.
+  return `${text.replace(/\n+$/, '')}\n${ITEMS.writeLine.render(footer)}`
+}
+
+/** The `parent:` line's value: the slug with the parent's description. The
+ * one thing `read` takes from another file; a parent that cannot be read
+ * (a broken slug) is named by its slug alone. */
+async function parentLine(os: Hafez, parent: string | undefined): Promise<string | undefined> {
+  if (!parent) return undefined
+  const description = await os.read(parent, 'frontmatter')
+    .then(file => (file.frontmatter as { description?: string | null }).description ?? null)
+    .catch(() => null)
+  return ITEMS.parentDescription.render({ slug: parent, description })
+}
+
+/** The Handles of the Stale lines an entity holds after a write; none for a
+ * knowledge note. Best-effort: the write is committed, so a failed read here
+ * drops the reminder rather than failing the update. */
+async function staleAfterWrite(os: Hafez, slug: string): Promise<string[]> {
+  try {
+    const file = await os.read(slug, 'full')
+    return file.kind === 'entity' ? staleHandles(file.body, file.frontmatter) : []
+  } catch {
+    return []
+  }
+}
+
+/** The Footer for a file `read` returned at `depth`. The Footer is the same
+ * at every depth, so its Handle comes from the whole file, not from the body
+ * this depth shows. */
+async function footerFor(os: Hafez, slug: string, result: ParsedFile, depth: ReadDepth): Promise<FooterInput> {
+  return { slug, agent: detectAgent(), ...(result.kind === 'entity'
+    ? {
+      target: { kind: 'entity', type: result.frontmatter.type },
+      handle: getActionItems(depth === 'full' ? result.body : (await os.read(slug, 'full')).body).find(a => a.handle)?.handle,
+    }
+    : { target: { kind: 'knowledge', subtype: result.frontmatter.subtype } }) }
 }
 
 const QUERY_USAGE = `Usage: hafez query [--kind entity|knowledge|all] [--filter ...] [--type t] [--parent slug] [--related-to slug] [--domain d] [--confidence c] [--subtype s] [--tag t] [--since d] [--before d] [--created-since d] [--created-before d] [--sort-by f] [--sort-order asc|desc] [--limit n] [--offset n]
@@ -76,7 +135,7 @@ const FLAG_SCOPE_REASON: Record<string, string> = {
 
 const QUERY_KINDS = ['entity', 'knowledge', 'all'] as const
 
-function rejectUnsupportedFlags(branch: QueryBranch, flags: Record<string, string | boolean | undefined>): void {
+function rejectUnsupportedFlags(branch: QueryBranch, flags: Record<string, FlagValue>): void {
   const supported = new Set(QUERY_FLAG_SUPPORT[branch])
   for (const [name, value] of Object.entries(flags)) {
     if (value === undefined || supported.has(name)) continue
@@ -182,38 +241,84 @@ export async function cmdSearch(os: Hafez, args: string[], opts: CommandOpts = {
   return formatSearchResults(results)
 }
 
+/** Flags whose value is a comma list, on create and update alike. */
+const LIST_FLAGS = new Set(['domain', 'related', 'tags'])
+
+/** The Write Line grammar, one mapper for create and update: every provided
+ * flag → its field, the flag name with dashes as underscores. A comma-list
+ * flag is split; a `clearable` flag maps `""` to null (its clear signal); a
+ * repeatable flag given once is its own field (`--add-action` → `add_action`)
+ * and given more than once is the array form of that field (`add_actions`),
+ * so each repeat appends. Which fields a target accepts is the Op Spec's
+ * call, not the CLI's — the strict shape does all accepting and rejecting.
+ * Only provided flags are included: a present-but-undefined key would trip
+ * that same strict shape. */
+function flagFields(
+  spec: FlagSpec,
+  flags: Record<string, FlagValue>,
+  opts: { skip?: Set<string>; clearable?: Set<string> } = {},
+): Record<string, unknown> {
+  const fields: Record<string, unknown> = {}
+  for (const flag of Object.keys(spec)) {
+    const raw = flags[flag]
+    if (raw === undefined || opts.skip?.has(flag)) continue
+    const field = flag.replace(/-/g, '_')
+    if (Array.isArray(raw)) {
+      if (raw.length === 1) fields[field] = raw[0]
+      else fields[`${field}s`] = raw
+    } else if (typeof raw === 'boolean') fields[field] = raw
+    else if (LIST_FLAGS.has(flag)) fields[field] = splitList(raw)
+    else fields[field] = raw === '' && opts.clearable?.has(flag) ? null : raw
+  }
+  return fields
+}
+
 // --status is knowledge/plan only, and --purpose needs --type project: a field
 // whose section the chosen template lacks is rejected, never silently dropped.
-const CREATE_USAGE = 'Usage: hafez create <entity|knowledge> <name> [options]\n  entity:    --type capture|entity|project [--purpose text (project only)] [--brief text] [--add-action text] …\n  knowledge: [--subtype insight|plan] [--status active|done (plan only)] [--synthesis text (insight only)] …'
+const CREATE_USAGE = 'Usage: hafez create <entity|knowledge> <name> [options]\n  entity:    --type <capture|entity|project> [--purpose text (project only)] [--brief text] [--add-action text (repeats)] …\n  knowledge: [--subtype <insight|plan>] [--status <active|done> (plan only)] [--synthesis text (insight only)] [--confidence <observation|pattern|principle>] [--new (write despite a near-match)] …'
 /** Exported so tests can assert the flag × kind matrix is exhaustive. */
 export const CREATE_FLAGS: FlagSpec = {
   type: 'string', purpose: 'string', description: 'string', resource: 'string',
   domain: 'string', parent: 'string', related: 'string', tags: 'string',
-  brief: 'string', 'add-action': 'string',
-  subtype: 'string', synthesis: 'string', insight: 'string',
+  brief: 'string', 'add-action': 'repeat',
+  subtype: 'string', synthesis: 'string', insight: 'string', confidence: 'string',
   // knowledge, plan subtype only — insights have no lifecycle
   status: 'string',
+  // knowledge only: write despite a Near-match. Not a field of any shape.
+  new: 'boolean',
 }
 
-/** Flags whose value is a comma list. Everything else is a plain string. */
-const CREATE_LIST_FLAGS = new Set(['domain', 'related', 'tags'])
+/** Every knowledge note, with its subtype, for the Near-match check. */
+async function knowledgeNotes(os: Hafez): Promise<NearMatchNote[]> {
+  const plans = new Set((await os.query_knowledge({ subtype: 'plan' })).items.map(n => n.slug))
+  return (await os.query_knowledge()).items.map(n => ({
+    slug: n.slug, name: n.name, description: n.description, subtype: plans.has(n.slug) ? 'plan' : 'insight',
+  }))
+}
 
-/** Every provided create flag → its field name (dashes become underscores),
- * kind-agnostic on purpose. Which fields a kind accepts is the Op Spec's
- * call, not the CLI's: the per-kind hand-filter this replaces discarded
- * whatever its branch didn't name (--brief on knowledge, --subtype on
- * entity) and still exited 0 with the value nowhere on disk. Only provided
- * flags are included — a present-but-undefined key would trip the same
- * strict shape that does the rejecting. */
-function createFields(flags: Record<string, string | boolean | undefined>): Record<string, unknown> {
-  const fields: Record<string, unknown> = {}
-  for (const flag of Object.keys(CREATE_FLAGS)) {
-    if (flags[flag] === undefined) continue
-    fields[flag.replace(/-/g, '_')] = CREATE_LIST_FLAGS.has(flag)
-      ? splitList(flags[flag])
-      : str(flags[flag])
-  }
-  return fields
+/** The parsed flags as `[flag, value?]` pairs, in the order first given,
+ * for echoing a create line back. */
+function echoFlags(flags: Record<string, FlagValue>): [string, string?][] {
+  return Object.entries(flags).flatMap(([flag, value]): [string, string?][] =>
+    value === true ? [[flag]]
+      : Array.isArray(value) ? value.map(v => [flag, v] as [string, string])
+        : typeof value === 'string' ? [[flag, value]] : [])
+}
+
+/** `batch`'s Near-match warnings (#60): a save never fails on one, so they
+ * only warn. Each create is judged against the vault plus the batch's
+ * earlier creates. */
+async function nearMatchWarnings(os: Hafez, operations: BatchOperation[]): Promise<string[]> {
+  if (!operations.some(op => op.op === 'create' && op.kind === 'knowledge')) return []
+  const seen = await knowledgeNotes(os)
+  return operations.flatMap((op, index) => {
+    if (op.op !== 'create' || op.kind !== 'knowledge') return []
+    const { near } = resemblances(op.name, seen)
+    seen.push({ slug: slugify(op.name), name: op.name, subtype: op.fields?.subtype ?? 'insight' })
+    return near.length > 0
+      ? [ITEMS.nearMatch.render({ form: 'batchWarning', index, name: op.name, matches: near.map(n => n.slug) })]
+      : []
+  })
 }
 
 export async function cmdCreate(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
@@ -224,7 +329,14 @@ export async function cmdCreate(os: Hafez, args: string[], opts: CommandOpts = {
   const name = positionals.slice(1).join(' ')
   if (!name) throw new UsageError(`Usage: hafez create ${kind} <name> [options]`)
 
-  const fields = createFields(flags)
+  if (flags.new !== undefined && kind !== 'knowledge') {
+    throw new UsageError('--new is for create knowledge only: it writes a note despite a near-match')
+  }
+
+  // Kind-agnostic on purpose: the per-kind hand-filter this replaced
+  // discarded whatever its branch didn't name (--brief on knowledge,
+  // --subtype on entity) and still exited 0 with the value nowhere on disk.
+  const fields = flagFields(CREATE_FLAGS, flags, { skip: new Set(['new']) })
 
   if (kind === 'entity') {
     // The only per-kind rule the CLI still owns: --type is required, and a
@@ -239,32 +351,47 @@ export async function cmdCreate(os: Hafez, args: string[], opts: CommandOpts = {
     // (and drops it when --synthesis is also given). On entity it stays
     // `insight` and the kind gate rejects it. --status flows through the
     // same way; the subtype-aware gate accepts it on plans only.
-    const slug = await os.create('knowledge', name, fields as unknown as CreateKnowledgeFields)
-    return opts.json ? jsonOut({ slug }) : slug
+    const knowledgeFields = fields as unknown as CreateKnowledgeFields
+    const { near, weak } = resemblances(name, await knowledgeNotes(os))
+    // Near-match (#60): refuse unless --new, handing back the update line.
+    // Only a create that would otherwise be written: an invalid one, or an
+    // exact slug collision, gets its own error rather than a --new line that
+    // would fail the same way.
+    if (near.length > 0 && flags.new === undefined
+      && (await os.validateBatch([{ op: 'create', kind: 'knowledge', name, fields: knowledgeFields }])).valid) {
+      throw new HafezError('SLUG_EXISTS', ITEMS.nearMatch.render({
+        form: 'refusal', name, flags: echoFlags(flags), matches: near,
+        evidence: str(flags.synthesis) ?? str(flags.insight),
+      }))
+    }
+    const slug = await os.create('knowledge', name, knowledgeFields)
+    if (opts.json) return jsonOut({ slug })
+    const related = knowledgeFields.related ?? []
+    const resembles = [...near, ...weak].map(n => n.slug).filter(r => !related.includes(r)).slice(0, 3)
+    if (resembles.length === 0) return slug
+    return `${slug}\n${ITEMS.nearMatch.render({ form: 'relate', slug, related, resembles })}`
   }
 
   throw new UsageError(`Unknown kind: ${kind}. Use entity or knowledge.`)
 }
 
-const UPDATE_USAGE = 'Usage: hafez update <slug> [--brief text] [--description text] [--resource uri] [--add-action text] [--complete-action text] [--remove-action text] [--clear-actions] [--status s] [--log "type: summary"]'
+const UPDATE_USAGE = 'Usage: hafez update <slug> [--brief text] [--description text] [--resource uri] [--add-action text (repeats)] [--complete-action handle-or-text] [--remove-action handle-or-text] [--clear-actions] [--status <active|paused|done>] [--parent slug] [--log "<progress|decision|blocker|research>: summary" [--body text]]'
 /** Exported so tests can assert the table covers the update schema. */
 export const UPDATE_FLAGS: FlagSpec = {
   status: 'string', 'current-state': 'string', brief: 'string',
-  'add-action': 'string', 'complete-action': 'string', 'remove-action': 'string',
-  'clear-actions': 'boolean',
+  'add-action': 'repeat', 'complete-action': 'string', 'remove-action': 'string',
+  'clear-actions': 'boolean', parent: 'string',
   description: 'string', resource: 'string', domain: 'string', confidence: 'string',
   tags: 'string', related: 'string', insight: 'string', synthesis: 'string',
-  'add-evidence': 'string', 'add-source': 'string',
-  // Composed, not mapped: --log "type: summary" plus --agent build session_log.
-  log: 'string', agent: 'string',
+  'add-evidence': 'string', 'add-source': 'string', agent: 'string',
+  // Composed, not mapped: --log "type: summary" plus --body (and --agent, when
+  // given) build session_log.
+  log: 'string', body: 'string',
   // Removed flag, declared so it fails with guidance instead of a generic
   // unknown-flag error: older installed skills/scripts still pass it, and
   // "Updated <slug>" with the action discarded is a false success.
   'next-action': 'string',
 }
-
-/** Flags whose value is a comma list. Everything else is a plain string. */
-const UPDATE_LIST_FLAGS = new Set(['domain', 'tags', 'related'])
 
 /** Flags where an empty string is the clear signal — exactly the nullable
  * fields of the update shape. Every other flag passes its value through
@@ -275,36 +402,35 @@ const UPDATE_CLEARABLE_FLAGS = new Set(['brief', 'description', 'resource'])
 
 /** Flags the generic loop skips because they are not a field of the update
  * shape — each is hand-handled in cmdUpdate. */
-export const UPDATE_SPECIAL_FLAGS = new Set(['log', 'agent', 'next-action'])
+export const UPDATE_SPECIAL_FLAGS = new Set(['log', 'body', 'next-action'])
 
 /** Update-shape fields with no flag of their own, and why. The exhaustiveness
  * test consults this, so a gap here is a stated decision rather than the
  * silent hole `add_actions` was. */
 export const UPDATE_FIELDS_WITHOUT_FLAGS: Record<string, string> = {
-  session_log: 'composed by --log "type: summary" (+ --agent), never passed raw',
-  add_actions: 'array-valued: comma-splitting would mangle action text (actions carry commas), and the parser takes no repeated flags — batch payloads are the interface for multi-action writes',
-}
-
-/** Every provided update flag → its field name (dashes become underscores).
- * Which fields the target accepts is the Op Spec's call, not the CLI's — the
- * strict shape does all accepting and rejecting, exactly as on create. Only
- * provided flags are included: a present-but-undefined key would trip that
- * same strict shape. */
-function updateFields(flags: Record<string, string | boolean | undefined>): Record<string, unknown> {
-  const fields: Record<string, unknown> = {}
-  for (const [flag, type] of Object.entries(UPDATE_FLAGS)) {
-    const raw = flags[flag]
-    if (raw === undefined || UPDATE_SPECIAL_FLAGS.has(flag)) continue
-    const field = flag.replace(/-/g, '_')
-    if (type === 'boolean') { fields[field] = true; continue }
-    if (UPDATE_LIST_FLAGS.has(flag)) { fields[field] = splitList(raw); continue }
-    const value = str(raw)
-    fields[field] = value === '' && UPDATE_CLEARABLE_FLAGS.has(flag) ? null : value
-  }
-  return fields
+  session_log: 'composed by --log "type: summary" (+ --body, --agent), never passed raw',
 }
 
 export async function cmdUpdate(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
+  // Every Write Line names the slug first, so a misuse that stops the parse
+  // part-way is still reported against it.
+  let slug = args[0]?.startsWith('--') ? undefined : args[0]
+  let fields: UpdateFields
+  let result: UpdateResult
+  try {
+    ({ slug, fields } = parseUpdate(args))
+    result = await os.update(slug, fields)
+  } catch (err) {
+    throw await updateFailure(os, slug, err, opts)
+  }
+  if (opts.json) return jsonOut({ slug, ...result })
+  const summary = ITEMS.updateSummary.render({ slug, fields, result })
+  const stale = await staleAfterWrite(os, slug)
+  return stale.length > 0 ? `${summary}\n${ITEMS.staleReminder.render({ handles: stale })}` : summary
+}
+
+/** The update's argv as its slug and fields: the Write Line grammar. */
+function parseUpdate(args: string[]): { slug: string; fields: UpdateFields } {
   const { flags, positionals } = parseArgs(args, UPDATE_FLAGS, UPDATE_USAGE)
   const slug = positionals[0]
   if (!slug) throw new UsageError(UPDATE_USAGE)
@@ -315,28 +441,59 @@ export async function cmdUpdate(os: Hafez, args: string[], opts: CommandOpts = {
 
   // --insight is the declared alias; the Op Spec normalizes it (and drops it
   // when --synthesis is also given).
-  const fields = updateFields(flags)
+  const fields = flagFields(UPDATE_FLAGS, flags, { skip: UPDATE_SPECIAL_FLAGS, clearable: UPDATE_CLEARABLE_FLAGS })
 
   // The one genuinely CLI-owned convenience: session_log is a nested object,
-  // so the flag pair composes it rather than naming a field.
+  // so the flag pair composes it rather than naming a field. Without --log,
+  // the Spine adds the entry itself and --agent rides along as `agent`.
   const log = str(flags.log)
+  const body = str(flags.body)
+  if (body !== undefined && log === undefined) {
+    throw new UsageError('--body is the detail of a session log entry and needs --log "type: summary"')
+  }
   if (log !== undefined) {
     const colonIdx = log.indexOf(':')
     if (colonIdx === -1) throw new UsageError('--log format: "type: summary". Types: progress, decision, blocker, research')
     fields.session_log = {
       type: log.slice(0, colonIdx).trim(),
       summary: log.slice(colonIdx + 1).trim(),
-      agent: str(flags.agent) ?? 'claude',
+      ...(body !== undefined && { body }),
+      agent: fields.agent ?? detectAgent(),
     }
+    delete fields.agent
   }
+  // An update that names nothing to change would print a success line that
+  // names nothing either.
+  if (Object.keys(fields).length === 0) throw new UsageError('update needs at least one flag')
+  return { slug, fields: fields as UpdateFields }
+}
 
-  const result = await os.update(slug, fields)
-  if (opts.json) return jsonOut({ slug, ...result })
-  const lines = [`Updated ${slug}`]
-  if (result.matched_action) {
-    lines.push(`matched action: ${result.matched_action}`)
+/** What a failed update reports (Agent Contract: a misuse returns the
+ * corrected shape). A misuse — a usage error or a write the Op Spec rejected —
+ * says nothing was written, then gives the Footer `read` shows for the slug;
+ * a slug that names no file gets the `read` miss instead. Anything else, and
+ * any failure with no slug to report against, passes through unchanged. */
+async function updateFailure(os: Hafez, slug: string | undefined, err: unknown, opts: CommandOpts): Promise<unknown> {
+  const misuse = err instanceof UsageError
+    ? { error: err instanceof UnknownFlagError ? `update has no flag --${err.flag}` : err.reason }
+    : err instanceof HafezError && err.code === 'VALIDATION_FAILED' ? { error: err.message, details: err.details }
+      : undefined
+  const missing = err instanceof HafezError && err.code === 'NOT_FOUND'
+  // Under --json only the miss has a machine form (read's); a misuse's
+  // Footer is prose, so the error passes through as it always has.
+  if (slug === undefined || (!misuse && !missing) || (opts.json && misuse)) return err
+  let retry: MisuseRetry
+  try {
+    retry = { footer: await footerFor(os, slug, await os.read(slug, 'full'), 'full') }
+  } catch (readErr) {
+    if (!(readErr instanceof HafezError) || readErr.code !== 'NOT_FOUND') return err
+    retry = { miss: { slug, closest: readErr.details ?? [] } }
   }
-  return lines.join('\n')
+  if (misuse) return new RenderedError('VALIDATION_FAILED', ITEMS.updateMisuse.render({ ...misuse, ...retry }), 'stderr')
+  if (!('miss' in retry)) return err
+  return opts.json
+    ? new RenderedError('NOT_FOUND', jsonOut(retry.miss), 'stdout')
+    : new RenderedError('NOT_FOUND', ITEMS.slugMissRecovery.render(retry.miss), 'stderr')
 }
 
 const LINK_FLAGS: FlagSpec = { relation: 'string' }
@@ -392,7 +549,19 @@ export async function cmdPromote(os: Hafez, args: string[], opts: CommandOpts = 
   return `Promoted ${slug} → ${target}`
 }
 
-export async function cmdValidate(os: Hafez, _args: string[], opts: CommandOpts = {}): Promise<string> {
+const DELETE_USAGE = 'Usage: hafez delete <slug>  (knowledge and session notes only — retire an entity with `hafez update <slug> --status done`)'
+
+export async function cmdDelete(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
+  const { positionals } = parseArgs(args, {}, DELETE_USAGE)
+  if (positionals.length !== 1) throw new UsageError(DELETE_USAGE)
+  const [slug] = positionals
+  // What may be deleted (not an entity, nothing linking to it) is core's rule.
+  const kind = await os.delete(slug)
+  return opts.json ? jsonOut({ slug, kind }) : `Deleted ${slug} (${kind})`
+}
+
+export async function cmdValidate(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
+  helpIfAsked(args, 'Usage: hafez validate')
   const report = await os.validate()
   if (opts.json) return jsonOut(report)
   return formatValidation(report)
@@ -403,7 +572,8 @@ export async function cmdIndexRebuild(os: Hafez): Promise<string> {
   return 'Index rebuilt.'
 }
 
-export async function cmdSync(os: Hafez, _args: string[]): Promise<string> {
+export async function cmdSync(os: Hafez, args: string[]): Promise<string> {
+  helpIfAsked(args, 'Usage: hafez sync  (pull remote changes, push local commits)')
   const result = await os.sync()
   if (!result.remote) return 'No remote configured — vault is local-only. Every write is already committed to git.'
   if (result.pulled && result.pushed) return 'Synced: pulled remote changes and pushed local commits.'
@@ -412,7 +582,8 @@ export async function cmdSync(os: Hafez, _args: string[]): Promise<string> {
   return 'Already up to date.'
 }
 
-export async function cmdStats(os: Hafez, _args: string[], opts: CommandOpts = {}): Promise<string> {
+export async function cmdStats(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
+  helpIfAsked(args, 'Usage: hafez stats')
   const stats = await os.stats()
   if (opts.json) return jsonOut(stats)
   return formatStats(stats)
@@ -513,6 +684,18 @@ function readPayloadFile(path: string): string {
   return buf.toString('utf-8').replace(/^\uFEFF/, '')
 }
 
+// The payload as one argument. Exists because Codex runs a command outside its
+// sandbox (where the vault's .git is writable) only when every stage of a pipe
+// matches an allow rule: `hafez digest --data '…' | hafez batch` does, an `echo`
+// stage does not.
+function readPayload(flags: { data?: FlagValue; file?: FlagValue }, usage: string): Promise<string> | string {
+  const data = str(flags.data)
+  const file = str(flags.file)
+  if (data !== undefined && file !== undefined) throw new UsageError(`--data and --file are two ways to pass one payload; give one.\n${usage}`)
+  if (data !== undefined) return data
+  return file ? readPayloadFile(file) : readStdin()
+}
+
 function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = ''
@@ -523,18 +706,30 @@ function readStdin(): Promise<string> {
   })
 }
 
-const BATCH_USAGE = "Usage: hafez batch [--dry-run] [--file payload.json]  (or pipe JSON to stdin)"
-const BATCH_FLAGS: FlagSpec = { 'dry-run': 'boolean', file: 'string' }
+const BATCH_USAGE = "Usage: hafez batch [--dry-run] [--data '<payload>' | --file payload.json]  (or pipe JSON to stdin)"
+const BATCH_FLAGS: FlagSpec = { 'dry-run': 'boolean', data: 'string', file: 'string' }
 
 export async function cmdBatch(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
   const { flags } = parseArgs(args, BATCH_FLAGS, BATCH_USAGE)
   const dryRun = flags['dry-run'] === true
-  const file = str(flags.file)
-  const input = file ? readPayloadFile(file) : await readStdin()
+  const input = await readPayload(flags, BATCH_USAGE)
+  // A payload that is not a well-formed batch is a misuse: the error carries
+  // the batch shape so the retry is right. Semantic failures (a missing slug)
+  // are not shape problems and say only what failed.
+  // No input is not one: in a pipe it means the stage before failed and said
+  // why, and a batch shape there would invite hand-writing the ops.
   if (!input.trim()) {
-    throw new HafezError('VALIDATION_FAILED', 'No input received. Pipe JSON array to stdin (echo \'[...]\' | hafez batch) or pass --file payload.json')
+    throw new HafezError('VALIDATION_FAILED', 'No input received. Pipe JSON array to stdin (echo \'[...]\' | hafez batch) or pass --data \'[...]\' or --file payload.json')
   }
-  const operations = parseBatchInput(input)
+  let operations: BatchOperation[]
+  try {
+    operations = parseBatchInput(input)
+  } catch (err) {
+    throw err instanceof HafezError ? new MisuseError(err, placeIn('batchMisuse', 'batchShape')) : err
+  }
+  const nearMatches = await nearMatchWarnings(os, operations)
+  // Under --json stdout is the report alone; the warnings go to stderr.
+  if (opts.json) for (const w of nearMatches) process.stderr.write(`${w}\n`)
   if (dryRun) {
     // Same validate phase as apply — dry-run can never green-light a payload
     // apply rejects. Reports derived slugs so agents can predict create slugs.
@@ -560,7 +755,7 @@ export async function cmdBatch(os: Hafez, args: string[], opts: CommandOpts = {}
     for (const o of report.operations) {
       if (o.warning) out.push(`Warning: op[${o.index}] ${o.warning}`)
     }
-    return out.join('\n')
+    return [...out, ...nearMatches].join('\n')
   }
   const results = await os.batch(operations)
   if (opts.json) return jsonOut(results)
@@ -572,18 +767,17 @@ export async function cmdBatch(os: Hafez, args: string[], opts: CommandOpts = {}
   results.forEach((r, i) => {
     if (r.status === 'skipped' && r.warning) lines.push(`Warning: op[${i}] ${r.warning}`)
   })
-  return lines.join('\n')
+  return [...lines, ...nearMatches].join('\n')
 }
 
-const DIGEST_USAGE = 'Usage: hafez digest [--file summary.json]  (or pipe JSON to stdin)'
-const DIGEST_FLAGS: FlagSpec = { file: 'string' }
+const DIGEST_USAGE = "Usage: hafez digest [--data '<summary>' | --file summary.json]  (or pipe JSON to stdin)"
+const DIGEST_FLAGS: FlagSpec = { data: 'string', file: 'string' }
 
 export async function cmdDigest(os: Hafez, args: string[], _opts: CommandOpts = {}): Promise<string> {
   const { flags } = parseArgs(args, DIGEST_FLAGS, DIGEST_USAGE)
-  const file = str(flags.file)
-  const raw = file ? readPayloadFile(file) : await readStdin()
+  const raw = await readPayload(flags, DIGEST_USAGE)
   if (!raw.trim()) {
-    throw new UsageError('No input received. Pipe JSON object to stdin (echo \'{"entities_touched":...}\' | hafez digest) or pass --file summary.json')
+    throw new UsageError('No input received. Pipe JSON object to stdin (echo \'{"entities_touched":...}\' | hafez digest) or pass --data \'<summary>\' or --file summary.json')
   }
 
   // Parse JSON
@@ -607,15 +801,18 @@ export async function cmdDigest(os: Hafez, args: string[], _opts: CommandOpts = 
 
   // Resolve existing entity slugs — digest only generates update ops for entities
   const { items: entityItems } = await os.query({ filter: 'all', limit: 9999 })
-  const existingSlugs = new Set(entityItems.map(i => i.slug))
+  const { items: knowledgeItems } = await os.query_knowledge({ limit: 9999 })
 
-  // Warn about unknown entity slugs
-  const unknownSlugs = result.data.entities_touched.filter(s => !existingSlugs.has(s))
-  for (const slug of unknownSlugs) {
-    process.stderr.write(`Warning: entity slug '${slug}' not found in vault — skipping session log update\n`)
+  const ops = digest(result.data, new Set(entityItems.map(i => i.slug)), new Set(knowledgeItems.map(i => i.slug)))
+
+  // A session already saved: emit the session note alone, which batch skips
+  // as a duplicate, so a second save writes no second set of log entries.
+  const note = ops.find(o => o.op === 'create')!
+  const [check] = (await os.validateBatch([note])).operations
+  if (check.warning) {
+    process.stderr.write(`Session already saved as '${check.slug}' — skipped, nothing new to write\n`)
+    return JSON.stringify([note], null, 2)
   }
-
-  const ops = digest(result.data, existingSlugs)
   return JSON.stringify(ops, null, 2)
 }
 

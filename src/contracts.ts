@@ -1,4 +1,4 @@
-import type { KnowledgeSubtype } from './types.js'
+import type { KnowledgeSubtype, UpdateFields } from './types.js'
 
 // --- Canonical enum tuples (single source of truth) ---
 // Every consumer (file validators, the Op Spec table, help renderer, and the
@@ -219,4 +219,59 @@ export function describeTarget(target: DocTarget): string {
   return target.kind === 'entity'
     ? `type '${target.type}'`
     : `knowledge subtype '${target.subtype ?? DEFAULT_KNOWLEDGE_SUBTYPE}'`
+}
+
+// --- The read Footer's Write Line ---
+
+/** Which Footer a document's `read` ends with. Entity and project share one;
+ * a capture's is the promote line, since it is sorted before it is written to. */
+export type FooterForm = 'entity' | 'insight' | 'plan' | 'capture'
+
+export function footerForm(target: DocTarget): FooterForm {
+  if (target.kind === 'knowledge') return target.subtype ?? DEFAULT_KNOWLEDGE_SUBTYPE
+  return target.type === 'capture' ? 'capture' : 'entity'
+}
+
+/** The update fields each Footer names, in the order it names them. Every
+ * other field that contract's update accepts is in WRITE_LINE_OMITS with its
+ * reason; drift check 3 (tests/read-footer.test.ts) holds the two together
+ * against the Op Spec update shape and the kind gate. */
+export const WRITE_LINE_FIELDS = {
+  entity: ['session_log', 'complete_action', 'remove_action', 'add_actions', 'brief', 'current_state', 'related', 'parent'],
+  insight: ['add_evidence', 'add_source', 'synthesis', 'confidence', 'domain', 'related'],
+  plan: ['status', 'domain', 'related'],
+} as const satisfies Record<Exclude<FooterForm, 'capture'>, readonly (keyof UpdateFields)[]>
+
+export type WriteLineField = (typeof WRITE_LINE_FIELDS)[keyof typeof WRITE_LINE_FIELDS][number]
+
+const SET_AT_CREATE = 'set at create, rarely rewritten; `hafez schema update` has it'
+const INSIGHT_ALIAS = 'an alias of synthesis'
+const PLAN_BODY = 'a plan\'s body is Goal, Steps and Dependencies, which no op writes'
+
+/** Update fields a contract accepts that its Footer leaves out, and why. */
+export const WRITE_LINE_OMITS: Record<Exclude<FooterForm, 'capture'>, Partial<Record<keyof UpdateFields, string>>> = {
+  entity: {
+    status: 'a lifecycle change, not a write-back: the `hafez` skill\'s rare ops carry the status line',
+    agent: 'detected from the Harness; the override is never shown',
+    add_action: 'the one-line form of add_actions, written by the same flag',
+    clear_actions: 'drops lines unseen; the Footer drops one line by its Handle',
+    description: SET_AT_CREATE,
+    resource: SET_AT_CREATE,
+    domain: SET_AT_CREATE,
+    tags: SET_AT_CREATE,
+  },
+  insight: {
+    insight: INSIGHT_ALIAS,
+    description: SET_AT_CREATE,
+    tags: SET_AT_CREATE,
+  },
+  plan: {
+    synthesis: PLAN_BODY,
+    add_evidence: PLAN_BODY,
+    add_source: PLAN_BODY,
+    insight: INSIGHT_ALIAS,
+    confidence: 'an insight matures by confidence; a plan moves by status',
+    description: SET_AT_CREATE,
+    tags: SET_AT_CREATE,
+  },
 }

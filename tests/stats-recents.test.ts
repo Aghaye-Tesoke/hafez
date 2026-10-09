@@ -16,9 +16,10 @@ import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
+import { localDay } from '../src/dates.js'
 
 const TMP = join(tmpdir(), 'hafez-test-stats-recents-' + Date.now())
-const TODAY = new Date().toISOString().slice(0, 10)
+const TODAY = localDay()
 
 // Commit order deliberately not alphabetical, so an alphabetical or
 // row-order leak can't accidentally pass.

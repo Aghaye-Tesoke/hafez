@@ -1,6 +1,6 @@
 // src/merge.ts
 import { parseContent, serializeFile, ARRAY_FIELDS } from './vault.js'
-import { parseSessionLogHeading, splitLogEntries, documentFor, type DocSection, type Doc } from './document.js'
+import { parseSessionLogHeading, splitLogEntries, documentFor, stripActionStamp, type DocSection, type Doc } from './document.js'
 import { APPEND_ONLY_SECTIONS } from './contracts.js'
 
 // Fields that are ISO date strings — latest date wins
@@ -191,15 +191,17 @@ function mergeNextActions(remoteContent: string, localContent: string): string {
   const remote = parseActionItems(remoteContent)
   const local = parseActionItems(localContent)
 
-  // Start with local items; index by action text for the remote pass
+  // Start with local items; index by action text for the remote pass. Identity
+  // is the unstamped text: one action stamped on two days is one action, and
+  // the local line (its stamp included) wins.
   const merged = local.items.map(i => ({ ...i, notes: [...i.notes] }))
-  const byText = new Map(merged.map(i => [i.text, i]))
+  const byText = new Map(merged.map(i => [stripActionStamp(i.text), i]))
 
   for (const item of remote.items) {
-    const existing = byText.get(item.text)
+    const existing = byText.get(stripActionStamp(item.text))
     if (!existing) {
       merged.push({ ...item, notes: [...item.notes] })
-      byText.set(item.text, merged[merged.length - 1])
+      byText.set(stripActionStamp(item.text), merged[merged.length - 1])
       continue
     }
     // Checked on either side means done
