@@ -316,6 +316,7 @@ describe('the Block and the skills', () => {
         { path: '~/.agents/skills/hafez/SKILL.md', state: 'current' },
         { path: '~/.agents/skills/hafez-save/SKILL.md', state: 'current' },
       ],
+      legacy: [],
     })
     expect(s.steps).toEqual([])
     const out = await text({ home })
@@ -602,5 +603,52 @@ describe('invocation', () => {
     expect(out).toContain('never installs anything')
     expect(out).toMatch(/explicit yes/)
     expect(out).toContain('Never run them unattended.')
+  })
+})
+
+describe('a 1.x section with no markers (#157)', () => {
+  const LEGACY = '## Hafez — Session Memory\n\nThe 1.x snippet, pasted by hand.\n'
+  const REMOVE = 'Remove the Hafez 1.x section in ~/.claude/CLAUDE.md, from its heading `## Hafez — Session Memory` (line 3) to the end of that section, after the user\'s yes. It has no markers, so Hafez does not delete it.'
+
+  it('alone, it is always-on (legacy): the removal, then the always-on install; nothing is written', async () => {
+    const home = makeHome({ files: { [CLAUDE_MD]: `# Mine\n\n${LEGACY}`, '.claude/skills/hafez/SKILL.md': OLD_SKILL } })
+    const before = snapshot(home)
+    const s = await state({ home, env: { CLAUDECODE: '1' } })
+    expect(s.integration!.mode).toBe('always-on')
+    expect(s.integration!.legacy).toEqual([{ harness: 'claude-code', path: '~/.claude/CLAUDE.md', line: 3 }])
+    expect(s.steps).toEqual([
+      { kind: 'action', text: REMOVE },
+      { kind: 'command', text: ONBOARD('always-on') },
+      { kind: 'action', text: 'Re-run `hafez upgrade` to verify.' },
+    ])
+    const out = await text({ home, env: { CLAUDECODE: '1' } })
+    expect(out).toContain('Mode: always-on (legacy: a Hafez 1.x section with no markers).')
+    expect(out).toContain('- Legacy section in ~/.claude/CLAUDE.md, line 3: `## Hafez — Session Memory`')
+    expect(out).not.toContain('invoke-only')
+    expect(snapshot(home)).toEqual(before)
+  })
+
+  it('beside a marked Block, it is still reported, with its removal', async () => {
+    const home = makeHome({ mode: 'always-on' })
+    writeFileSync(join(home, CLAUDE_MD), `# Mine\n\n${LEGACY}\n${readFileSync(join(home, CLAUDE_MD), 'utf-8').replace('# Mine\n', '')}`)
+    const s = await state({ home })
+    expect(s.integration!.mode).toBe('always-on')
+    expect(s.integration!.blocks.map(b => b.state)).toEqual(['current'])
+    expect(s.integration!.legacy).toEqual([{ harness: 'claude-code', path: '~/.claude/CLAUDE.md', line: 3 }])
+    expect(s.steps).toEqual([
+      { kind: 'action', text: REMOVE },
+      { kind: 'action', text: 'Re-run `hafez upgrade` to verify.' },
+    ])
+  })
+
+  it('the heading inside the markers is not a legacy section', async () => {
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: `# Mine\n${region(LEGACY)}` } })
+    expect((await state({ home })).integration!.legacy).toEqual([])
+  })
+
+  it('no legacy section: an empty list, and the Mode as before', async () => {
+    const s = await state({ home: makeHome({ mode: 'invoke-only' }) })
+    expect(s.integration!.legacy).toEqual([])
+    expect(s.integration!.mode).toBe('invoke-only')
   })
 })

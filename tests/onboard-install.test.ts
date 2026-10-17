@@ -208,6 +208,41 @@ describe('onboard --install --mode invoke-only', () => {
   })
 })
 
+describe('onboard --install: a 1.x section in the instructions file (#162)', () => {
+  const LEGACY = '## Hafez — Session Memory\n\nThe 1.x snippet, pasted by hand.\n'
+  const remove = (line: number) => `Remove the Hafez 1.x section in ~/.claude/CLAUDE.md, from its heading \`## Hafez — Session Memory\` (line ${line}) to the end of that section, after the user's yes. It has no markers, so Hafez does not delete it.`
+
+  it('always-on: writes the Block, leaves the section untouched, and names it', () => {
+    const home = makeHome({ [CLAUDE_MD]: USER_TEXT + LEGACY })
+    const out = install(home, 'always-on')
+    expect(get(home, CLAUDE_MD)).toBe(USER_TEXT + LEGACY + BLOCK)
+    expect(out).toContain('Block in ~/.claude/CLAUDE.md: written')
+    expect(String(out).endsWith(`\n\n${remove(4)}`)).toBe(true)
+  })
+
+  it('always-on: names it on a current install too', () => {
+    const home = makeHome({ [CLAUDE_MD]: USER_TEXT + LEGACY })
+    install(home, 'always-on')
+    const out = install(home, 'always-on')
+    expect(out).toContain('Nothing changed: the install is current.')
+    expect(out).toContain(remove(4))
+  })
+
+  it('invoke-only: names it, at its line after the Block is removed', () => {
+    const home = makeHome({ [CLAUDE_MD]: USER_TEXT + BLOCK + LEGACY })
+    const out = install(home, 'invoke-only')
+    expect(get(home, CLAUDE_MD)).toBe(USER_TEXT + LEGACY)
+    expect(out).toContain('Block in ~/.claude/CLAUDE.md: removed (invoke-only)')
+    expect(out).toContain(remove(4))
+  })
+
+  it('prints nothing about it when there is none', () => {
+    const home = makeHome({ [CLAUDE_MD]: USER_TEXT })
+    expect(install(home, 'always-on')).not.toContain('1.x')
+    expect(install(home, 'invoke-only')).not.toContain('1.x')
+  })
+})
+
 describe('onboard --remove', () => {
   it('deletes both skills from both directories and every Block region, and nothing else', () => {
     const home = makeHome({

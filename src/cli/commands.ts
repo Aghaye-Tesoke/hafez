@@ -375,11 +375,11 @@ export async function cmdCreate(os: Hafez, args: string[], opts: CommandOpts = {
   throw new UsageError(`Unknown kind: ${kind}. Use entity or knowledge.`)
 }
 
-const UPDATE_USAGE = 'Usage: hafez update <slug> [--brief text] [--description text] [--resource uri] [--add-action text (repeats)] [--complete-action handle-or-text] [--remove-action handle-or-text] [--clear-actions] [--status <active|paused|done>] [--parent slug] [--log "<progress|decision|blocker|research>: summary" [--body text]]'
+const UPDATE_USAGE = 'Usage: hafez update <slug> [--brief text] [--description text] [--resource uri] [--add-action text (repeats)] [--complete-action handle-or-text (repeats)] [--remove-action handle-or-text (repeats)] [--clear-actions] [--status <active|paused|done>] [--parent slug] [--log "<progress|decision|blocker|research>: summary" [--body text]]'
 /** Exported so tests can assert the table covers the update schema. */
 export const UPDATE_FLAGS: FlagSpec = {
   status: 'string', 'current-state': 'string', brief: 'string',
-  'add-action': 'repeat', 'complete-action': 'string', 'remove-action': 'string',
+  'add-action': 'repeat', 'complete-action': 'repeat', 'remove-action': 'repeat',
   'clear-actions': 'boolean', parent: 'string',
   description: 'string', resource: 'string', domain: 'string', confidence: 'string',
   tags: 'string', related: 'string', insight: 'string', synthesis: 'string',

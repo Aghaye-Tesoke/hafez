@@ -94,6 +94,12 @@ describe('update success: one line saying what changed', () => {
       .toBe(`Updated ${slug}: 1 action ticked, 1 action removed.`)
   })
 
+  it('repeated --complete-action and --remove-action count each', async () => {
+    const slug = await entity(['One', 'Two', 'Three', 'Four', 'Keep'])
+    expect(await cmdUpdate(os, [slug, '--complete-action', 'One', '--complete-action', 'Two', '--remove-action', 'Three', '--remove-action', 'Four']))
+      .toBe(`Updated ${slug}: 2 actions ticked, 2 actions removed.`)
+  })
+
   const KNOWLEDGE_CASES: Array<[string[], string]> = [
     [['--synthesis', 'Rewritten.'], 'synthesis set'],
     [['--insight', 'Rewritten.'], 'synthesis set'],

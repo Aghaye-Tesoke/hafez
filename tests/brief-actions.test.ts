@@ -236,6 +236,72 @@ describe('Next Actions fields composing in one update()', () => {
     const result = await os.update('compose-project', { add_action: 'Plain add @dev' })
     expect(result).toStrictEqual({})
   })
+
+  // #158: the array forms of the two query fields.
+  describe('complete_actions / remove_actions', () => {
+    it('apply every query against the pre-op list and report each match in query order', async () => {
+      const os = makeOS()
+      await os.create('entity', 'Arrays Project', { type: 'project', add_actions: ['A1', 'B2', 'C3', 'D4', 'E5', 'F6'] })
+      const result = await os.update('arrays-project', { remove_action: 'E5', remove_actions: ['D4', 'A1'], complete_actions: ['C3', 'B2'] })
+      expect(result).toStrictEqual({ removed_action: 'E5', removed_actions: ['D4', 'A1'], completed_actions: ['C3', 'B2'] })
+      const { body } = await os.read('arrays-project', 'full')
+      expect(getNextActions(body)).toEqual(['F6'])
+      expect(body.match(/^- \[x\] .*$/gm)?.map(l => l.replace(/ \(added .*\)$/, ''))).toEqual(['- [x] B2', '- [x] C3'])
+    })
+
+    it('batch accepts them; a field outside the shape is still rejected', async () => {
+      const os = makeOS()
+      await os.create('entity', 'Arrays Batch', { type: 'project', add_actions: ['Keep', 'Go', 'Done'] })
+      await os.batch([{ op: 'update', slug: 'arrays-batch', fields: { remove_actions: ['Go'], complete_actions: ['Done'] } }])
+      const { body } = await os.read('arrays-batch', 'full')
+      expect(getNextActions(body)).toEqual(['Keep'])
+      expect(body).toContain('- [x] Done')
+      await expect(os.update('arrays-batch', { complete_action_list: ['Keep'] } as never)).rejects.toMatchObject({ code: 'VALIDATION_FAILED' })
+    })
+
+    it('an update of the array forms alone writes no mechanised session log entry', async () => {
+      const os = makeOS()
+      await os.create('entity', 'Arrays Unlogged', { type: 'project', add_actions: ['One', 'Two', 'Three'] })
+      const before = (await os.read('arrays-unlogged', 'full')).body.match(/^### /gm)?.length ?? 0
+      await os.update('arrays-unlogged', { complete_actions: ['One'], remove_actions: ['Two'] })
+      const after = (await os.read('arrays-unlogged', 'full')).body.match(/^### /gm)?.length ?? 0
+      expect(after).toBe(before)
+    })
+
+    const COLLISIONS: Array<[string, Record<string, unknown>, RegExp]> = [
+      ['inside one array', { remove_actions: ['Alpha', 'alpha'] }, /remove_actions matches "Alpha line" twice/],
+      ['across singular and array', { complete_action: 'Alpha', complete_actions: ['alpha'] }, /complete_action and complete_actions both match "Alpha line"/],
+      ['across remove and complete arrays', { remove_actions: ['Alpha'], complete_actions: ['alpha'] }, /remove_actions and complete_actions both match "Alpha line"/],
+    ]
+    for (const [what, fields, error] of COLLISIONS) {
+      it(`two queries naming one line ${what} fail and write nothing`, async () => {
+        const os = makeOS()
+        const slug = await os.create('entity', `Arrays Collide ${what}`, { type: 'project', add_actions: ['Alpha line', 'Beta line'] })
+        const before = (await os.read(slug, 'full')).body
+        await expect(os.update(slug, fields)).rejects.toMatchObject({ code: 'VALIDATION_FAILED', message: expect.stringMatching(error) })
+        expect((await os.read(slug, 'full')).body).toBe(before)
+      })
+    }
+
+    it('clear_actions with an array query field is rejected', async () => {
+      const os = makeOS()
+      await os.create('entity', 'Arrays Clear', { type: 'project', add_actions: ['Keep'] })
+      await expect(os.update('arrays-clear', { clear_actions: true, remove_actions: ['Keep'] }))
+        .rejects.toThrow(/clear_actions empties the list before remove_actions/)
+      await expect(os.update('arrays-clear', { clear_actions: true, remove_action: 'a', remove_actions: ['b'], complete_actions: ['c'] }))
+        .rejects.toThrow(/before remove_action, remove_actions and complete_actions would run/)
+    })
+
+    it('an empty array is rejected by the shape, not committed as a no-op', async () => {
+      const os = makeOS()
+      await os.create('entity', 'Arrays Empty', { type: 'project', add_actions: ['Keep'] })
+      const before = (await os.read('arrays-empty', 'full')).body
+      for (const fields of [{ complete_actions: [] }, { remove_actions: [] }, { clear_actions: true, remove_actions: [] }]) {
+        await expect(os.update('arrays-empty', fields)).rejects.toMatchObject({ code: 'VALIDATION_FAILED' })
+      }
+      expect((await os.read('arrays-empty', 'full')).body).toBe(before)
+    })
+  })
 })
 
 describe('Next Actions on create (add_actions parity with update)', () => {

@@ -67,7 +67,9 @@ export const UpdateFieldsSchema = z.object({
   add_action: nonEmptyText.optional(),
   add_actions: z.array(nonEmptyText).optional(),
   complete_action: nonEmptyText.optional(),
+  complete_actions: z.array(nonEmptyText).min(1).optional(),
   remove_action: nonEmptyText.optional(),
+  remove_actions: z.array(nonEmptyText).min(1).optional(),
   clear_actions: z.boolean().optional(),
   parent: z.string().optional(),     // entity-only; the slug must exist, no cycle
   // Knowledge metadata
@@ -146,7 +148,7 @@ const CreateSessionBranch = z.object({
 
 /** Update fields the mechanised session log neither counts nor names:
  * ticking a box is not history worth an entry, and `agent` only names it. */
-const UNLOGGED_FIELDS = new Set<keyof UpdateFields>(['add_action', 'add_actions', 'complete_action', 'remove_action', 'clear_actions', 'agent'])
+const UNLOGGED_FIELDS = new Set<keyof UpdateFields>(['add_action', 'add_actions', 'complete_action', 'complete_actions', 'remove_action', 'remove_actions', 'clear_actions', 'agent'])
 
 /** The fields an update's mechanised session log entry names — empty when
  * the update earns none. Shared by the update check (which rejects an
@@ -426,7 +428,7 @@ const OP_SPEC_ROWS = [
     name: 'update',
     op: 'update',
     schema: UpdateBranch,
-    description: 'Update an entity or knowledge note (status, brief, next actions, session log, synthesis, …). Next Actions fields compose within one op as prune, tick, add: `clear_actions` → `remove_action` → `complete_action` → `add_action(s)` — queries match the list as it was before the op (two queries naming one line is an error), added lines land last, so `clear_actions` + `add_actions` rebuilds the list; `clear_actions` with a query field is rejected. Lines leaving the list (removed, cleared, pruned with an emptied section, ticked past nine, oldest first) move to the entity\'s archive log. A Handle of an open action (as `read` shows it, or any longer or shorter prefix of four or more hex that names only that line) names that line; anything else is a case-insensitive substring of the text. `parent` sets the parent link (entity-only; the slug must exist, and the parent chain must not lead back to the entity). `insight` is an alias for `synthesis` (knowledge-only; ignored when `synthesis` is also given). An entity update with no `session_log` gets a `progress` entry naming the fields written, unless its only fields are action fields; `agent` names the agent on it (entity-only, detected from the Harness when absent, rejected alongside `session_log`). On knowledge notes `status` is plan-subtype only (active|done); insights reject it.',
+    description: 'Update an entity or knowledge note (status, brief, next actions, session log, synthesis, …). Next Actions fields compose within one op as prune, tick, add: `clear_actions` → `remove_action(s)` → `complete_action(s)` → `add_action(s)` — queries match the list as it was before the op (two queries naming one line is an error), added lines land last, so `clear_actions` + `add_actions` rebuilds the list; `clear_actions` with a query field is rejected. Lines leaving the list (removed, cleared, pruned with an emptied section, ticked past nine, oldest first) move to the entity\'s archive log. A Handle of an open action (as `read` shows it, or any longer or shorter prefix of four or more hex that names only that line) names that line; anything else is a case-insensitive substring of the text. `parent` sets the parent link (entity-only; the slug must exist, and the parent chain must not lead back to the entity). `insight` is an alias for `synthesis` (knowledge-only; ignored when `synthesis` is also given). An entity update with no `session_log` gets a `progress` entry naming the fields written, unless its only fields are action fields; `agent` names the agent on it (entity-only, detected from the Harness when absent, rejected alongside `session_log`). On knowledge notes `status` is plan-subtype only (active|done); insights reject it.',
     exampleInclude: ['status'],
     check(op: Extract<BatchOperation, { op: 'update' }>, ctx) {
       const errors: string[] = []
@@ -443,9 +445,9 @@ const OP_SPEC_ROWS = [
       // only — on a knowledge note validateKindFields has already rejected
       // the fields themselves, and a second error about their order is noise.
       if (target?.kind === 'entity' && op.fields.clear_actions) {
-        const queries = (['remove_action', 'complete_action'] as const).filter(f => op.fields[f] !== undefined)
+        const queries = (['remove_action', 'remove_actions', 'complete_action', 'complete_actions'] as const).filter(f => op.fields[f] !== undefined)
         if (queries.length > 0) {
-          errors.push(`clear_actions empties the list before ${queries.join(' and ')} would run — drop the clear or use a separate op`)
+          errors.push(`clear_actions empties the list before ${queries.slice(0, -1).join(', ')}${queries.length > 1 ? ' and ' : ''}${queries.at(-1)} would run — drop the clear or use a separate op`)
         }
       }
       // `agent` names the entry the Spine adds; with nothing added it would be

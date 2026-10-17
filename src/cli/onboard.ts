@@ -16,7 +16,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { UsageError, parseArgs, str } from './args.js'
 import { HARNESSES, ONBOARD_HARNESSES, detectAgent, isHarness, isOnboardHarness, type HarnessId, type OnboardHarness } from '../harness.js'
-import { MODES, SKILL_DIRS, fixBrokenMarkers, install, installState, instructionsFile, isMode, remove, type InstallState, type Mode } from './install.js'
+import { MODES, SKILL_DIRS, fixBrokenMarkers, install, installState, instructionsFile, isMode, legacyLine, remove, removeLegacy, type InstallState, type Mode } from './install.js'
 import { noVaultMessage, resolveVaultPath, type ConfigHome } from './resolve-vault.js'
 import { HafezError } from '../types.js'
 import { kindDir, scanVaultDir } from '../vault.js'
@@ -175,6 +175,9 @@ export function renderOnboard({ home, harness, vault }: { home: string; harness:
     ...[{ ...HARNESSES[harness], state }, ...others]
       .filter(h => h.state.block === 'broken')
       .map(h => fixBrokenMarkers(`~/${instructionsFile(home, h.instructions!)}`, 'hafez onboard')),
+    ...[{ ...HARNESSES[harness], state }, ...others]
+      .filter(h => h.state.legacy !== null)
+      .map(h => `${legacyLine(`~/${instructionsFile(home, h.instructions!)}`, h.state.legacy!)}, from Hafez 1.x, with no markers.`),
   ]
 
   // With the install current there is no install step: switching the Mode is
@@ -205,6 +208,8 @@ export function renderOnboard({ home, harness, vault }: { home: string; harness:
     steps.push({
       title: 'Install',
       body: [
+        // Either install leaves the 1.x section in place, beside the Block or alone.
+        ...(state.legacy === null ? [] : [`${removeLegacy(instructionsRel, state.legacy)} Do this before either install below.`, '']),
         `Always-on: ${showBlock}`,
         '',
         'hafez onboard --install --mode always-on',
@@ -218,6 +223,9 @@ export function renderOnboard({ home, harness, vault }: { home: string; harness:
         block,
       ].join('\n'),
     })
+  }
+  if (installCurrent && state.legacy !== null) {
+    steps.push({ title: 'Remove the Hafez 1.x section', body: removeLegacy(instructionsRel, state.legacy) })
   }
   if (!config.allowlist) {
     steps.push({ title: 'Allow the command', body: ITEMS.harnessPermissions.render({ harness, vault }) })

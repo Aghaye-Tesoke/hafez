@@ -107,9 +107,9 @@ Commands:
     --brief "text"           Set/replace Brief (use --brief "" to clear)
     --description "text"     Set one-line description (use --description "" to clear)
     --resource "uri"         Set canonical resource URI, entities only (use --resource "" to clear)
-    --add-action "text"      Add a next action
-    --complete-action handle-or-text  Complete the action with that Handle (as read shows it), else the matching one
-    --remove-action handle-or-text    Remove the action with that Handle, else the matching one
+    --add-action "text"      Add a next action (repeats)
+    --complete-action handle-or-text  Complete the action with that Handle (as read shows it), else the matching one (repeats)
+    --remove-action handle-or-text    Remove the action with that Handle, else the matching one (repeats)
     --clear-actions          Remove all next actions
     --synthesis "text"       Set/replace Synthesis section (--insight is an alias)
     --add-evidence "text"    Append to Evidence section

@@ -321,3 +321,26 @@ describe('bare onboard: usage', () => {
     expect(() => onboard(makeHome(), makeVault(1, 0), {})).toThrow(UsageError)
   })
 })
+
+describe('bare onboard: a 1.x section with no markers (#157)', () => {
+  const LEGACY = '# Mine\n\n## Hafez — Session Memory\n\nThe 1.x snippet, pasted by hand.\n'
+
+  it('names it in the status and puts its removal before the install', () => {
+    const out = onboard(makeHome({ '.claude/CLAUDE.md': LEGACY, '.claude/skills/hafez/SKILL.md': '---\nname: hafez\n---\nold body\n' }), makeVault(3, 0))
+    const status = 'Legacy section in ~/.claude/CLAUDE.md, line 3: `## Hafez — Session Memory`, from Hafez 1.x, with no markers.'
+    expect(out).toContain(status)
+    const removal = out.indexOf('Remove the Hafez 1.x section in ~/.claude/CLAUDE.md, from its heading')
+    expect(removal).toBeGreaterThan(out.indexOf('## 2. Install'))
+    expect(removal).toBeLessThan(out.indexOf('hafez onboard --install --mode always-on'))
+  })
+
+  it('beside a current invoke-only install, the removal is a step of its own', () => {
+    const out = onboard(makeHome({ ...SKILLS_ONLY, '.claude/CLAUDE.md': LEGACY }), makeVault(1, 0))
+    expect(out).not.toContain('## 2. Install')
+    expect(out).toContain('## 2. Remove the Hafez 1.x section\n\nRemove the Hafez 1.x section in ~/.claude/CLAUDE.md, from its heading')
+  })
+
+  it('no legacy section: no legacy line', () => {
+    expect(onboard(makeHome(INSTALLED), makeVault(1, 0))).not.toContain('Legacy section')
+  })
+})

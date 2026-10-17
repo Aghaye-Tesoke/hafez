@@ -167,13 +167,15 @@ export interface UpdateFields {
   agent?: string                     // entity-only; names the agent on the entry added when session_log is absent (default: detected from the Harness)
   brief?: string | null              // string = set/replace, null = remove section
   // Next Actions fields compose within one op as prune, tick, add:
-  // clear_actions → remove_action → complete_action → add_action(s).
+  // clear_actions → remove_action(s) → complete_action(s) → add_action(s).
   // Queries match the list as it was before the op (two queries naming one
   // line is an error); added lines land last.
   add_action?: string                // add one item to Next Actions
   add_actions?: string[]             // add multiple items to Next Actions
   complete_action?: string           // complete the item: an open line's Handle, else a substring (case-insensitive)
+  complete_actions?: string[]        // complete several items, each query as complete_action
   remove_action?: string             // remove the item without completing: Handle or substring, as above
+  remove_actions?: string[]          // remove several items, each query as remove_action
   clear_actions?: boolean            // remove entire Next Actions section (rejected with a query field)
   parent?: string                    // entity-only; sets the parent link (slug must exist)
   // Domain (shared) + knowledge-only metadata
@@ -192,6 +194,8 @@ export interface UpdateFields {
 export interface UpdateResult {
   completed_action?: string              // text of the line complete_action matched, stamp stripped
   removed_action?: string                // text of the line remove_action matched, stamp stripped
+  completed_actions?: string[]           // texts of the lines complete_actions matched, in query order
+  removed_actions?: string[]             // texts of the lines remove_actions matched, in query order
   logged?: true                          // a session log entry was written: given, or mechanised by the Spine
 }
 

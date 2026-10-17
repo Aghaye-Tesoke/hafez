@@ -82,7 +82,7 @@ function today(): string { return localDay() }
 
 // --- Field policy ---
 
-const ENTITY_ONLY_FIELDS: (keyof UpdateFields)[] = ['status', 'add_action', 'add_actions', 'complete_action', 'remove_action', 'clear_actions', 'brief', 'current_state', 'session_log', 'agent', 'resource', 'parent']
+const ENTITY_ONLY_FIELDS: (keyof UpdateFields)[] = ['status', 'add_action', 'add_actions', 'complete_action', 'complete_actions', 'remove_action', 'remove_actions', 'clear_actions', 'brief', 'current_state', 'session_log', 'agent', 'resource', 'parent']
 const KNOWLEDGE_ONLY_FIELDS: (keyof UpdateFields)[] = ['confidence', 'synthesis', 'add_evidence', 'add_source']
 
 // An entity-only field is still reachable on a knowledge note when THAT
@@ -213,8 +213,8 @@ export function buildKnowledgeFrontmatter(name: string, kf: CreateKnowledgeField
 
 // The Next Actions fields are the one group in UpdateFields that all touch
 // the same section, so their order within an op IS their meaning. The
-// contract: prune, tick, add — clear_actions → remove_action →
-// complete_action → add_action → add_actions. Every query is resolved
+// contract: prune, tick, add — clear_actions → remove_action(s) →
+// complete_action(s) → add_action → add_actions. Every query is resolved
 // against the list as it stands after the clear and before any edit, so a
 // query never sees a line another field of the same op removed or added;
 // two queries naming one line is a collision, not a silent overwrite. The
@@ -234,27 +234,51 @@ export function buildKnowledgeFrontmatter(name: string, kf: CreateKnowledgeField
 const ARCHIVE_LIMIT = 10
 
 /** Action lines an update took out of Next Actions, as the file held them. */
-interface ArchivedActions { cleared: string[]; removed?: string; ticked: string[] }
+interface ArchivedActions { cleared: string[]; removed: string[]; ticked: string[] }
 
 function applyNextActionFields(doc: Doc, body: string, fields: UpdateFields): { body: string; result: UpdateResult; archived: ArchivedActions } {
   const result: UpdateResult = {}
   const cleared = fields.clear_actions ? doc.actionLines(body) : []
-  let removedLine: string | undefined
   if (fields.clear_actions) body = doc.clearNextActions(body)
-  const removed = fields.remove_action !== undefined ? doc.matchNextAction(body, fields.remove_action) : undefined
-  const completed = fields.complete_action !== undefined ? doc.matchNextAction(body, fields.complete_action) : undefined
+  type QueryField = 'remove_action' | 'remove_actions' | 'complete_action' | 'complete_actions'
+  const match = (field: QueryField, query: string) => ({ field, match: doc.matchNextAction(body, query) })
+  const removes = [
+    ...(fields.remove_action !== undefined ? [match('remove_action', fields.remove_action)] : []),
+    ...(fields.remove_actions ?? []).map(q => match('remove_actions', q)),
+  ]
+  const completes = [
+    ...(fields.complete_action !== undefined ? [match('complete_action', fields.complete_action)] : []),
+    ...(fields.complete_actions ?? []).map(q => match('complete_actions', q)),
+  ]
   // Caller misuse, not a Spine bug: like no-match and ambiguous (matchNextAction),
   // it depends on the list as the earlier ops of a batch leave it, so it is
   // resolved here rather than in the validate phase.
-  if (removed && completed && removed.line === completed.line) {
-    throw new HafezError('VALIDATION_FAILED', `remove_action and complete_action both match "${removed.text}" — one line, one field`)
+  const seen = new Map<number, QueryField>()
+  for (const { field, match: m } of [...removes, ...completes]) {
+    const first = seen.get(m.line)
+    if (first !== undefined) {
+      throw new HafezError('VALIDATION_FAILED', first === field
+        ? `${field} matches "${m.text}" twice — one line, one query`
+        : `${first} and ${field} both match "${m.text}" — one line, one field`)
+    }
+    seen.set(m.line, field)
   }
-  if (removed) result.removed_action = removed.text
-  if (completed) result.completed_action = completed.text
-  // Both matches are line positions in the pre-edit list. A tick leaves every
-  // position where it was; a removal shifts the lines below it — so tick first.
-  if (completed) body = doc.completeNextAction(body, completed).body
-  if (removed) ({ body, line: removedLine } = doc.removeNextAction(body, removed))
+  // The singular query, when sent, is first in its list; the array form is the rest.
+  const texts = (list: typeof removes) => list.map(q => q.match.text)
+  const removeOffset = fields.remove_action !== undefined ? 1 : 0
+  const completeOffset = fields.complete_action !== undefined ? 1 : 0
+  if (removeOffset) result.removed_action = removes[0].match.text
+  if (fields.remove_actions !== undefined) result.removed_actions = texts(removes.slice(removeOffset))
+  if (completeOffset) result.completed_action = completes[0].match.text
+  if (fields.complete_actions !== undefined) result.completed_actions = texts(completes.slice(completeOffset))
+  // Every match is a line position in the pre-edit list. A tick leaves every
+  // position where it was; a removal shifts the lines below it — so tick
+  // first, then remove bottom-up. The archive keeps query order.
+  for (const { match: m } of completes) body = doc.completeNextAction(body, m).body
+  const removed: string[] = []
+  for (const i of removes.map((_, i) => i).sort((x, y) => removes[y].match.line - removes[x].match.line)) {
+    ({ body, line: removed[i] } = doc.removeNextAction(body, removes[i].match))
+  }
   if (fields.add_action !== undefined) body = addStampedAction(doc, body, fields.add_action)
   if (fields.add_actions !== undefined) {
     for (const action of fields.add_actions) {
@@ -267,7 +291,7 @@ function applyNextActionFields(doc: Doc, body: string, fields: UpdateFields): { 
   return {
     body: doc.pruneNextActions(overflow.body),
     result,
-    archived: { cleared, removed: removedLine, ticked: [...overflow.lines, ...pruned] },
+    archived: { cleared, removed, ticked: [...overflow.lines, ...pruned] },
   }
 }
 
@@ -333,8 +357,8 @@ function archivedActionEntries(archived: ArchivedActions): string[] {
     const n = archived.cleared.length
     entries.push(formatSessionLogEntry({ type: 'progress', agent: 'system', summary: `Cleared ${n} action${plural(n)}`, body: archived.cleared.join('\n') }))
   }
-  if (archived.removed !== undefined) {
-    entries.push(formatSessionLogEntry({ type: 'progress', agent: 'system', summary: 'Removed action', body: archived.removed }))
+  for (const line of archived.removed) {
+    entries.push(formatSessionLogEntry({ type: 'progress', agent: 'system', summary: 'Removed action', body: line }))
   }
   const n = archived.ticked.length
   if (n > 0) {

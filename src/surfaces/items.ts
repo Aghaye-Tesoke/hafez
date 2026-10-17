@@ -235,6 +235,12 @@ const setOrCleared = (field: keyof UpdateFields, name = field.replace(/_/g, ' ')
   return value === null || value === '' || (Array.isArray(value) && value.length === 0) ? `${name} cleared` : `${name} set`
 }
 
+/** `<n> action(s) <verb>` over a Next Actions field's one-line and array forms. */
+function countPhrase(one: string | undefined, many: string[] | undefined, verb: string): string | undefined {
+  const n = (one !== undefined ? 1 : 0) + (many?.length ?? 0)
+  return n > 0 ? `${n} action${n === 1 ? '' : 's'} ${verb}` : undefined
+}
+
 /** What each update field did, for the success line; `null` for a field that
  * changes nothing of its own. Keyed by every update field, so a new field
  * without a phrase fails the build. Key order is the line's order: the
@@ -242,12 +248,11 @@ const setOrCleared = (field: keyof UpdateFields, name = field.replace(/_/g, ' ')
 const CHANGE_PHRASES: Record<keyof UpdateFields, ChangePhrase | null> = {
   session_log: (_f, r) => r.logged ? 'log added' : undefined,
   clear_actions: f => f.clear_actions ? 'actions cleared' : undefined,
-  complete_action: f => f.complete_action !== undefined ? '1 action ticked' : undefined,
-  remove_action: f => f.remove_action !== undefined ? '1 action removed' : undefined,
-  add_actions: f => {
-    const n = (f.add_action !== undefined ? 1 : 0) + (f.add_actions?.length ?? 0)
-    return n > 0 ? `${n} action${n === 1 ? '' : 's'} added` : undefined
-  },
+  complete_action: f => countPhrase(f.complete_action, f.complete_actions, 'ticked'),
+  complete_actions: null, // counted with complete_action
+  remove_action: f => countPhrase(f.remove_action, f.remove_actions, 'removed'),
+  remove_actions: null, // counted with remove_action
+  add_actions: f => countPhrase(f.add_action, f.add_actions, 'added'),
   add_action: null, // counted with add_actions
   brief: setOrCleared('brief'),
   current_state: f => f.current_state !== undefined ? 'current state set' : undefined,

@@ -254,6 +254,8 @@ export const WRITE_LINE_OMITS: Record<Exclude<FooterForm, 'capture'>, Partial<Re
     status: 'a lifecycle change, not a write-back: the `hafez` skill\'s rare ops carry the status line',
     agent: 'detected from the Harness; the override is never shown',
     add_action: 'the one-line form of add_actions, written by the same flag',
+    complete_actions: 'the repeated form of complete_action, written by the same flag',
+    remove_actions: 'the repeated form of remove_action, written by the same flag',
     clear_actions: 'drops lines unseen; the Footer drops one line by its Handle',
     description: SET_AT_CREATE,
     resource: SET_AT_CREATE,

@@ -104,6 +104,31 @@ function findRegion(file: string, displayPath: string): Region | null {
   }
 }
 
+// --- The 1.x section ---
+
+/** The heading 1.2–1.4 `onboard` had the agent paste, with no markers (#157). */
+const LEGACY_HEADING = '## Hafez — Session Memory'
+
+/** The 1-based line of a 1.x section outside the Block region, or null. With
+ * broken markers (`region` undefined) the region is unknown: every line is read. */
+function findLegacy(file: string, region: Region | null | undefined): number | null {
+  let offset = 0
+  const lines = file.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const inside = region != null && offset >= region.start && offset < region.next
+    if (!inside && lines[i].trimEnd() === LEGACY_HEADING) return i + 1
+    offset += lines[i].length + 1
+  }
+  return null
+}
+
+/** What to do about a 1.x section: Hafez cannot tell where it ends. */
+export const removeLegacy = (path: string, line: number) =>
+  `Remove the Hafez 1.x section in ${path}, from its heading \`${LEGACY_HEADING}\` (line ${line}) to the end of that section, after the user's yes. It has no markers, so Hafez does not delete it.`
+
+/** The status line for a 1.x section. */
+export const legacyLine = (path: string, line: number) => `Legacy section in ${path}, line ${line}: \`${LEGACY_HEADING}\``
+
 /** A line diff of the user's Block against the render: ` ` both, `-` theirs
  * only, `+` the render only. */
 function lineDiff(theirs: string, ours: string): string {
@@ -280,18 +305,25 @@ export interface InstallState {
   skills: HashState
   /** Some skill file carries a hash: `onboard --install` has run here. */
   onboarded: boolean
+  /** The line of a 1.x section in the instructions file, else null. */
+  legacy: number | null
 }
 
 export function installState(home: string, harness: HarnessId): InstallState {
   const { instructions } = HARNESSES[harness]
   let block: InstallState['block'] = null
+  let legacy: number | null = null
   if (instructions !== null) {
     const rel = instructionsFile(home, instructions)
+    const text = readInstalled(join(home, rel)) ?? ''
+    let region: Region | null | undefined
     try {
-      block = hashState(findRegion(readInstalled(join(home, rel)) ?? '', `~/${rel}`), RENDERED.text)
+      region = findRegion(text, `~/${rel}`)
+      block = hashState(region, RENDERED.text)
     } catch {
       block = 'broken'
     }
+    legacy = findLegacy(text, region)
   }
   const skills = SKILL_DIRS.flatMap(dir => SKILLS.map(({ name, render }) => {
     const text = readInstalled(join(home, dir, name, 'SKILL.md'))
@@ -301,7 +333,7 @@ export function installState(home: string, harness: HarnessId): InstallState {
   const states = new Set(skills.map(s => s.state))
   const [only] = states
   const merged = states.size === 1 ? only : states.has('hand-edited') ? 'hand-edited' : 'stale'
-  return { block, skills: merged, onboarded: skills.some(s => s.hashed) }
+  return { block, skills: merged, onboarded: skills.some(s => s.hashed), legacy }
 }
 
 // --- The two commands ---
@@ -311,7 +343,8 @@ export function install(opts: { home: string; harness: HarnessId; mode: Mode; co
   const { label, instructions } = HARNESSES[harness]
   const steps = skillSteps(home, 'write')
   const tail: string[] = []
-  if (instructions === null) {
+  const rel = instructions === null ? null : instructionsFile(home, instructions)
+  if (rel === null) {
     if (mode === 'always-on') {
       steps.push({ line: `Block: printed below, for ${label}'s User Rules` })
       tail.push(
@@ -324,14 +357,20 @@ export function install(opts: { home: string; harness: HarnessId; mode: Mode; co
   } else {
     steps.push(blockStep({
       home,
-      rel: instructionsFile(home, instructions),
+      rel,
       want: mode === 'always-on' ? 'write' : 'remove',
       confirm,
       rerun: `hafez onboard --install --harness ${harness} --mode ${mode} --confirm`,
       suffix: mode === 'invoke-only' ? ' (invoke-only)' : '',
     }))
   }
-  return run({ header: `${label}, ${mode}:`, steps, tail, unchanged: 'Nothing changed: the install is current.', listAll: true })
+  const out = run({ header: `${label}, ${mode}:`, steps, tail, unchanged: 'Nothing changed: the install is current.', listAll: true })
+  if (rel === null) return out
+  // A 1.x section loads beside the Block, or in place of invoke-only: named,
+  // never touched (#162). Read after the writes, so its line is where it is now.
+  const text = readInstalled(join(home, rel)) ?? ''
+  const line = findLegacy(text, findRegion(text, `~/${rel}`))
+  return line === null ? out : `${out}\n\n${removeLegacy(`~/${rel}`, line)}`
 }
 
 // --- The check `upgrade` runs: reads, never writes ---
@@ -350,33 +389,41 @@ export interface BlockCheck {
   renderChanged: boolean
 }
 
+export interface LegacyCheck {
+  harness: HarnessId
+  path: string
+  line: number
+}
+
 /** Both skills in both directories, and the Block in the instructions file
  * each Harness reads — the one `--install` would write. Only Blocks that are
- * there are listed: none means invoke-only. */
-export function checkInstall(home: string): { skills: SkillCheck[]; blocks: BlockCheck[] } {
+ * there are listed: none, and no 1.x section, means invoke-only. */
+export function checkInstall(home: string): { skills: SkillCheck[]; blocks: BlockCheck[]; legacy: LegacyCheck[] } {
   const skills = skillFiles(home).map(({ rel, render, text }): SkillCheck => ({
     path: `~/${rel}`,
     state: hashState(text === null ? null : parseSkill(text), render()),
   }))
   const blocks: BlockCheck[] = []
+  const legacy: LegacyCheck[] = []
   for (const [harness, { instructions }] of Object.entries(HARNESSES) as Array<[HarnessId, (typeof HARNESSES)[HarnessId]]>) {
     if (instructions === null) continue
     const rel = instructionsFile(home, instructions)
     const path = `~/${rel}`
     const text = readInstalled(join(home, rel))
     if (text === null) continue
-    let region: Region | null
+    let region: Region | null | undefined
     try {
       region = findRegion(text, path)
     } catch {
       blocks.push({ harness, path, state: 'broken', renderChanged: false })
-      continue
     }
+    const line = findLegacy(text, region)
+    if (line !== null) legacy.push({ harness, path, line })
     if (!region) continue
     const state = hashState(region, RENDERED.text) as BlockCheck['state']
     blocks.push({ harness, path, state, renderChanged: region.hash !== RENDERED.hash })
   }
-  return { skills, blocks }
+  return { skills, blocks, legacy }
 }
 
 /** Remove everything Hafez wrote: both skills from both directories, and the

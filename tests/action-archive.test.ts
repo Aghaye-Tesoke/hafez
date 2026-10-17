@@ -90,6 +90,17 @@ describe('--remove-action archives the removed line', () => {
     await cmdUpdate(os, [slug, '--remove-action', 'Second out'])
     expect(actionLines(archiveOf(slug))).toEqual([`- [ ] First out ${STAMP}`, `- [ ] Second out ${STAMP}`])
   })
+
+  // #158: the query flags repeat like --add-action — one update, one commit.
+  it('repeated --remove-action and --complete-action apply together in one commit, each removed line archived', async () => {
+    const slug = await entityWith(['Drop one', 'Tick one', 'Drop two', 'Stays'])
+    const commits = journal.commits.length
+    const out = await cmdUpdate(os, [slug, '--remove-action', 'Drop one', '--remove-action', 'Drop two', '--complete-action', 'Tick one'])
+    expect(out).toBe(`Updated ${slug}: 1 action ticked, 2 actions removed.`)
+    expect(journal.commits.length).toBe(commits + 1)
+    expect(actionLines(fileOf(slug))).toEqual([`- [x] Tick one ${STAMP}`, `- [ ] Stays ${STAMP}`])
+    expect(actionLines(archiveOf(slug))).toEqual([`- [ ] Drop one ${STAMP}`, `- [ ] Drop two ${STAMP}`])
+  })
 })
 
 describe('ticked overflow', () => {

@@ -30,7 +30,7 @@ import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { UsageError, helpIfAsked } from './args.js'
 import { HARNESSES, detectAgent, isHarness } from '../harness.js'
-import { checkInstall, fixBrokenMarkers, type BlockCheck, type SkillCheck } from './install.js'
+import { checkInstall, fixBrokenMarkers, legacyLine, removeLegacy, type BlockCheck, type LegacyCheck, type SkillCheck } from './install.js'
 
 const PLAIN_SEMVER = /^\d+\.\d+\.\d+$/
 const REGISTRY_TIMEOUT_MS = 3000
@@ -62,11 +62,13 @@ export interface UpgradeState {
   steps: UpgradeStep[]
 }
 
-/** Mode is not stored: a Block present means always-on. */
+/** Mode is not stored: a Block present means always-on, and so does a 1.x
+ * section with no markers (`legacy`). */
 export interface Integration {
   mode: 'always-on' | 'invoke-only'
   blocks: BlockCheck[]
   skills: SkillCheck[]
+  legacy: LegacyCheck[]
 }
 
 export interface UpgradeDeps {
@@ -183,8 +185,8 @@ function devCheckoutStep(packageRoot: string): UpgradeStep {
 
 function readIntegration(home: string): Integration | null {
   try {
-    const { skills, blocks } = checkInstall(home)
-    return { mode: blocks.length > 0 ? 'always-on' : 'invoke-only', blocks, skills }
+    const { skills, blocks, legacy } = checkInstall(home)
+    return { mode: blocks.length > 0 || legacy.length > 0 ? 'always-on' : 'invoke-only', blocks, skills, legacy }
   } catch {
     return null
   }
@@ -208,7 +210,19 @@ function integrationSteps(integration: Integration | null, upgrading: boolean, e
       text: fixBrokenMarkers(b.path, 'hafez upgrade'),
     }))
   }
-  const { blocks, skills } = integration
+  const { blocks, skills, legacy } = integration
+  // The 1.x section goes first: the always-on install writes a Block beside
+  // it, and both would be loaded.
+  const removals: UpgradeStep[] = legacy.map(l => ({ kind: 'action', text: removeLegacy(l.path, l.line) }))
+  const unblocked: UpgradeStep[] = legacy
+    .filter(l => !blocks.some(b => b.harness === l.harness))
+    .map(l => ({ kind: 'command', text: `hafez onboard --install --mode always-on --harness ${l.harness}` }))
+  // With no Block, the always-on install refreshes the skills too.
+  const rest = blocks.length === 0 && legacy.length > 0 ? [] : blockSteps(integration, upgrading, env)
+  return [...removals, ...unblocked, ...rest]
+}
+
+function blockSteps({ blocks, skills }: Integration, upgrading: boolean, env: UpgradeDeps['env']): UpgradeStep[] {
   const skillDrift = skills.some(s => s.state === 'stale' || s.state === 'hand-edited')
   const blockDrift = (b: BlockCheck) => b.state === 'stale' || (b.state === 'hand-edited' && b.renderChanged)
   const installed = blocks.length > 0 || skills.some(s => s.state !== 'absent')
@@ -326,12 +340,13 @@ function integrationLines(integration: Integration | null): string[] {
   if (integration === null) return ['Skills and Block: could not be read.']
   const lines =
     integration.mode === 'always-on'
-      ? ['Mode: always-on (a Block is installed).']
+      ? [integration.blocks.length > 0 ? 'Mode: always-on (a Block is installed).' : 'Mode: always-on (legacy: a Hafez 1.x section with no markers).']
       : [
           'Mode: invoke-only (no Block in any instructions file Hafez writes); installing a Block is not offered.',
           "A Block pasted into Cursor's User Rules lives in its Settings and is not checked here.",
         ]
   for (const b of integration.blocks) lines.push(`- Block in ${b.path}: ${BLOCK_STATE[b.state](b)}`)
+  for (const l of integration.legacy) lines.push(`- ${legacyLine(l.path, l.line)}, from Hafez 1.x, with no markers`)
   for (const s of integration.skills) {
     const lost = s.state === 'hand-edited' ? ' — `onboard --install` replaces it, and the edit is lost' : ''
     lines.push(`- ${s.path}: ${s.state}${lost}`)

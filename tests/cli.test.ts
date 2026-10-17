@@ -437,6 +437,7 @@ describe('exit-code contract (C5)', () => {
     const update = run('update', '-h')
     expect(update.exitCode, update.stderr).toBe(0)
     expect(update.stdout).toContain('Usage: hafez update <slug>')
+    expect(update.stdout).toContain('[--complete-action handle-or-text (repeats)] [--remove-action handle-or-text (repeats)]')
     const read = run('read', 'test-proj', '--help')
     expect(read.exitCode, read.stderr).toBe(0)
     expect(read.stdout.trim()).toBe('Usage: hafez read <slug> [--depth frontmatter|summary|full]')

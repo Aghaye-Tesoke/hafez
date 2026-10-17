@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.1.0 — 2026-10-17
+
+Tick or remove several next actions in one update, and Hafez now finds the
+1.x instructions section that older installs left behind.
+
+### Highlights
+
+- **`--complete-action` and `--remove-action` repeat**, like `--add-action`.
+  One `hafez update` can tick and remove several actions in a single commit,
+  e.g. `--remove-action 4c1e --remove-action 9b20 --complete-action 0a1b`.
+  Every query matches the list as it was before the update; two queries
+  naming the same line are an error. Batch and the library take the array
+  fields `complete_actions` / `remove_actions` (at least one item each).
+  `hafez --help` marks the three repeating flags.
+
+### Fixed
+
+- **A leftover 1.x section is no longer mistaken for invoke-only.** Hafez
+  1.2–1.4 had you paste a `## Hafez — Session Memory` section with no
+  markers. `hafez upgrade` now reports that install as always-on (legacy)
+  and puts the section's removal first; `--json` carries
+  `integration.legacy`. Bare `hafez onboard` names it in the status and
+  puts its removal ahead of the install.
+- **`onboard --install` names the 1.x section too.** In either Mode it
+  still installs, then prints the section's file and line with the removal
+  step, so the old text no longer loads beside the Block unnoticed.
+  Hafez never deletes the section: with no markers, its end is unknown.
+
 ## 2.0.0 — 2026-10-09
 
 The agent contract release. Every surface an agent reads (the Block, both
