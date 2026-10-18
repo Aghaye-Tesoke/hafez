@@ -41,6 +41,7 @@ describe('exit-code contract', () => {
       SLUG_EXISTS: 5,
       GIT_COMMIT_FAILED: 6,
       VAULT_LOCKED: 7,
+      GIT_READ_FAILED: 8,
     })
     for (const [code, exit] of Object.entries(EXIT_CODES)) {
       expect(exitCodeFor(new HafezError(code as any, 'x'))).toBe(exit)

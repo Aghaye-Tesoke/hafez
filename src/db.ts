@@ -2,11 +2,11 @@ import Database from 'better-sqlite3'
 import { createHash } from 'crypto'
 import { readFileSync, statSync, existsSync, unlinkSync } from 'fs'
 import { join, basename } from 'path'
-import { parseFilePath, scanVaultDir, kindDir, INDEXED_KINDS } from './vault.js'
+import { parseFilePath, scanVaultDir, kindDir, INDEXED_KINDS, type VaultKind } from './vault.js'
 import { ensureLocalExclude, type VaultIndexRow } from './knowledge-index.js'
 import { WIKI_LINK_RE, documentForFile } from './document.js'
 import { ENTITY_STATUSES, ENTITY_TYPES, CONFIDENCE_LEVELS, VALID_SUBTYPES, DEFAULT_KNOWLEDGE_SUBTYPE } from './contracts.js'
-import type { SearchResult, VaultStats, EntityStatus, EntityType, QueryResult, KnowledgeQueryResult, UnifiedResult, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, SortField } from './types.js'
+import type { SearchResult, SearchKind, VaultStats, EntityStatus, EntityType, QueryResult, KnowledgeQueryResult, SessionQueryResult, UnifiedResult, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, UnifiedQueryOpts, SortField } from './types.js'
 import { HafezError } from './types.js'
 import { STOPWORDS } from './stopwords.js'
 import { ENTITY_AGE_DAYS_SQL, ENTITY_STALE_SQL } from './stale.js'
@@ -25,8 +25,9 @@ import { localDay } from './dates.js'
 //     rows (REPLACE never fired the delete trigger) and must be rebuilt, not reused.
 // v11: next_action and the searchable body store action text with its
 //     added-date stamp stripped.
+// v12: sessions are indexed (#35); session_date column.
 // Existing instances will fully rebuild the index on first access after upgrade.
-export const SCHEMA_VERSION = '11'
+export const SCHEMA_VERSION = '12'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS items (
@@ -53,7 +54,8 @@ CREATE TABLE IF NOT EXISTS items (
   session_log_count  INTEGER DEFAULT 0,
   last_session_date  TEXT,
   last_session_type  TEXT,
-  last_session_summary TEXT
+  last_session_summary TEXT,
+  session_date       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS links (
@@ -94,7 +96,7 @@ function hashContent(content: string): string {
 
 interface IndexItem {
   slug: string
-  kind: 'entity' | 'knowledge'
+  kind: VaultKind
   name: string
   type: string | null
   status: string | null
@@ -117,6 +119,7 @@ interface IndexItem {
   last_session_date: string | null
   last_session_type: string | null
   last_session_summary: string | null
+  session_date: string | null
 }
 
 export interface IndexQueryResult {
@@ -127,10 +130,10 @@ export interface IndexQueryResult {
 export interface HafezIndex {
   rebuild(): void
   syncIfStale(): void
-  upsertFromFile(slug: string, kind: 'entity' | 'knowledge'): void
+  upsertFromFile(slug: string, kind: VaultKind): void
   removeItem(slug: string): void
   queryItems(opts: QueryOpts): IndexQueryResult
-  search(query: string, kind?: 'entity' | 'knowledge' | 'all'): SearchResult[]
+  search(query: string, kind?: SearchKind): SearchResult[]
   getStats(): VaultStats
   /** Every indexed document, in the shape index.md is rendered from. */
   indexEntries(): VaultIndexRow[]
@@ -142,11 +145,13 @@ export interface HafezIndex {
   queryChildren(parentSlug: string): { items: QueryResult[]; total: number }
   queryRelatedTo(slug: string, relation?: string): { items: UnifiedResult[]; total: number }
   queryKnowledge(opts?: KnowledgeQueryOpts): { items: KnowledgeQueryResult[]; total: number }
+  querySessions(opts?: SessionQueryOpts): { items: SessionQueryResult[]; total: number }
   queryUnified(opts?: UnifiedQueryOpts): { items: UnifiedResult[]; total: number }
 }
 
+/** `kind` unset is the working set, entity + knowledge; `all` is literal. */
 export interface QueryOpts {
-  kind?: 'entity' | 'knowledge' | 'all'
+  kind?: VaultKind | 'all'
   status?: string
   type?: string
   subtype?: string
@@ -161,7 +166,7 @@ export interface QueryOpts {
   createdSince?: string
   createdBefore?: string
   tags?: string[]
-  sort_by?: 'last_touched' | 'created' | 'name' | 'staleness' | 'last_reinforced' | 'reinforcement_count'
+  sort_by?: SortField
   sort_order?: 'asc' | 'desc'
   limit?: number
   offset?: number
@@ -181,8 +186,14 @@ const SORT_COL_MAP: Record<string, string> = {
   staleness: 'i.staleness_days',
   reinforcement_count: 'i.reinforcement_count',
   last_reinforced: 'i.last_reinforced',
+  session_date: 'i.session_date',
 }
-const KNOWLEDGE_ONLY_SORTS = new Set(['reinforcement_count', 'last_reinforced'])
+/** Sort fields one branch cannot honour: the column is NULL for its rows. */
+const SORT_REJECTS: Record<VaultKind, ReadonlySet<string>> = {
+  entity: new Set(['reinforcement_count', 'last_reinforced', 'session_date']),
+  knowledge: new Set(['session_date']),
+  session: new Set(['reinforcement_count', 'last_reinforced', 'last_touched', 'staleness']),
+}
 const SORT_FIELDS = Object.keys(SORT_COL_MAP)
 const SORT_ORDERS = ['asc', 'desc'] as const
 const QUERY_FILTERS = [...ENTITY_STATUSES, 'all', 'stale', 'capture'] as const
@@ -251,13 +262,18 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
   if (opts.kind && opts.kind !== 'all') {
     conditions.push('i.kind = @kind')
     params.kind = opts.kind
+  } else if (!opts.kind) {
+    // Unset is the working set. Sessions are a record of what happened, not
+    // a thing being worked on, and each one names every entity it touched:
+    // in the default view they would crowd out the note being looked for.
+    conditions.push("i.kind != 'session'")
   }
   if (opts.status) {
-    // Status is an entity attribute — knowledge rows are indexed with a NULL
+    // Status is an entity attribute — other kinds are indexed with a NULL
     // status. In a kind-unset (unified) query the status filter narrows the
     // entity side only; applying it to every row is what made `query --kind
     // all` (filter defaults to active) return entities and nothing else.
-    conditions.push(opts.kind === 'entity' ? 'i.status = @status' : "(i.kind = 'knowledge' OR i.status = @status)")
+    conditions.push(opts.kind === 'entity' ? 'i.status = @status' : "(i.kind != 'entity' OR i.status = @status)")
     params.status = opts.status
   }
   if (opts.type) {
@@ -303,12 +319,14 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
     conditions.push("i.type = 'capture'")
   }
 
+  // A session's one day is its session date: the window reads it where an
+  // entity or plan has last_touched.
   if (opts.since) {
-    conditions.push('i.last_touched >= @since')
+    conditions.push('COALESCE(i.last_touched, i.session_date) >= @since')
     params.since = opts.since
   }
   if (opts.before) {
-    conditions.push('i.last_touched <= @before')
+    conditions.push('COALESCE(i.last_touched, i.session_date) <= @before')
     params.before = opts.before
   }
   if (opts.createdSince) {
@@ -337,12 +355,12 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
   assertCount(opts.limit, 'limit')
   assertCount(opts.offset, 'offset')
 
-  let sortCol = 'i.last_touched'
+  let sortCol = opts.kind === 'session' ? 'i.session_date' : 'i.last_touched'
   if (opts.sort_by) {
     // Same rule as the unmappable opts, one code path over: a sort field the
     // branch cannot honour is rejected, not quietly swapped for recency.
-    if (KNOWLEDGE_ONLY_SORTS.has(opts.sort_by) && opts.kind === 'entity') {
-      outOfScope('sort_by', opts.sort_by, 'entity')
+    if (opts.kind && opts.kind !== 'all' && SORT_REJECTS[opts.kind].has(opts.sort_by)) {
+      outOfScope('sort_by', opts.sort_by, opts.kind)
     }
     if (SORT_COL_MAP[opts.sort_by]) sortCol = SORT_COL_MAP[opts.sort_by]
   }
@@ -375,7 +393,7 @@ function queryItemsFn(db: InstanceType<typeof Database>, opts: QueryOpts): Index
                       i.confidence, i.reinforcement_count, i.last_reinforced,
                       i.created, i.last_touched, i.subtype,
                       i.description, i.resource, i.brief, i.session_log_count, i.last_session_date,
-                      i.last_session_type, i.last_session_summary
+                      i.last_session_type, i.last_session_summary, i.session_date
                FROM items i ${where}
                ORDER BY ${sortCol} ${sortOrder}${limitClause}`
 
@@ -408,13 +426,16 @@ function indexEntriesFn(db: InstanceType<typeof Database>): VaultIndexRow[] {
   }))
 }
 
-function searchFn(db: InstanceType<typeof Database>, query: string, kind?: 'entity' | 'knowledge' | 'all'): SearchResult[] {
+function searchFn(db: InstanceType<typeof Database>, query: string, kind?: SearchKind): SearchResult[] {
   const { fts: ftsQuery, terms } = sanitizeFtsQuery(query)
   if (!ftsQuery) return []
 
-  let kindFilter = ''
+  // Same rule as queryItemsFn: unset is the working set, `all` is literal.
+  let kindFilter = "AND i.kind != 'session'"
   const params: Record<string, any> = { query: ftsQuery }
-  if (kind && kind !== 'all') {
+  if (kind === 'all') {
+    kindFilter = ''
+  } else if (kind) {
     kindFilter = 'AND i.kind = @kind'
     params.kind = kind
   }
@@ -662,18 +683,20 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
     INSERT INTO items
       (slug, kind, name, type, status, parent, next_action, next_action_count, staleness_days,
        confidence, reinforcement_count, last_reinforced, created, last_touched, body, file_hash, subtype,
-       description, resource, brief, session_log_count, last_session_date, last_session_type, last_session_summary)
+       description, resource, brief, session_log_count, last_session_date, last_session_type, last_session_summary,
+       session_date)
     VALUES
       (@slug, @kind, @name, @type, @status, @parent, @next_action, @next_action_count, @staleness_days,
        @confidence, @reinforcement_count, @last_reinforced, @created, @last_touched, @body, @file_hash, @subtype,
-       @description, @resource, @brief, @session_log_count, @last_session_date, @last_session_type, @last_session_summary)
+       @description, @resource, @brief, @session_log_count, @last_session_date, @last_session_type, @last_session_summary,
+       @session_date)
   `)
   const deleteItemStmt = db.prepare('DELETE FROM items WHERE slug = ?')
   const deleteLinksStmt = db.prepare('DELETE FROM links WHERE source = ?')
   const insertLinkStmt = db.prepare('INSERT OR IGNORE INTO links (source, target, relation) VALUES (?, ?, ?)')
   const getHashStmt = db.prepare('SELECT file_hash FROM items WHERE slug = ?')
 
-  function indexFile(filePath: string, kind: 'entity' | 'knowledge', knownSlugs?: Set<string>): void {
+  function indexFile(filePath: string, kind: VaultKind, knownSlugs?: Set<string>): void {
     const content = readFileSync(filePath, 'utf-8')
     const slug = basename(filePath, '.md')
     const hash = hashContent(content)
@@ -734,6 +757,8 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       last_session_date: lastLog?.date ?? null,
       last_session_type: lastLog?.type ?? null,
       last_session_summary: lastLog?.summary?.slice(0, 300) ?? null,
+      // A session note's one day; the created stamp when digest gave none.
+      session_date: kind === 'session' ? (fm['session-date'] ?? fm.created) : null,
     }
 
     // Replace item and rebuild links. Delete-then-insert keeps the FTS index
@@ -772,12 +797,12 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
     const linkRe = new RegExp(WIKI_LINK_RE.source, 'g')
     while ((wikiMatch = linkRe.exec(authoredBody)) !== null) {
       const targetSlug = wikiMatch[1]
-      // Check if target file exists on disk (not in index — target may not be indexed yet)
-      const targetEntityPath = join(vaultPath, kindDir('entity'), `${targetSlug}.md`)
-      const targetKnowledgePath = join(vaultPath, kindDir('knowledge'), `${targetSlug}.md`)
+      // Check if target file exists on disk (not in index — target may not be
+      // indexed yet), in every indexed dir — the same set the rebuild's
+      // knownSlugs covers, so a mention links the same way on either path.
       const targetExists = knownSlugs
         ? knownSlugs.has(targetSlug)
-        : existsSync(targetEntityPath) || existsSync(targetKnowledgePath)
+        : INDEXED_KINDS.some(k => existsSync(join(vaultPath, kindDir(k), `${targetSlug}.md`)))
       if (targetExists) {
         insertLinkStmt.run(slug, targetSlug, 'mention')
       }
@@ -792,18 +817,16 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
 
     // Collect all vault slugs for wiki link target validation
     const allVaultSlugs = new Set<string>()
-    for (const file of scanVaultDir(join(vaultPath, kindDir('entity')))) {
-      allVaultSlugs.add(basename(file, '.md'))
-    }
-    for (const file of scanVaultDir(join(vaultPath, kindDir('knowledge')))) {
-      allVaultSlugs.add(basename(file, '.md'))
+    for (const kind of INDEXED_KINDS) {
+      for (const file of scanVaultDir(join(vaultPath, kindDir(kind)))) {
+        allVaultSlugs.add(basename(file, '.md'))
+      }
     }
 
-    for (const file of scanVaultDir(join(vaultPath, kindDir('entity')))) {
-      indexFile(file, 'entity', allVaultSlugs)
-    }
-    for (const file of scanVaultDir(join(vaultPath, kindDir('knowledge')))) {
-      indexFile(file, 'knowledge', allVaultSlugs)
+    for (const kind of INDEXED_KINDS) {
+      for (const file of scanVaultDir(join(vaultPath, kindDir(kind)))) {
+        indexFile(file, kind, allVaultSlugs)
+      }
     }
 
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_sync', ?)")
@@ -865,7 +888,7 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
     }
   }
 
-  function upsertFromFile(slug: string, kind: 'entity' | 'knowledge'): void {
+  function upsertFromFile(slug: string, kind: VaultKind): void {
     const filePath = join(vaultPath, kindDir(kind), `${slug}.md`)
     if (existsSync(filePath)) {
       // Force re-index by clearing cached hash
@@ -898,7 +921,7 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
 
 /** The five read-surface methods exist in exactly one place: attached here
  * over any core index (write-capable or read-only). */
-type IndexCore = Omit<HafezIndex, 'queryEntities' | 'queryChildren' | 'queryRelatedTo' | 'queryKnowledge' | 'queryUnified'>
+type IndexCore = Omit<HafezIndex, 'queryEntities' | 'queryChildren' | 'queryRelatedTo' | 'queryKnowledge' | 'querySessions' | 'queryUnified'>
 
 function withReadSurface(core: IndexCore): HafezIndex {
   const index: HafezIndex = {
@@ -907,6 +930,7 @@ function withReadSurface(core: IndexCore): HafezIndex {
     queryChildren: (parentSlug) => queryEntitiesFn(index, { parent: parentSlug }),
     queryRelatedTo: (slug, relation) => queryRelatedToFn(index, slug, relation),
     queryKnowledge: (opts) => queryKnowledgeFn(index, opts),
+    querySessions: (opts) => querySessionsFn(index, opts),
     queryUnified: (opts) => queryUnifiedFn(index, opts),
   }
   return index
@@ -950,6 +974,23 @@ function toKnowledgeResult(slug: string, row: Record<string, any>): KnowledgeQue
   }
 }
 
+function toSessionResult(slug: string, row: Record<string, any>): SessionQueryResult {
+  return {
+    slug,
+    name: row.name,
+    session_date: row.session_date,
+    created: row.created,
+    related: row.related ?? [],
+  }
+}
+
+/** One row of any kind, shaped for its kind. */
+function toUnifiedResult(i: IndexItem): UnifiedResult {
+  if (i.kind === 'entity') return { ...toQueryResult(i.slug, i), kind: 'entity' }
+  if (i.kind === 'session') return { ...toSessionResult(i.slug, i), kind: 'session' }
+  return { ...toKnowledgeResult(i.slug, i), kind: 'knowledge' }
+}
+
 const STATUS_FILTERS = new Set<string>(ENTITY_STATUSES)
 
 // One mapper per opts family: the entity filter set (entities + unified), the
@@ -960,7 +1001,7 @@ const STATUS_FILTERS = new Set<string>(ENTITY_STATUSES)
 // (both kinds carry it) — mapping it twice is idempotent.
 // Keyed off the knowledge opts, which carry the full sort field set — the
 // entity opts declare only the subset that branch can honour.
-type ListOpts = Pick<KnowledgeQueryOpts, 'tags' | 'sort_by' | 'sort_order' | 'limit' | 'offset'>
+type ListOpts = Pick<KnowledgeQueryOpts, 'tags' | 'sort_order' | 'limit' | 'offset'> & { sort_by?: SortField }
 
 function mapEntityFilterOpts(qopts: QueryOpts, opts?: Pick<EntityQueryOpts, 'filter' | 'type' | 'parent' | 'domain'>): void {
   if (opts?.filter && STATUS_FILTERS.has(opts.filter)) qopts.status = opts.filter
@@ -1003,14 +1044,19 @@ function validateEntityFilterOpts(opts?: Pick<EntityQueryOpts, 'filter' | 'type'
  * Asserted against the CLI's flag matrix in query-surface.test.ts. */
 export const ENTITY_ONLY_OPTS = ['filter', 'type', 'parent'] as const
 export const KNOWLEDGE_ONLY_OPTS = ['confidence', 'subtype'] as const
+/** What a session query cannot map: both sides' opts, and the two every
+ * other kind shares — a session note carries no domain and no tags. */
+export const SESSION_REJECTED_OPTS = [...ENTITY_ONLY_OPTS, ...KNOWLEDGE_ONLY_OPTS, 'domain', 'tags'] as const
 
 /** The one sentence both scope rejections speak — opts here, sort fields in
  * queryItemsFn — so a caller sees the same shape whichever one they hit. */
-function outOfScope(label: string, name: string, branch: 'entity' | 'knowledge'): never {
-  const belongsTo = branch === 'entity' ? 'knowledge notes only' : 'entities only'
+function outOfScope(label: string, name: string, branch: VaultKind): never {
+  const belongsTo = branch === 'entity' ? 'knowledge notes only'
+    : branch === 'knowledge' ? 'entities only'
+    : 'entities and knowledge notes only'
   throw new HafezError(
     'VALIDATION_FAILED',
-    `Invalid ${label} for a ${branch} query: "${name}" — ${belongsTo}. Use kind: 'all' to query both.`,
+    `Invalid ${label} for a ${branch} query: "${name}" — ${belongsTo}. Use kind: 'all' to query every kind.`,
   )
 }
 
@@ -1020,12 +1066,12 @@ function outOfScope(label: string, name: string, branch: 'entity' | 'knowledge')
 export type UnmappableCheckOpts =
   Omit<EntityQueryOpts, 'sort_by'>
   & Omit<KnowledgeQueryOpts, 'sort_by'>
-  & { kind?: 'entity' | 'knowledge' | 'all'; sort_by?: SortField }
+  & { kind?: VaultKind | 'all'; sort_by?: SortField }
 
 function rejectUnmappableOpts(
   opts: Partial<Record<string, unknown>> | undefined,
   reject: readonly string[],
-  branch: 'entity' | 'knowledge',
+  branch: VaultKind,
 ): void {
   if (!opts) return
   // Only a *defined* value is a request — an explicit `undefined` (what a
@@ -1054,17 +1100,11 @@ function queryEntitiesFn(index: HafezIndex, opts?: EntityQueryOpts): { items: Qu
   return { items: items.map(i => toQueryResult(i.slug, i)), total }
 }
 
+/** Every kind: the sessions that touched an entity are the look back from it. */
 function queryRelatedToFn(index: HafezIndex, slug: string, relation?: string): { items: UnifiedResult[], total: number } {
   index.syncIfStale()
-  const { items, total } = index.queryItems({ relatedTo: slug, relation })
-  return {
-    items: items.map(i =>
-      i.kind === 'entity'
-        ? { ...toQueryResult(i.slug, i), kind: 'entity' as const }
-        : { ...toKnowledgeResult(i.slug, i), kind: 'knowledge' as const }
-    ),
-    total,
-  }
+  const { items, total } = index.queryItems({ kind: 'all', relatedTo: slug, relation })
+  return { items: items.map(toUnifiedResult), total }
 }
 
 function queryKnowledgeFn(index: HafezIndex, opts?: KnowledgeQueryOpts): { items: KnowledgeQueryResult[], total: number } {
@@ -1081,6 +1121,18 @@ function queryKnowledgeFn(index: HafezIndex, opts?: KnowledgeQueryOpts): { items
   return { items: items.map(i => toKnowledgeResult(i.slug, i)), total }
 }
 
+function querySessionsFn(index: HafezIndex, opts?: SessionQueryOpts): { items: SessionQueryResult[], total: number } {
+  index.syncIfStale()
+  rejectUnmappableOpts(opts as Record<string, unknown> | undefined, SESSION_REJECTED_OPTS, 'session')
+  validateTimeOpts(opts)
+  validateListOpts(opts)
+  const qopts: QueryOpts = { kind: 'session' }
+  mapTimeOpts(qopts, opts)
+  mapListOpts(qopts, opts)
+  const { items, total } = index.queryItems(qopts)
+  return { items: items.map(i => toSessionResult(i.slug, i)), total }
+}
+
 function queryUnifiedFn(
   index: HafezIndex,
   opts?: UnifiedQueryOpts,
@@ -1091,7 +1143,7 @@ function queryUnifiedFn(
   // an untyped caller (JS, JSON over MCP) reaches here regardless — so widen
   // once, here, and let the checks below speak for both.
   const o = opts as UnmappableCheckOpts | undefined
-  assertEnum(o?.kind, ['entity', 'knowledge', 'all'], 'kind')
+  assertEnum(o?.kind, ['entity', 'knowledge', 'session', 'all'], 'kind')
   validateEntityFilterOpts(o)
   validateKnowledgeFilterOpts(o)
   // Only `kind: 'all'` (or unset) maps both sides. `kind` also narrows this
@@ -1101,23 +1153,16 @@ function queryUnifiedFn(
   // 0 results with exit 0 — the same wrong answer, one function over.
   if (o?.kind === 'entity') rejectUnmappableOpts(o, KNOWLEDGE_ONLY_OPTS, 'entity')
   if (o?.kind === 'knowledge') rejectUnmappableOpts(o, ENTITY_ONLY_OPTS, 'knowledge')
+  if (o?.kind === 'session') rejectUnmappableOpts(o, SESSION_REJECTED_OPTS, 'session')
   validateTimeOpts(o)
   validateListOpts(o)
-  const qopts: QueryOpts = {}
-  if (o?.kind && o.kind !== 'all') qopts.kind = o.kind
-  // When kind is 'all' or unset, no kind filter — both entities and knowledge are returned
+  // Unset is the working set (entity + knowledge); 'all' reaches every kind.
+  const qopts: QueryOpts = { kind: o?.kind }
   mapEntityFilterOpts(qopts, o)
   mapKnowledgeFilterOpts(qopts, o)
   mapTimeOpts(qopts, o)
   mapListOpts(qopts, o)
 
   const result = index.queryItems(qopts)
-  const items: UnifiedResult[] = result.items.map(i => {
-    if (i.kind === 'entity') {
-      return { ...toQueryResult(i.slug, i), kind: 'entity' as const }
-    } else {
-      return { ...toKnowledgeResult(i.slug, i), kind: 'knowledge' as const }
-    }
-  })
-  return { items, total: result.total }
+  return { items: result.items.map(toUnifiedResult), total: result.total }
 }

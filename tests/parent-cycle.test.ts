@@ -2,9 +2,9 @@
 // #130: no path that sets `parent` may make an entity its own ancestor, and
 // `validate` reports a cycle already on disk.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { readEntity } from './helpers/vault-files.js'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -19,7 +19,7 @@ beforeEach(() => {
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 })
 
-afterEach(() => rmSync(TMP, { recursive: true, force: true }))
+afterEach(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })

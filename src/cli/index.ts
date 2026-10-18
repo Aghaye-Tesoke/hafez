@@ -83,6 +83,7 @@ export const EXIT_TABLE: ReadonlyArray<{ exit: number; meaning: string; errorCod
   { exit: 5, meaning: 'slug already exists', errorCodes: ['SLUG_EXISTS'] },
   { exit: 6, meaning: 'git commit failed — nothing was written to history', errorCodes: ['GIT_COMMIT_FAILED'] },
   { exit: 7, meaning: 'vault locked by another hafez process — retry when it finishes', errorCodes: ['VAULT_LOCKED'] },
+  { exit: 8, meaning: "git read failed (changelog, stats) — the vault's git is unusable", errorCodes: ['GIT_READ_FAILED'] },
 ]
 
 export const EXIT_CODES: Record<string, number> = Object.fromEntries(
@@ -94,11 +95,14 @@ export const EXIT_CODES: Record<string, number> = Object.fromEntries(
 export const USAGE = `Usage: hafez <command> [args]
 
 Commands:
-  read <slug>                Read entity or knowledge note
+  read <slug>                Read an entity, knowledge note or session note
+    --archive                An entity's archived log entries
   query [--filter ...] ...   Filter entities/knowledge
-    --kind all               Both kinds; --filter matches entity status only,
-                             so knowledge notes (which have none) always show
-  search <terms>             Full-text search
+    --kind all               Every kind, sessions included; --filter matches
+                             entity status only, so the rest always show
+    --kind session           Session notes alone, newest first
+  search <terms>             Full-text search of entities and knowledge
+    --kind session|all       Session notes alone, or every kind
   create <kind> <name>       Create entity or knowledge note
   capture <name> [--notes]   Quick inbox capture
   promote <slug> <target>    Promote capture→entity/project/knowledge, entity→project
@@ -128,11 +132,14 @@ Commands:
   init --register <path>     Register an existing vault
   init                       Show current vault resolution
   onboard                    Setup status, then the script your agent follows to set Hafez up
-    --install --mode <always-on|invoke-only> [--harness <h>] [--confirm]
+    --install --mode <always-on|invoke-only> [--harness <h>] [--vault-repo <o/r>] [--confirm]
                              Write both skills and, always-on, the Block
+                             (--vault-repo: the cloud Block, which attaches that repo)
     --remove [--confirm]     Remove the skills and the Block region
     --block [--harness <h>]  Print the Block and the entities matching this folder
                              (the SessionStart hook; prints nothing on any failure)
+    --cloud --vault-repo <o/r>
+                             Print the setup script for Claude Code cloud sessions
   upgrade                    Check whether hafez is outdated and print the update steps
   help --agent               The hafez skill body: the reference when the skill is not installed
 
@@ -303,21 +310,25 @@ export async function main(argv: string[]): Promise<void> {
     // isBindingsFailure, exactly as it was when this import was static.
     const { createHafez } = await import('../index.js')
     const os = createHafez({ vaultPath, git: { push: false } })
-    const result = await spec.run(os, args, { json, vaultPath })
+    try {
+      const result = await spec.run(os, args, { json, vaultPath })
 
-    // Auto-sync after mutating commands
-    if (spec.mutating) {
-      try {
-        await os.sync()
-      } catch (syncErr) {
-        // Operation succeeded but sync failed — emit result with warning, exit 4
-        process.stdout.write(result + '\n')
-        process.stderr.write(`Warning: ${(syncErr as HafezError).message ?? (syncErr as Error).message}\n`)
-        process.exit(4)
+      // Auto-sync after mutating commands
+      if (spec.mutating) {
+        try {
+          await os.sync()
+        } catch (syncErr) {
+          // Operation succeeded but sync failed — emit result with warning, exit 4
+          process.stdout.write(result + '\n')
+          process.stderr.write(`Warning: ${(syncErr as HafezError).message ?? (syncErr as Error).message}\n`)
+          process.exit(4)
+        }
       }
-    }
 
-    process.stdout.write(result + '\n')
+      process.stdout.write(result + '\n')
+    } finally {
+      os.close()
+    }
   } catch (err) {
     if (hook) return
     report(err)

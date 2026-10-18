@@ -11,7 +11,7 @@ import { mkdirSync, rmSync, writeFileSync, utimesSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { serializeFile } from '../src/vault.js'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createIndex, __setAfterScanHook } from '../src/db.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { localDay } from '../src/dates.js'
@@ -32,7 +32,7 @@ async function flush(): Promise<void> {
 }
 
 beforeAll(() => { mkdirSync(TMP, { recursive: true }) })
-afterAll(() => { rmSync(TMP, { recursive: true, force: true }) })
+afterAll(() => { removeTemp(TMP) })
 
 describe('rebuildIndex takes the vault write lock', () => {
   it('serializes behind an in-flight mutation instead of interleaving with its write', async () => {
@@ -131,5 +131,22 @@ describe('staleness watermark survives a mid-scan write', () => {
     expect(indexed()).toContain('version-three')
 
     idx.close()
+  })
+})
+
+describe('close() releases the index handle (#184)', () => {
+  it('lets the index file be deleted, and the next call reopens it', async () => {
+    const vault = makeVault('vault-close')
+    const os = createHafez({ vaultPath: vault, persistence: createMemoryJournal() })
+    await os.create('entity', 'Kept', { type: 'project' })
+
+    os.close()
+    os.close()
+    // Windows refuses to delete an open file; POSIX would allow it either way.
+    // The -wal/-shm siblings go too: a leftover WAL beside a fresh db would
+    // read as corruption, not as the open-handle regression this guards.
+    for (const suffix of ['', '-wal', '-shm']) rmSync(join(vault, `.hafez.db${suffix}`), { force: true })
+
+    expect((await os.query({ filter: 'all' })).items.map(i => i.slug)).toEqual(['kept'])
   })
 })

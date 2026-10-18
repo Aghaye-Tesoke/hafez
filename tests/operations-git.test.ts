@@ -4,7 +4,7 @@
 // index + SQLite), and batch commits carrying archival writes. The pure
 // operation logic lives in operations.test.ts against the in-memory Journal.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -31,7 +31,7 @@ beforeAll(async () => {
   await git.push('origin', branch)
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, git: { push: false } })

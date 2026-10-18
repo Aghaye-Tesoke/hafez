@@ -1,8 +1,8 @@
 // tests/brief-actions.test.ts
 // Brief / Next Actions logic against the in-memory Journal — zero git in setup.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
-import { mkdirSync, rmSync } from 'fs'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -16,7 +16,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })

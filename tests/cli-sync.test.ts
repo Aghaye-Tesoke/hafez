@@ -1,6 +1,6 @@
 // tests/cli-sync.test.ts
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { execFileSync } from 'child_process'
+import { execFileSync, spawnSync } from 'child_process'
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -99,5 +99,32 @@ describe('CLI auto-sync', () => {
 
     // Cleanup
     rmSync(local2, { recursive: true, force: true })
+  })
+})
+
+// #203: a read against unusable git must fail loudly, not print an empty changelog.
+describe('CLI changelog on a vault whose git is broken (#203)', () => {
+  const VAULT = join(tmpdir(), 'hafez-test-cli-readfail-' + Date.now())
+
+  beforeAll(async () => {
+    mkdirSync(join(VAULT, 'entities'), { recursive: true })
+    const git = simpleGit(VAULT)
+    await git.init()
+    await git.addConfig('user.email', 'test@test.com')
+    await git.addConfig('user.name', 'Test')
+    writeFileSync(join(VAULT, 'entities', 'a.md'), '---\nname: A\n---\n')
+    await git.add('entities/a.md')
+    await git.commit('create: a')
+    rmSync(join(VAULT, '.git', 'objects'), { recursive: true, force: true })
+    mkdirSync(join(VAULT, '.git', 'objects'))
+  })
+
+  afterAll(() => rmSync(VAULT, { recursive: true, force: true }))
+
+  it('prints the git error on stderr and exits 8', () => {
+    const r = spawnSync('node', [CLI, '--vault', VAULT, 'changelog', '--since', '7.days.ago'], { encoding: 'utf-8' })
+    expect(r.status, r.stdout + r.stderr).toBe(8)
+    expect(r.stderr).toContain('git read failed:')
+    expect(r.stdout).toBe('')
   })
 })

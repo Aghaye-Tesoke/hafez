@@ -10,10 +10,10 @@
 // `scripts/render-surfaces.ts` writes the files; tests/surfaces.test.ts
 // fails on any difference.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { createHafez } from '../../src/index.js'
+import { createHafez, removeTemp } from './hafez.js'
 import { cmdBatch, cmdCreate, cmdRead, cmdUpdate } from '../../src/cli/commands.js'
 import { cmdOnboard } from '../../src/cli/onboard.js'
 import { RenderedError } from '../../src/cli/args.js'
@@ -241,7 +241,7 @@ export async function renderSurfaceFiles(): Promise<Record<SurfaceFile, string>>
   try {
     return await onDay(SAMPLE_DAY, () => renderIn(root))
   } finally {
-    rmSync(root, { recursive: true, force: true })
+    removeTemp(root)
   }
 }
 
@@ -363,9 +363,10 @@ export const blockInner = (): string => renderBlock().split('\n').slice(1, -2).j
 /** The vault path the bare render shows in place of the fixture's. */
 const SHOWN_VAULT = '/home/ana/vault'
 
-/** The three `onboard` renders: the hook's `--block` form on a folder one
+/** The four `onboard` renders: the hook's `--block` form on a folder one
  * entity matches and on one two match; the bare form on a home with nothing
- * installed and Codex found; step 6 on an empty vault; the teaching lines. */
+ * installed and Codex found; step 6 on an empty vault; the teaching lines;
+ * `--cloud`, with the paragraph the cloud Block adds. */
 async function renderOnboard(root: string, vault: string, severalCwd: string): Promise<string> {
   const home = join(root, 'home')
   mkdirSync(join(home, '.config', 'hafez'), { recursive: true })
@@ -394,7 +395,7 @@ async function renderOnboard(root: string, vault: string, severalCwd: string): P
   if (!seeding) throw new Error('onboard on an empty vault has no seeding step')
 
   return [
-    'Three renders from `hafez onboard`. Each fenced block is one complete output.',
+    'Four renders from `hafez onboard`. Each fenced block is one complete output.',
     '',
     '## `hafez onboard --block` (what the SessionStart hook prints)',
     '',
@@ -425,6 +426,14 @@ async function renderOnboard(root: string, vault: string, severalCwd: string): P
     'Invoke-only, line 2:',
     '',
     fence(line2),
+    '',
+    '## `hafez onboard --cloud --vault-repo ana/vault` (the setup script for Claude Code cloud sessions)',
+    '',
+    fence(cmdOnboard(['--cloud', '--vault-repo', 'ana/vault'], { home, env: {} }) as string, '````'),
+    '',
+    'The Block its install line writes is the Block in `block.md` with the repo in its begin marker and one paragraph more, after the first:',
+    '',
+    fence([renderBlock('ana/vault').split('\n')[0], '…', renderBlock('ana/vault').split('\n\n')[2], '…'].join('\n')),
     '',
   ].join('\n')
 }

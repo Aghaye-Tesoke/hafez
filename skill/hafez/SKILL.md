@@ -6,7 +6,7 @@ description: >
   wants to promote, link, unlink, delete, change a status or validate, or
   wants to update or reconfigure Hafez ("upgrade hafez", "set up hafez").
   Also the reference to read when no Hafez block is in your instructions.
-hash: 01a30ae1e209
+hash: 24f12671554e
 ---
 
 # Hafez
@@ -32,9 +32,12 @@ A plan is `--subtype plan` without `--synthesis`. Cannot tell entity from knowle
 
 ```
 hafez query --filter <active|paused|done|stale|capture>
-hafez search "<terms>" --kind <entity|knowledge>
+hafez search "<terms>" --kind <entity|knowledge|session|all>
+hafez query --kind session --related-to <slug>
 hafez stats
 ```
+
+`search` and `query` reach entities and knowledge notes; `--kind all` adds the session notes, `--kind session` lists them alone, newest first. `hafez read <slug> --archive` prints an entity's archived log entries.
 
 ## Less common operations
 

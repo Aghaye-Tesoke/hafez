@@ -1,4 +1,4 @@
-<!-- hafez:begin 6adb94431f00 -->
+<!-- hafez:begin 5fedf39ccb96 -->
 ## Hafez
 
 Hafez is this user's vault: what they are working on (entities) and what they have learned (knowledge). You reach it only through the `hafez` command.
@@ -7,7 +7,8 @@ Hafez is this user's vault: what they are working on (entities) and what they ha
 
 **Write as it happens.** Each of these is due the moment it occurs:
 
-- Work landed (a commit, a merged PR, CI green): update the entity you read. The end of its `read` output shows the command.
+- Work landed (a commit, a merged PR, CI green): update the entity that owns the work. That is the entity you read, unless the work belongs to another: read that one first. The end of its `read` output shows the command.
+- A decision was made: if the repo keeps its own decisions record, write it there now and give Hafez one line that points at it (`hafez update <slug> --log "decision: <one line>, see decisions.md"`). Otherwise it goes in the save's `decisions`.
 - An insight emerged that is useful beyond this repo: create a knowledge note. An insight about this repo's code alone goes in the repo's own docs instead.
 - The user says "note this" or "record that": write it.
 - You are weighing whether something is worth writing: write it, as knowledge with `--confidence observation`.

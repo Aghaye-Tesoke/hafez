@@ -10,23 +10,24 @@
 // frontmatter line hashes everything after the closing `---`.
 
 import { createHash } from 'crypto'
-import { ITEMS, type FolderMatch, type Item, type ItemId, type SurfaceId } from './items.js'
+import { ITEMS, type FolderMatch, type Item, type ItemId, type SurfaceCtx, type SurfaceId } from './items.js'
 
 export interface Surface<Id extends string = ItemId> {
   /** How the owner table names this Surface. */
   label: string
   /** Static Surfaces only: the text, built by placing Items. */
-  compose?: (place: (id: Id) => string) => string
+  compose?: (place: (id: Id) => string, ctx: SurfaceCtx) => string
 }
 
 export const SURFACES: Record<SurfaceId, Surface> = {
   block: {
     label: 'Block',
-    compose: place => [
+    compose: (place, { vaultRepo }) => [
       '## Hafez',
       '',
       'Hafez is this user\'s vault: what they are working on (entities) and what they have learned (knowledge). You reach it only through the `hafez` command.',
       '',
+      ...(vaultRepo === undefined ? [] : [`**Cloud session.** ${place('cloudVault')}`, '']),
       `**Load.** ${place('loadTriggers')}`,
       '',
       '**Write as it happens.** Each of these is due the moment it occurs:',
@@ -106,6 +107,10 @@ export const SURFACES: Record<SurfaceId, Surface> = {
   onboard: { label: '`onboard`' },
 }
 
+/** Every context a static Surface is composed in: the default, and the
+ * Block for a cloud container. */
+const CONTEXTS: SurfaceCtx[] = [{}, { vaultRepo: '<owner>/<repo>' }]
+
 export const contentHash = (text: string): string =>
   createHash('sha256').update(text).digest('hex').slice(0, 12)
 
@@ -116,6 +121,7 @@ function composeWith(
   items: Record<string, Item>,
   surfaceId: string,
   surface: Surface<string>,
+  ctx: SurfaceCtx = {},
   onPlace: (id: string) => void = () => {},
 ): string {
   const place = (id: string): string => {
@@ -123,15 +129,15 @@ function composeWith(
     const item = items[id]
     if (!item) throw new Error(`${surfaceId} places unknown Item ${id}`)
     const text = item.text
-    if (typeof text === 'function') return text(place, item.owner === surfaceId ? 'owner' : 'fallback')
+    if (typeof text === 'function') return text(place, item.owner === surfaceId ? 'owner' : 'fallback', ctx)
     if (text === undefined) throw new Error(`${surfaceId} places ${id}, which has no text`)
     return text
   }
   if (!surface.compose) throw new Error(`${surfaceId} is not a static surface`)
-  return surface.compose(place)
+  return surface.compose(place, ctx)
 }
 
-const compose = (id: SurfaceId) => composeWith(ITEMS, id, SURFACES[id] as Surface<string>)
+const compose = (id: SurfaceId, ctx: SurfaceCtx = {}) => composeWith(ITEMS, id, SURFACES[id] as Surface<string>, ctx)
 
 /** An Item's text as a binary Surface places it at run time, in the form its
  * role there (Owner or fallback) calls for. */
@@ -164,9 +170,13 @@ function skillFile(name: string, description: SurfaceId, body: SurfaceId): strin
   return `---\nname: ${name}\ndescription: >\n${fold(compose(description))}\nhash: ${contentHash(text)}\n---\n${text}`
 }
 
-export function renderBlock(): string {
-  const inner = compose('block')
-  return `<!-- hafez:begin ${contentHash(inner)} -->\n${inner}<!-- hafez:end -->\n`
+/** The Block; with `vaultRepo`, the Block for a cloud container whose vault
+ * is that repo. Its begin marker names the repo, so a check reads it from
+ * there and never from the Block's wording, which a release may change. */
+export function renderBlock(vaultRepo?: string): string {
+  const inner = compose('block', { vaultRepo })
+  const repo = vaultRepo === undefined ? '' : ` vault-repo=${vaultRepo}`
+  return `<!-- hafez:begin ${contentHash(inner)}${repo} -->\n${inner}<!-- hafez:end -->\n`
 }
 
 /** `onboard --block`, what the SessionStart hook prints: the Block, then the
@@ -211,19 +221,24 @@ export function spliceOwnerTable(doc: string): string {
 // --- Drift check 2: the typed Item table ---
 
 /** Every problem with the Item table: an Item with no Owner or no evidence
- * pointer, an Item its Owner or static fallback never places, or one placed more than once in a
- * Surface or in a Surface that is neither its Owner nor its declared fallback.
+ * pointer, an Item its Owner or static fallback never places in any context, or one placed more
+ * than once in a Surface or in a Surface that is neither its Owner nor its declared fallback.
  * Placement is checked for static Surfaces only; binary ones place at run time. */
 export function itemProblems(items: Record<string, Item>, surfaces: Record<string, Surface<string>>): string[] {
   const problems: string[] = []
+  // Per Surface, the most times each Item is placed in one of its contexts.
   const placed: Record<string, Record<string, number>> = {}
   for (const [sid, surface] of Object.entries(surfaces)) {
     if (!surface.compose) continue
-    const counts: Record<string, number> = (placed[sid] = {})
-    try {
-      composeWith(items, sid, surface, id => { counts[id] = (counts[id] ?? 0) + 1 })
-    } catch (err) {
-      problems.push((err as Error).message)
+    const most: Record<string, number> = (placed[sid] = {})
+    for (const ctx of CONTEXTS) {
+      const counts: Record<string, number> = {}
+      try {
+        composeWith(items, sid, surface, ctx, id => { counts[id] = (counts[id] ?? 0) + 1 })
+      } catch (err) {
+        if (!problems.includes((err as Error).message)) problems.push((err as Error).message)
+      }
+      for (const [id, n] of Object.entries(counts)) most[id] = Math.max(most[id] ?? 0, n)
     }
   }
   for (const [id, item] of Object.entries(items)) {

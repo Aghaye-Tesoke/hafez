@@ -54,6 +54,12 @@ export type SurfaceId =
 /** Places another Item inside this one's text, counted against the same Surface. */
 export type Place = (id: string) => string
 
+/** What a static Surface is composed for. `vaultRepo`: the Block for a cloud
+ * container, whose vault is that GitHub repo (#160). */
+export interface SurfaceCtx {
+  vaultRepo?: string
+}
+
 export interface Item {
   /** The Item's row text in the owner table. */
   label: string
@@ -66,7 +72,7 @@ export interface Item {
   evidence: string
   /** Static text. A function form may place nested Items, and may give the
    * fallback a shorter form than the Owner. */
-  text?: string | ((place: Place, at: 'owner' | 'fallback') => string)
+  text?: string | ((place: Place, at: 'owner' | 'fallback', ctx: SurfaceCtx) => string)
   /** What the binary computes: for Items owned by command output, and for a
    * static Item a binary Surface places filled in (the create line in the
    * `read` miss). */
@@ -284,6 +290,20 @@ function renderStaleMarker({ stale, age_days }: ActionAge): string {
   return age_days === null ? ' · stale, undated' : ` · stale ${age_days}d`
 }
 
+/** The `read` header line naming the sessions that touched an entity, with
+ * the look back from it. None: no line. */
+function renderSessionsLine({ slug, count, latest }: { slug: string; count: number; latest: string | null }): string {
+  if (count === 0) return ''
+  return `sessions: ${count}${latest ? ` · latest ${latest}` : ''} · hafez query --kind session --related-to ${slug}`
+}
+
+/** The `read` header line naming an entity's archived log entries, with the
+ * command that reads them. No archive: no line. */
+function renderArchivePointer({ slug, entries }: { slug: string; entries: number }): string {
+  if (entries === 0) return ''
+  return `archive: ${entries} older log ${entries === 1 ? 'entry' : 'entries'} · hafez read ${slug} --archive`
+}
+
 /** The line after an update's success while Stale lines remain on the entity. */
 function renderStaleReminder({ handles }: { handles: string[] }): string {
   const n = handles.length
@@ -355,6 +375,43 @@ function renderTeachingLines({ harness, mode, line2Only = false }: { harness: On
   ].join('\n')
 }
 
+/** A GitHub `<owner>/<repo>`, as one shell word safe to print in a command
+ * and to name a directory by: not `.` or `..`, not a clone URL's `.git`. */
+export const isVaultRepo = (value: string): boolean =>
+  /^[A-Za-z0-9-]+\/[\w.-]+$/.test(value) && !/\/\.\.?$/.test(value) && !value.endsWith('.git')
+
+/** Where a cloud container clones a repo attached to the session. */
+const CLOUD_HOME = '/home/user'
+const repoName = (vaultRepo: string) => vaultRepo.slice(vaultRepo.indexOf('/') + 1)
+
+/** The Block's self-heal rule in a cloud container: a session started without
+ * the vault attached attaches, clones and registers it (verified, #160). */
+function renderCloudVault(vaultRepo: string): string {
+  const path = `${CLOUD_HOME}/${repoName(vaultRepo)}`
+  return `If \`hafez init\` shows no registered vault: attach \`${vaultRepo}\` to this session (add_repo, push access), clone it to ${path}, run \`hafez init --register ${path}\`, then continue. Never create a throwaway vault.`
+}
+
+/** `onboard --cloud`: the cloud environment's setup script. It cannot clone
+ * (it runs without GitHub credentials) and no step may fail session start: a
+ * failed install exits 0, leaving a session without Hafez rather than none. */
+function renderCloudSetup({ vaultRepo }: { vaultRepo: string }): string {
+  return [
+    `Each Claude Code cloud session is a fresh container: no \`hafez\`, no vault, no Block. Paste this into the cloud environment's Setup script; the Trusted network policy is enough.`,
+    '',
+    fence([
+      '#!/bin/bash',
+      'npm install -g hafez --allow-scripts=better-sqlite3 || exit 0',
+      `VAULT=${CLOUD_HOME}/${repoName(vaultRepo)}`,
+      'if [ -d "$VAULT/.git" ]; then',
+      '  hafez init --register "$VAULT"',
+      'fi',
+      `hafez onboard --install --mode always-on --harness claude-code --vault-repo ${vaultRepo} || true`,
+    ].join('\n')),
+    '',
+    `Attach ${vaultRepo} when you start a session, with push access, and the script registers it. The script cannot clone it: it runs without GitHub credentials. A session started without it attached is told by the Block to attach, clone and register it.`,
+  ].join('\n')
+}
+
 const BATCH_EXAMPLE_OP = '{"op":"create","kind":"entity","name":"Token Rotation","fields":{"type":"entity"}}'
 
 export const ITEMS = {
@@ -394,13 +451,28 @@ export const ITEMS = {
     render: ({ slug, description }: { slug: string; description: string | null }): string =>
       description ? `${slug} (${description})` : slug,
   },
+  sessionsLine: {
+    label: 'Sessions line: the look back from an entity',
+    owner: 'readHeader',
+    invokeOnly: 'same',
+    evidence: '#35',
+    render: renderSessionsLine,
+  },
+  archivePointer: {
+    label: 'Archive pointer',
+    owner: 'readHeader',
+    invokeOnly: 'same',
+    evidence: '#34',
+    render: renderArchivePointer,
+  },
   writeTriggers: {
-    label: 'Write triggers: work landed, insight, weighing, "note this"',
+    label: 'Write triggers: work landed, decision made, insight, weighing, "note this"',
     owner: 'block',
     invokeOnly: 'absent',
-    evidence: 'M11, M2, never-ask decision #42',
+    evidence: 'M11, M2, never-ask decision #42, decision-record miss #159',
     text: place => [
-      '- Work landed (a commit, a merged PR, CI green): update the entity you read. The end of its `read` output shows the command.',
+      '- Work landed (a commit, a merged PR, CI green): update the entity that owns the work. That is the entity you read, unless the work belongs to another: read that one first. The end of its `read` output shows the command.',
+      '- A decision was made: if the repo keeps its own decisions record, write it there now and give Hafez one line that points at it (`hafez update <slug> --log "decision: <one line>, see decisions.md"`). Otherwise it goes in the save\'s `decisions`.',
       `- An insight emerged that is useful beyond this repo: create a knowledge note. ${place('knowledgeBoundary')}`,
       '- The user says "note this" or "record that": write it.',
       `- You are weighing whether something is worth writing: write it, as knowledge with \`--confidence ${CONFIDENCE_LEVELS[0]}\`.`,
@@ -574,9 +646,11 @@ export const ITEMS = {
     evidence: 'help decision #49',
     text: fence([
       `hafez query --filter ${oneOf([...ENTITY_STATUSES, 'stale', 'capture'])}`,
-      'hafez search "<terms>" --kind <entity|knowledge>',
+      'hafez search "<terms>" --kind <entity|knowledge|session|all>',
+      'hafez query --kind session --related-to <slug>',
       'hafez stats',
-    ].join('\n')),
+    ].join('\n'))
+      + '\n\n`search` and `query` reach entities and knowledge notes; `--kind all` adds the session notes, `--kind session` lists them alone, newest first. `hafez read <slug> --archive` prints an entity\'s archived log entries.',
   },
   rareOps: {
     label: 'Rare ops: promote, link, unlink, status, delete, validate',
@@ -652,6 +726,22 @@ export const ITEMS = {
     invokeOnly: 'same',
     evidence: 'never-ask decision #42; onboard decision #58',
     render: renderHarnessPermissions,
+  },
+  cloudVault: {
+    label: 'Cloud session: no vault registered, attach the vault repo, clone, register',
+    owner: 'block',
+    invokeOnly: 'absent',
+    evidence: '#160, verified 2026-10-16',
+    // Placed only in a Block composed for a cloud container, whose begin
+    // marker names the repo (renderBlock).
+    text: (_place, _at, { vaultRepo = '<owner>/<repo>' }) => renderCloudVault(vaultRepo),
+  },
+  cloudSetup: {
+    label: 'The cloud environment\'s setup script',
+    owner: 'onboard',
+    invokeOnly: 'not offered',
+    evidence: '#160, verified 2026-10-16',
+    render: renderCloudSetup,
   },
   teachingLines: {
     label: 'The four teaching lines (to the user, not the agent)',

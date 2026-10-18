@@ -7,6 +7,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { parseBatchInput } from '../src/cli/commands.js'
 import { HafezError } from '../src/types.js'
+import { envWithPath } from './helpers/shell-path.js'
 
 describe('parseBatchInput', () => {
   it('parses a valid batch of updates', () => {
@@ -357,9 +358,10 @@ describe('the hafez skill batch example, through a real shell', () => {
     mkdirSync(join(vault, 'knowledge'), { recursive: true })
     await simpleGit(vault).init()
     await simpleGit(vault).commit('init', ['--allow-empty'])
-    const env = { ...process.env, PATH: `${shimDir}:${process.env.PATH}`, HAFEZ_TEST_VAULT: vault }
-    // The example links to a parent it does not create.
-    expect(spawnSync('hafez', ['create', 'entity', 'Auth Refactor', '--type', 'project'], { env, encoding: 'utf-8' }).stdout.trim()).toBe('auth-refactor')
+    const env = envWithPath(shimDir, { HAFEZ_TEST_VAULT: vault })
+    // The example links to a parent it does not create. Through the shell too:
+    // Windows cannot exec the #!/bin/sh shim directly.
+    expect(spawnSync(shell, ['-c', "hafez create entity 'Auth Refactor' --type project"], { env, encoding: 'utf-8' }).stdout.trim()).toBe('auth-refactor')
 
     const prose = JSON.stringify(PROSE).slice(1, -1).replace(/'/g, apostrophe() ?? "'")
     const command = skill.match(/```\n(hafez batch --data '[\s\S]*?)\n```/)![1]

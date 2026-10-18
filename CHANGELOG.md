@@ -1,5 +1,81 @@
 # Changelog
 
+## 2.2.0 — 2026-10-18
+
+Session notes are readable and queryable, the archived log is one flag away
+from its entity, Claude Code cloud sessions get a setup script, and Hafez
+runs natively on Windows.
+
+### Highlights
+
+- **Sessions are indexed.** The notes `hafez-save` writes (`sessions/*.md`)
+  were the one kind the CLI could not read back. `read <session-slug>` shows
+  one (no Footer: a session is written once, never updated). `query --kind
+  session` lists them newest first, with `--since`/`--before`, sort and
+  paging; `query --kind session --related-to <entity>` returns the sessions
+  that touched an entity, and the entity's `read` header carries a
+  `sessions:` line (count, latest day, that query) while any did. The
+  library gains `query_sessions()`. The index rebuilds once on first use.
+- **`read <entity> --archive` prints the archived log.** The entries
+  `entities/archive/<slug>-log.md` holds, as written. The archive stays out
+  of the index and out of search; it is reached from its entity on purpose.
+  The entity's header carries an `archive:` line (entry count, the command)
+  while the file exists. Library: `archive(slug)`.
+- **`hafez onboard --cloud --vault-repo <owner>/<repo>`** prints the setup
+  script for a Claude Code cloud session: it installs Hafez, registers the
+  vault when it is attached, and writes a Block with one rule more, which
+  attaches, clones and registers the repo when a session starts without a
+  vault. The script never clones the vault itself (no credentials at
+  setup); no step fails session start. `onboard`, `upgrade` and the
+  install check recognise a cloud Block by its begin marker.
+- **Native Windows.** The suite is green on Windows and CI runs it there.
+  Fixed on the way: a `promote` left its source deletion unstaged and the
+  tree dirty; `index.md` was never regenerated; `stats` recents missed the
+  same-day tie-break; `onboard --block` never matched a resource equal to
+  the git root (git's `C:/` against `C:\`); `changelog --since` and
+  `query --since` could disagree about where a day starts. Checkouts are
+  LF everywhere (`.gitattributes`).
+- **`Hafez.close()`** releases the SQLite index handle (idempotent; the
+  next call reopens it). Call it before deleting a vault: Windows cannot
+  remove a directory holding an open file. The CLI closes its instance on
+  every entry point.
+
+### Fixed
+
+- **A push or sync that hit a vault-file conflict could hang** waiting for
+  an editor. Hafez's own git calls now run with `GIT_EDITOR=true`, which
+  outranks `core.editor`, `VISUAL` and `EDITOR`.
+
+### Changed
+
+- **`--kind all` is literal: sessions included.** `search` and `query`
+  default to the working set, entities and knowledge, so a session note
+  (which names every entity it touched) never crowds out the note being
+  looked for. `--kind session` reaches them alone. `--related-to` narrows
+  by `--kind`; `delete` removes a session note; `validate` counts sessions
+  and reports a broken `related` (a session with no `related` is never an
+  orphan). A `read` miss offers session slugs among the closest; a create
+  cannot take a slug a session holds.
+- **Git read failures throw instead of reading as empty.** `changelog` and
+  `stats` on a vault whose git is unusable (not a repository, a `GIT_DIR`
+  pointing elsewhere, a gitfile whose worktree is gone) now fail with
+  `GIT_READ_FAILED`, exit 8, carrying git's message. Only an unborn
+  history reads as empty.
+- **The Block gains a decision trigger.** A decision made goes into the
+  repo's own decisions record when it keeps one, with a decision log entry
+  on the owning entity; otherwise into the save's decisions, as before.
+  "Work landed" now targets the entity that owns the work, not the one
+  read this session. `hafez upgrade` reports an installed Block as stale
+  once; `hafez onboard --install` refreshes it.
+
+### Security
+
+- **simple-git 4** closes GHSA-x6jw-m9v5-85vh (critical),
+  GHSA-858h-whjf-mvg5, GHSA-g4wm-2vf7-vfgr and GHSA-v5rq-49vh-5v5c. Its
+  child-env guard is opened in full, so a shell's `GIT_SSH_COMMAND`,
+  `GIT_AUTHOR_*`, `GIT_EXEC_PATH` or `GIT_CONFIG_*` still reaches git as
+  it did before. js-yaml, nanoid and source-map-js patched alongside.
+
 ## 2.1.0 — 2026-10-17
 
 Tick or remove several next actions in one update, and Hafez now finds the

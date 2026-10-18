@@ -4,11 +4,11 @@
 // is validated, and sort/limit/offset never reach raw SQL unchecked.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFileSync } from 'child_process'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createHafez } from '../src/index.js'
-import { createIndex, ENTITY_ONLY_OPTS, KNOWLEDGE_ONLY_OPTS, type HafezIndex } from '../src/db.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { createIndex, ENTITY_ONLY_OPTS, KNOWLEDGE_ONLY_OPTS, SESSION_REJECTED_OPTS, type HafezIndex } from '../src/db.js'
 import { serializeFile } from '../src/vault.js'
 import { cmdQuery, QUERY_FLAG_NAMES, QUERY_FLAG_SUPPORT, type QueryBranch } from '../src/cli/commands.js'
 import { UsageError } from '../src/cli/args.js'
@@ -40,7 +40,7 @@ beforeAll(() => {
   writeKnowledge('kn-obs', { name: 'Kn Obs', created: '2026-06-01', domain: ['ai'], confidence: 'observation', subtype: 'insight' })
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })
@@ -230,10 +230,18 @@ describe('--related-to rejects the flags it cannot apply', () => {
     expect(out).toHaveProperty('items')
   })
 
-  it('rejects --limit / --filter / --kind instead of dropping them', async () => {
+  it('rejects --limit / --filter instead of dropping them', async () => {
     await expect(cmdQuery(makeOS(), ['--related-to', 'active-proj', '--limit', '1'], { json: true })).rejects.toThrow(/--limit/)
     await expect(cmdQuery(makeOS(), ['--related-to', 'active-proj', '--filter', 'active'], { json: true })).rejects.toThrow(/--filter/)
-    await expect(cmdQuery(makeOS(), ['--related-to', 'active-proj', '--kind', 'all'], { json: true })).rejects.toThrow(/--kind/)
+  })
+
+  it('--kind narrows to one kind; an unknown kind is rejected', async () => {
+    const all = JSON.parse(await cmdQuery(makeOS(), ['--related-to', 'active-proj', '--kind', 'all'], { json: true }))
+    expect(all).toHaveProperty('items')
+    const knowledge = JSON.parse(await cmdQuery(makeOS(), ['--related-to', 'active-proj', '--kind', 'knowledge'], { json: true }))
+    expect(knowledge.items.every((i: any) => i.kind === 'knowledge')).toBe(true)
+    expect(knowledge.total).toBe(knowledge.items.length)
+    await expect(cmdQuery(makeOS(), ['--related-to', 'active-proj', '--kind', 'bogus'], { json: true })).rejects.toThrow(/--kind must be one of/)
   })
 })
 
@@ -324,14 +332,16 @@ describe('query flag × kind branch matrix', () => {
   const FLAG_TO_OPT: Record<string, string> = {
     filter: 'filter', type: 'type', parent: 'parent',
     confidence: 'confidence', subtype: 'subtype',
+    domain: 'domain', tag: 'tags',
   }
 
   it('the CLI flag matrix and the read surface opt matrix are the same rule', () => {
-    const rejected: Record<'entity' | 'knowledge', readonly string[]> = {
+    const rejected: Record<'entity' | 'knowledge' | 'session', readonly string[]> = {
       entity: KNOWLEDGE_ONLY_OPTS,
       knowledge: ENTITY_ONLY_OPTS,
+      session: SESSION_REJECTED_OPTS,
     }
-    for (const branch of ['entity', 'knowledge'] as const) {
+    for (const branch of ['entity', 'knowledge', 'session'] as const) {
       const cliRejects = Object.keys(FLAG_TO_OPT)
         .filter(f => !QUERY_FLAG_SUPPORT[branch].includes(f))
         .map(f => FLAG_TO_OPT[f])
@@ -356,6 +366,7 @@ describe('query flag × kind branch matrix', () => {
   const branches: Array<{ branch: QueryBranch; base: string[] }> = [
     { branch: 'entity', base: [] },
     { branch: 'knowledge', base: ['--kind', 'knowledge'] },
+    { branch: 'session', base: ['--kind', 'session'] },
     { branch: 'all', base: ['--kind', 'all'] },
     { branch: 'related-to', base: ['--related-to', 'active-proj'] },
   ]

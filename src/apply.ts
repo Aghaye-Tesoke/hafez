@@ -18,8 +18,8 @@
 // pure (no filesystem access); the frontmatter builders live here and are
 // exported so the batch validate phase can run them against a simulated vault.
 import { writeFileSync, existsSync, mkdirSync, appendFileSync, unlinkSync } from 'fs'
-import { join, relative, dirname } from 'path'
-import { parseFilePath, serializeFile, slugify, resolveFilePath, kindFromPath, kindDir, archiveLogPath, findVaultFile, vaultFileExists } from './vault.js'
+import { join, dirname } from 'path'
+import { parseFilePath, serializeFile, slugify, resolveFilePath, vaultRel, kindFromPath, kindDir, archiveLogPath, findVaultFile, vaultFileExists, type VaultKind } from './vault.js'
 import { validateEntityFrontmatter, validateKnowledgeFrontmatter } from './schema.js'
 import { bodyTemplate, knowledgeBodyTemplate, sessionBodyTemplate } from './templates.js'
 import { formatSessionLogEntry, stampAction, documentFor, documentForFile, type Doc } from './document.js'
@@ -40,7 +40,7 @@ export interface AppliedOp {
   result: BatchResult
   commitMessage: string
   indexRemovals: string[]
-  indexUpserts: Array<{ slug: string; kind: 'entity' | 'knowledge' }>
+  indexUpserts: Array<{ slug: string; kind: VaultKind }>
   /** Set by the update arm: the line each Next Actions query matched. */
   updateResult?: UpdateResult
   /** Set by the delete arm: the kind of note it removed. */
@@ -424,8 +424,8 @@ function applyUpdate(op: Extract<BatchOperation, { op: 'update' }>, ctx: ApplyCo
   // Only the files THIS update wrote. Keying off the archive file merely
   // existing swept any external hand-edit sitting in entities/archive/
   // into an unrelated commit.
-  const files = [relative(vaultPath, filePath)]
-  if (wroteArchive) files.push(relative(vaultPath, archivePath))
+  const files = [vaultRel(vaultPath, filePath)]
+  if (wroteArchive) files.push(vaultRel(vaultPath, archivePath))
 
   return {
     filesWritten: files,
@@ -454,7 +454,7 @@ function applyCreateEntity(op: Extract<BatchOperation, { op: 'create'; kind: 'en
   body = documentFor({ kind: 'entity' }).syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
   return {
-    filesWritten: [relative(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath)],
     filesDeleted: [],
     result: { op: 'create', slug, status: 'ok', created: true },
     commitMessage: `create: ${op.name}`,
@@ -476,7 +476,7 @@ function applyCreateKnowledge(op: Extract<BatchOperation, { op: 'create'; kind: 
   body = documentFor({ kind: 'knowledge' }).syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
   return {
-    filesWritten: [relative(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath)],
     filesDeleted: [],
     result: { op: 'create', slug, status: 'ok', created: true },
     commitMessage: `create: ${op.name}`,
@@ -509,15 +509,13 @@ function applyCreateSession(op: Extract<BatchOperation, { op: 'create'; kind: 's
   let sessionBody = sessionBodyTemplate({ synthesis: kf.synthesis })
   sessionBody = documentFor({ kind: 'session' }).syncRelatedSection(sessionBody, fm)
   writeFileSync(filePath, serializeFile(fm, sessionBody))
-  // Sessions are not indexed (db.ts only scans entities/ and knowledge/).
-  // They ARE included in git semantic merge (git.ts VAULT_FILE_RE).
   return {
-    filesWritten: [relative(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath)],
     filesDeleted: [],
     result: { op: 'create', slug, status: 'ok', created: true },
     commitMessage: `create: ${op.name}`,
     indexRemovals: [],
-    indexUpserts: [],
+    indexUpserts: [{ slug, kind: 'session' }],
   }
 }
 
@@ -537,7 +535,7 @@ function applyCapture(op: Extract<BatchOperation, { op: 'capture' }>, ctx: Apply
   mkdirSync(join(vaultPath, kindDir('entity')), { recursive: true })
   writeFileSync(filePath, serializeFile(fm, bodyTemplate('capture', { notes: op.notes })))
   return {
-    filesWritten: [relative(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath)],
     filesDeleted: [],
     result: { op: 'capture', slug, status: 'ok', created: true },
     commitMessage: `capture: ${op.name}`,
@@ -566,7 +564,7 @@ function applyLink(op: Extract<BatchOperation, { op: 'link' }>, ctx: ApplyContex
   body = documentForFile(parsedFile).syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
   return {
-    filesWritten: [relative(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath)],
     filesDeleted: [],
     result: { op: 'link', slug: op.slug, status: 'ok' },
     commitMessage: `link: ${op.slug} → ${op.target} (${op.relation})`,
@@ -594,7 +592,7 @@ function applyUnlink(op: Extract<BatchOperation, { op: 'unlink' }>, ctx: ApplyCo
   body = documentForFile(parsedFile).syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
   return {
-    filesWritten: [relative(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath)],
     filesDeleted: [],
     result: { op: 'unlink', slug: op.slug, status: 'ok' },
     commitMessage: `unlink: ${op.slug} ✕ ${op.target} (${op.relation})`,
@@ -655,10 +653,10 @@ function applyPromote(op: Extract<BatchOperation, { op: 'promote' }>, ctx: Apply
         `Failed to promote '${op.slug}' to knowledge: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
-    modifiedFiles.push(relative(vaultPath, newPath))
+    modifiedFiles.push(vaultRel(vaultPath, newPath))
     // The deletion must be staged too — `git add` of a removed path stages
     // the removal; omitting it leaves the vault permanently dirty.
-    deletedFiles.push(relative(vaultPath, filePath))
+    deletedFiles.push(vaultRel(vaultPath, filePath))
   } else {
     // Same-kind: capture→entity, capture→project, entity→project
     fm.type = op.target
@@ -685,7 +683,7 @@ function applyPromote(op: Extract<BatchOperation, { op: 'promote' }>, ctx: Apply
 
     newBody = doc.syncRelatedSection(newBody, fm)
     writeFileSync(filePath, serializeFile(fm, newBody))
-    modifiedFiles.push(relative(vaultPath, filePath))
+    modifiedFiles.push(vaultRel(vaultPath, filePath))
   }
 
   return {
@@ -711,11 +709,10 @@ function applyDelete(op: Extract<BatchOperation, { op: 'delete' }>, ctx: ApplyCo
   unlinkSync(filePath)
   return {
     filesWritten: [],
-    filesDeleted: [relative(vaultPath, filePath)],
+    filesDeleted: [vaultRel(vaultPath, filePath)],
     result: { op: 'delete', slug: op.slug, status: 'ok' },
     commitMessage: `delete: ${op.slug} (${kind})`,
-    // Sessions are not indexed; a knowledge row goes with its file.
-    indexRemovals: kind === 'knowledge' ? [op.slug] : [],
+    indexRemovals: [op.slug],
     indexUpserts: [],
     deletedKind: kind,
   }

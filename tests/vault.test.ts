@@ -1,6 +1,6 @@
 // tests/vault.test.ts
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { parseFilePath, parseContent, serializeFile, slugify, resolveFilePath, kindFromPath, vaultKindFromPath, vaultKindFromRelPath } from '../src/vault.js'
+import { parseFilePath, parseContent, serializeFile, slugify, resolveFilePath, vaultRel, archiveLogPath, kindFromPath, vaultKindFromPath, vaultKindFromRelPath } from '../src/vault.js'
 import { writeFileSync, mkdirSync, rmSync } from 'fs'
 import { join, posix, win32 } from 'path'
 import { tmpdir } from 'os'
@@ -29,10 +29,11 @@ describe('slugify', () => {
 
 describe('resolveFilePath', () => {
   it('resolves entity path', () => {
-    expect(resolveFilePath('/vault', 'simorgh', 'entity')).toBe('/vault/entities/simorgh.md')
+    // An absolute path, so OS-native: '\' on Windows.
+    expect(resolveFilePath('/vault', 'simorgh', 'entity')).toBe(join('/vault', 'entities', 'simorgh.md'))
   })
   it('resolves knowledge path', () => {
-    expect(resolveFilePath('/vault', 'my-pattern', 'knowledge')).toBe('/vault/knowledge/my-pattern.md')
+    expect(resolveFilePath('/vault', 'my-pattern', 'knowledge')).toBe(join('/vault', 'knowledge', 'my-pattern.md'))
   })
 
   // SEC-1: slugs are path components — anything that can escape the vault must throw
@@ -56,6 +57,14 @@ describe('resolveFilePath', () => {
     for (const slug of ['simorgh', 'my-pattern', 'v1.0-notes', 'some_slug', 'A-Mixed-Case', 'my note', '日本語のメモ']) {
       expect(() => resolveFilePath('/vault', slug, 'entity'), `slug: ${slug}`).not.toThrow()
     }
+  })
+})
+
+describe('vaultRel', () => {
+  // The Journal's spelling: '/' even where resolveFilePath's is '\' (#187).
+  it('inverts resolveFilePath and archiveLogPath as a / path', () => {
+    expect(vaultRel('/vault', resolveFilePath('/vault', 'simorgh', 'entity'))).toBe('entities/simorgh.md')
+    expect(vaultRel('/vault', archiveLogPath('/vault', 'simorgh'))).toBe('entities/archive/simorgh-log.md')
   })
 })
 

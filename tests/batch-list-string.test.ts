@@ -4,8 +4,8 @@
 // takes it too, split the CLI's way (splitList: trim, drop empties); an array
 // is still accepted as is.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
-import { mkdirSync, rmSync, readFileSync } from 'fs'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { parseContent } from '../src/vault.js'
@@ -22,7 +22,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'sessions'), { recursive: true })
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })

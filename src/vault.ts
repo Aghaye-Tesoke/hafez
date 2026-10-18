@@ -2,7 +2,7 @@
 import matter from 'gray-matter'
 import yaml from 'js-yaml'
 import { readFileSync, readdirSync, existsSync } from 'fs'
-import { join } from 'path'
+import { join, relative, sep } from 'path'
 import { HafezError } from './types.js'
 import type { ParsedVaultFile, EntityFrontmatter, KnowledgeFrontmatter, SessionFrontmatter } from './types.js'
 
@@ -30,8 +30,13 @@ export type VaultKind = 'entity' | 'knowledge' | 'session'
 
 const KIND_DIRS = { entity: 'entities', knowledge: 'knowledge', session: 'sessions' } as const
 
-/** Kinds that live in the SQLite read index (sessions are files-and-git only). */
-export const INDEXED_KINDS: ReadonlyArray<'entity' | 'knowledge'> = ['entity', 'knowledge']
+/** Kinds that live in the SQLite read index: every kind. Sessions joined in
+ * #35 — before that they were files-and-git only, for no recorded reason. */
+export const INDEXED_KINDS: ReadonlyArray<VaultKind> = ['entity', 'knowledge', 'session']
+
+/** The two kinds a mutation can address. A session note is written once and
+ * read; `update`, `link`, `promote` never resolve one. */
+export const MUTABLE_KINDS: ReadonlyArray<'entity' | 'knowledge'> = ['entity', 'knowledge']
 
 /** Vault directory for a kind, relative to the vault root. */
 export function kindDir(kind: VaultKind): string {
@@ -41,9 +46,9 @@ export function kindDir(kind: VaultKind): string {
 /** A vault content file: anything a sync/merge must treat semantically. */
 export const VAULT_FILE_RE = new RegExp(`^(?:${Object.values(KIND_DIRS).join('|')})/.+\\.md$`)
 
-/** True for vault-relative paths whose kind lives in the read index. */
-export function isIndexedRelPath(relPath: string): boolean {
-  return INDEXED_KINDS.some(k => relPath.startsWith(`${KIND_DIRS[k]}/`))
+/** True for vault-relative paths of a mutable kind — what index.md shows. */
+export function isMutableRelPath(relPath: string): boolean {
+  return MUTABLE_KINDS.some(k => relPath.startsWith(`${KIND_DIRS[k]}/`))
 }
 
 /** History pathspecs covering the indexed dirs (changelog, file times). */
@@ -52,7 +57,7 @@ export const INDEXED_DIR_PATHSPECS: ReadonlyArray<string> = INDEXED_KINDS.map(k 
 /** Classify a vault-relative path into an indexed kind + slug; null outside
  * the indexed dirs (sessions, non-vault files). Nested paths keep their
  * historical shape: entities/archive/x-log.md → entity 'archive/x-log'. */
-export function classifyIndexedRelPath(relPath: string): { kind: 'entity' | 'knowledge'; slug: string } | null {
+export function classifyIndexedRelPath(relPath: string): { kind: VaultKind; slug: string } | null {
   for (const kind of INDEXED_KINDS) {
     const prefix = `${KIND_DIRS[kind]}/`
     if (relPath.startsWith(prefix)) {
@@ -88,14 +93,32 @@ export function resolveFilePath(vaultPath: string, slug: string, kind: VaultKind
   return join(vaultPath, KIND_DIRS[kind], `${slug}.md`)
 }
 
-/** The file a slug names, or null — entities are resolved before knowledge,
- * the one resolution order every operation sees. */
+/** The inverse of resolveFilePath / archiveLogPath: a vault file as the
+ * Journal names it — vault-relative and '/'-separated on every platform.
+ * Everything downstream compares these lists as POSIX paths: stageablePaths
+ * (src/git.ts) keeps an absent path only if `git ls-files` echoes it back,
+ * always with '/', so a '\' deletion was dropped and never staged; and the
+ * index.md gate (isMutableRelPath) never matched a '\' path (#187). */
+export function vaultRel(vaultPath: string, filePath: string): string {
+  return relative(vaultPath, filePath).split(sep).join('/')
+}
+
+/** The mutable file a slug names, or null — entities are resolved before
+ * knowledge, the one resolution order every mutation sees. */
 export function findVaultFile(vaultPath: string, slug: string): string | null {
   const entity = resolveFilePath(vaultPath, slug, 'entity')
   if (existsSync(entity)) return entity
   const knowledge = resolveFilePath(vaultPath, slug, 'knowledge')
   if (existsSync(knowledge)) return knowledge
   return null
+}
+
+/** The file `read` resolves: the mutable kinds first, then a session note. */
+export function findReadableFile(vaultPath: string, slug: string): string | null {
+  const mutable = findVaultFile(vaultPath, slug)
+  if (mutable) return mutable
+  const session = resolveFilePath(vaultPath, slug, 'session')
+  return existsSync(session) ? session : null
 }
 
 /** Does this slug name a vault file? An invalid slug definitionally doesn't

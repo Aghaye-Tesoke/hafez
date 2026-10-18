@@ -3,7 +3,7 @@
 // Persistence-layer behavior (commit/push failures, rollback vs git state)
 // lives in operations-git.test.ts on a real repo.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { parseFilePath } from '../src/vault.js'
 import { asKnowledge, readEntity, readKnowledge } from './helpers/vault-files.js'
 import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
@@ -20,7 +20,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOSWithJournal(): { os: ReturnType<typeof createHafez>; journal: MemoryJournal } {
   const journal = createMemoryJournal()

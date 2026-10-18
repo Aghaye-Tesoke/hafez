@@ -7,7 +7,7 @@
 // owner-reviewed behavior of the one structural splitter. The old
 // expectations live in git history for comparison.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { serializeFile } from '../src/vault.js'
 import { documentFor, getBrief, parseSessionLog, countSessionLogEntries } from '../src/document.js'
 
@@ -15,7 +15,7 @@ import { documentFor, getBrief, parseSessionLog, countSessionLogEntries } from '
 const { findSection, prependSessionLogEntry, bodyBeforeSessionLog } = documentFor({ kind: 'entity' })
 import { mergeVaultContent } from '../src/merge.js'
 import { parseContent } from '../src/vault.js'
-import { mkdirSync, rmSync, readFileSync } from 'fs'
+import { mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -30,7 +30,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })

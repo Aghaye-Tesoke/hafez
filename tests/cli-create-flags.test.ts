@@ -5,8 +5,8 @@
 // Plus the one comma-list parser: trimmed, empty segments dropped, identical
 // for create and update.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
-import { mkdirSync, rmSync } from 'fs'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -30,7 +30,7 @@ beforeAll(async () => {
   await os.create('entity', 'Beta', { type: 'project' })
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 type Kind = 'entity' | 'knowledge'
 

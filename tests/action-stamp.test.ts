@@ -3,10 +3,10 @@
 // `(added YYYY-MM-DD)` with the local day, never twice; every reader of
 // action text strips it; existing unstamped lines are left alone.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdirSync, rmSync, readFileSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { stampAction, stripActionStamp, getNextActions, documentFor } from '../src/document.js'
 import { localDay } from '../src/dates.js'
@@ -22,7 +22,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'entities'), { recursive: true })
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })

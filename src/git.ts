@@ -2,12 +2,58 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { simpleGit, type SimpleGit } from 'simple-git'
+import { simpleGit, type SimpleGit, type SimpleGitOptions } from 'simple-git'
 
 import { mergeVaultContent } from './merge.js'
 import { VAULT_FILE_RE, INDEXED_DIR_PATHSPECS, classifyIndexedRelPath, vaultKindFromRelPath } from './vault.js'
 import { normalizeSinceDate } from './dates.js'
 import { HafezError, type GitConfig, type ChangelogEntry, type Journal } from './types.js'
+
+// Hafez runs git in the user's own shell, and git inherited that environment before simple-git
+// guarded it. simple-git 4 guards it two ways, and both are opened in full: `allowEnvironment`
+// names every key the process carries (the guard otherwise strips ambient GIT_* / EDITOR / PAGER
+// keys and rejects supplied ones — a user's GIT_SSH_COMMAND or GIT_AUTHOR_* would vanish), and
+// `unsafe` opens every category — `Required`, so a category the library adds fails the build
+// instead of rejecting some user's shell at runtime (4.0 moved GIT_EXEC_PATH to allowUnsafeExec).
+const OPEN_UNSAFE: Required<SimpleGitOptions['unsafe']> = {
+  allowUnsafeAlias: true,
+  allowUnsafeAskPass: true,
+  allowUnsafeCommandBinaries: true,
+  allowUnsafeConfigEnvCount: true,
+  allowUnsafeConfigPaths: true,
+  allowUnsafeCredentialHelper: true,
+  allowUnsafeDiffExternal: true,
+  allowUnsafeDiffTextConv: true,
+  allowUnsafeEditor: true,
+  allowUnsafeExec: true,
+  allowUnsafeFilter: true,
+  allowUnsafeFsMonitor: true,
+  allowUnsafeGitProxy: true,
+  allowUnsafeGpgProgram: true,
+  allowUnsafeHooksPath: true,
+  allowUnsafeInclude: true,
+  allowUnsafeMergeDriver: true,
+  allowUnsafePack: true,
+  allowUnsafePager: true,
+  allowUnsafeProtocolOverride: true,
+  allowUnsafeSshCommand: true,
+  allowUnsafeSubmodule: true,
+  allowUnsafeTemplateDir: true,
+  allowUnsafeUrlRewrite: true,
+  allowUnsafeCustomBinary: true,
+  // Otherwise the plugin exports GIT_TEST_DISALLOW_ABBREVIATED_OPTIONS to the child and the
+  // vault's own hooks start failing on abbreviated long options only when hafez commits.
+  allowAbbreviatedOptions: true
+}
+
+// Hafez's own git calls are never interactive: GIT_EDITOR outranks core.editor, -c, VISUAL and
+// EDITOR. `.env()` replaces the child env, hence the spread.
+const vaultGit = (vaultPath: string): SimpleGit =>
+  simpleGit({
+    baseDir: vaultPath,
+    allowEnvironment: [...Object.keys(process.env), 'GIT_EDITOR'],
+    unsafe: OPEN_UNSAFE
+  }).env({ ...process.env, GIT_EDITOR: 'true' })
 
 const logMerge = (msg: string) => process.stderr.write(`[hafez-merge] ${msg}\n`)
 
@@ -302,7 +348,7 @@ async function pushResolving(
 export async function gitSync(
   vaultPath: string
 ): Promise<{ pulled: boolean; pushed: boolean; remote: boolean }> {
-  const git: SimpleGit = simpleGit(vaultPath)
+  const git: SimpleGit = vaultGit(vaultPath)
 
   if (!(await hasOriginRemote(git))) {
     return { pulled: false, pushed: false, remote: false }
@@ -367,7 +413,7 @@ export async function gitSync(
  */
 async function gitUnstage(vaultPath: string, files: string[]): Promise<void> {
   try {
-    await simpleGit(vaultPath).raw(['reset', '-q', 'HEAD', '--', ...files])
+    await vaultGit(vaultPath).raw(['reset', '-q', 'HEAD', '--', ...files])
   } catch { /* best effort — rollback must not mask the original error */ }
 }
 
@@ -433,8 +479,29 @@ function parseNameStatusLine(line: string): Array<{ path: string; operation: Cha
   return operation ? [{ path: match[2], operation }] : []
 }
 
+/**
+ * Read-side "no history": the one state where `git log` has nothing to say
+ * and empty is the true answer — a repo with no commits yet. Everything else
+ * (a directory that is not a repository, an env-guard or unsafe-category
+ * rejection, a missing git binary, a corrupt repo) is a failure the write
+ * side already reports loudly, so the read side must not hide it. Matched on
+ * git's stderr text, which simple-git carries in `GitError.message`; both
+ * callers pass a `--` pathspec and no revision, and an unborn HEAD then says
+ * exactly this.
+ */
+const NO_HISTORY_RE = /does not have any commits yet/i
+
+function isNoHistory(err: unknown): boolean {
+  return NO_HISTORY_RE.test(err instanceof Error ? err.message : String(err))
+}
+
+function gitReadFailed(err: unknown): HafezError {
+  const lines = (err instanceof Error ? err.message : String(err)).split('\n').map(l => l.trim()).filter(Boolean)
+  return new HafezError('GIT_READ_FAILED', `git read failed: ${lines[0] ?? 'unknown error'}`, lines)
+}
+
 export async function gitChangelog(vaultPath: string, since: string): Promise<ChangelogEntry[]> {
-  const git: SimpleGit = simpleGit(vaultPath)
+  const git: SimpleGit = vaultGit(vaultPath)
 
   // Bare dates become local midnight — the same calendar-day boundary the
   // vault stamps and query comparisons use (see dates.ts).
@@ -446,8 +513,9 @@ export async function gitChangelog(vaultPath: string, since: string): Promise<Ch
       'log', `--since=${normalizedSince}`, '--name-status',
       '--pretty=format:%H|%aI|%s', '--', ...INDEXED_DIR_PATHSPECS,
     ])
-  } catch {
-    return [] // No git history or invalid since — return empty
+  } catch (err) {
+    if (isNoHistory(err)) return []
+    throw gitReadFailed(err)
   }
 
   if (!output.trim()) return []
@@ -488,14 +556,15 @@ export async function gitChangelog(vaultPath: string, since: string): Promise<Ch
  * Files with no history (not yet committed) are absent from the map.
  */
 export async function gitFileTimes(vaultPath: string, mode: 'modified' | 'added'): Promise<Map<string, string>> {
-  const git: SimpleGit = simpleGit(vaultPath)
+  const git: SimpleGit = vaultGit(vaultPath)
   let output: string
   try {
     const args = ['log', '--pretty=format:%x00%aI', '--name-only', '--', ...INDEXED_DIR_PATHSPECS]
     if (mode === 'added') args.splice(1, 0, '--diff-filter=A')
     output = await git.raw(args)
-  } catch {
-    return new Map() // no git history
+  } catch (err) {
+    if (isNoHistory(err)) return new Map()
+    throw gitReadFailed(err)
   }
   const times = new Map<string, string>()
   let current = ''
@@ -513,7 +582,7 @@ export async function gitCommitAndPush(
   message: string,
   config: GitConfig = {}
 ): Promise<void> {
-  const git: SimpleGit = simpleGit(vaultPath)
+  const git: SimpleGit = vaultGit(vaultPath)
 
   // If a previous run crashed mid-rebase/merge, the repo is stuck.
   // Aborting restores tracked files to their pre-rebase state, which may

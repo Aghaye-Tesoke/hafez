@@ -1,9 +1,10 @@
 // src/cli/format.ts
-import type { QueryResult, KnowledgeQueryResult, ValidationReport, SearchResult, VaultStats, ChangelogEntry } from '../types.js'
+import type { QueryResult, KnowledgeQueryResult, SessionQueryResult, ValidationReport, SearchResult, VaultStats, ChangelogEntry } from '../types.js'
 
 /** `parent` is the rendered value of the `parent:` line (the slug with the
- * parent's description); absent, the slug alone. */
-export function formatEntityHeader(fm: Record<string, any>, body: string, parent: string | undefined = fm.parent): string {
+ * parent's description); absent, the slug alone. `pointers` are the lines
+ * naming what hangs off the entity elsewhere (its sessions, its archive). */
+export function formatEntityHeader(fm: Record<string, any>, body: string, parent: string | undefined = fm.parent, pointers: string[] = []): string {
   const lines: string[] = [`# ${fm.name}`]
   if (fm.description) lines.push(`> ${fm.description}`)
 
@@ -24,7 +25,21 @@ export function formatEntityHeader(fm: Record<string, any>, body: string, parent
   if (fm.related?.length) lines.push(`related: ${fm.related.join(', ')}`)
   if (fm.tags?.length) lines.push(`tags: ${fm.tags.join(', ')}`)
   if (fm.resource) lines.push(`resource: ${fm.resource}`)
+  lines.push(...pointers)
 
+  lines.push('')
+  lines.push(body)
+  return lines.join('\n')
+}
+
+/** A session note: its day, then the entities it touched. */
+export function formatSessionHeader(fm: Record<string, any>, body: string): string {
+  const lines: string[] = [`# ${fm.name}`]
+  const meta: string[] = []
+  if (fm['session-date']) meta.push(`session-date: ${fm['session-date']}`)
+  if (fm.created) meta.push(`created: ${fm.created}`)
+  if (meta.length) lines.push(meta.join(' | '))
+  if (fm.related?.length) lines.push(`related: ${fm.related.join(', ')}`)
   lines.push('')
   lines.push(body)
   return lines.join('\n')
@@ -93,11 +108,26 @@ export function formatKnowledgeTable(results: KnowledgeTableRow[], total?: numbe
   return lines.join('\n')
 }
 
+export type SessionTableRow = Pick<SessionQueryResult, 'slug' | 'name' | 'session_date' | 'related'>
+
+export function formatSessionTable(results: SessionTableRow[], total?: number): string {
+  if (results.length === 0) return 'No results.'
+  const lines = ['| slug | name | session-date | related |', '|------|------|--------------|---------|']
+  for (const r of results) {
+    lines.push(`| ${r.slug} | ${r.name} | ${r.session_date} | ${r.related.join(', ')} |`)
+  }
+  if (total != null && results.length < total) {
+    lines.push(`\nShowing ${results.length} of ${total}`)
+  }
+  return lines.join('\n')
+}
+
 export function formatSearchResults(results: SearchResult[]): string {
   if (results.length === 0) return 'No results.'
 
   const entities = results.filter(r => r.kind === 'entity')
   const knowledge = results.filter(r => r.kind === 'knowledge')
+  const sessions = results.filter(r => r.kind === 'session')
   const sections: string[] = []
 
   if (entities.length > 0) {
@@ -108,6 +138,11 @@ export function formatSearchResults(results: SearchResult[]): string {
   if (knowledge.length > 0) {
     const lines = ['## Knowledge', '', '| slug | name | confidence | match |', '|------|------|------------|-------|']
     for (const r of knowledge) lines.push(`| ${r.slug} | ${r.name} | ${r.confidence ?? ''} | ${r.snippet} |`)
+    sections.push(lines.join('\n'))
+  }
+  if (sessions.length > 0) {
+    const lines = ['## Sessions', '', '| slug | name | match |', '|------|------|-------|']
+    for (const r of sessions) lines.push(`| ${r.slug} | ${r.name} | ${r.snippet} |`)
     sections.push(lines.join('\n'))
   }
   return sections.join('\n\n')
@@ -163,11 +198,12 @@ export function formatValidation(report: ValidationReport): string {
   const issues = report.broken_slugs.length + report.orphaned_knowledge.length +
                  report.missing_fields.length
 
+  const counts = `${report.total_entities} entities, ${report.total_knowledge} knowledge, ${report.total_sessions} sessions`
   if (issues === 0) {
-    return `Vault OK — ${report.total_entities} entities, ${report.total_knowledge} knowledge, 0 issues`
+    return `Vault OK — ${counts}, 0 issues`
   }
 
-  const sections: string[] = [`## Vault Validation — ${report.total_entities} entities, ${report.total_knowledge} knowledge`]
+  const sections: string[] = [`## Vault Validation — ${counts}`]
 
   const addSection = (title: string, items: string[]) => {
     if (items.length === 0) return

@@ -14,11 +14,11 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { spawnSync } from 'child_process'
-import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { simpleGit } from 'simple-git'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { serializeFile } from '../src/vault.js'
 import { readKnowledge } from './helpers/vault-files.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -31,7 +31,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })
@@ -206,7 +206,7 @@ describe('cli: plan status and dropped-field rejection', () => {
     await git.commit('seed')
   })
 
-  afterAll(() => rmSync(CLI_TMP, { recursive: true, force: true }))
+  afterAll(() => removeTemp(CLI_TMP))
 
   it('creates a plan with --status and updates it with --status', () => {
     const created = run('create', 'knowledge', 'CLI Plan', '--subtype', 'plan', '--status', 'active')

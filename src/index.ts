@@ -1,5 +1,5 @@
 // src/index.ts
-import { parseFilePath, slugify, kindFromPath, kindDir, isIndexedRelPath, findVaultFile, vaultFileExists, resolveFilePath, scanVaultDir, INDEXED_KINDS } from './vault.js'
+import { parseFilePath, slugify, kindFromPath, kindDir, isMutableRelPath, findVaultFile, findReadableFile, vaultFileExists, resolveFilePath, scanVaultDir, archiveLogPath, MUTABLE_KINDS } from './vault.js'
 import { createGitJournal } from './git.js'
 import { validateSessionLogEntry } from './schema.js'
 import { validateVault } from './validate.js'
@@ -7,7 +7,7 @@ import { documentForFile } from './document.js'
 import { createIndex, type HafezIndex } from './db.js'
 import { closestSlugs } from './closest.js'
 import { generateVaultIndex } from './knowledge-index.js'
-import type { Hafez, HafezConfig, DeletableKind, ReadDepth, ParsedFile, UpdateFields, CreateEntityFields, CreateKnowledgeFields, QueryFilter, EntityType, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, LinkRelation, ConfidenceLevel, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, BatchOpValidation, BatchValidationReport, SearchResult, VaultStats } from './types.js'
+import type { Hafez, HafezConfig, DeletableKind, ReadDepth, ParsedFile, UpdateFields, CreateEntityFields, CreateKnowledgeFields, QueryFilter, EntityType, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, UnifiedQueryOpts, LinkRelation, ConfidenceLevel, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, BatchOpValidation, BatchValidationReport, SearchResult, SearchKind, VaultStats } from './types.js'
 import { HafezError } from './types.js'
 import { BatchOperationSchema, specFor, slugBearingOpNames, sessionAddressingOpNames, notFoundError, normalizeOperations, opErrorLine, batchInvalidHeader, type OpCheckContext, type ResolvedTarget, type FileLinks } from './batch-ops.js'
 import { applyOperation, buildEntityFrontmatter, buildKnowledgeFrontmatter, validateKindFields, type AppliedOp } from './apply.js'
@@ -57,6 +57,7 @@ export function createHafez(config: HafezConfig): Hafez {
   }
 
   // Layout answers where a slug lives; these bind the vault path once.
+  // Mutations resolve the mutable kinds; `read` reaches a session note too.
   function findFile(slug: string): string | null { return findVaultFile(vaultPath, slug) }
   function exists(slug: string): boolean { return vaultFileExists(vaultPath, slug) }
 
@@ -100,7 +101,7 @@ export function createHafez(config: HafezConfig): Hafez {
   }
 
   async function read(slug: string, depth: ReadDepth = 'summary'): Promise<ParsedFile> {
-    const filePath = findFile(slug)
+    const filePath = findReadableFile(vaultPath, slug)
     if (!filePath) {
       // A miss carries the closest slugs as its details: the recovery the
       // `read` miss output renders (#91).
@@ -108,13 +109,20 @@ export function createHafez(config: HafezConfig): Hafez {
       throw new HafezError('NOT_FOUND', `Entity or knowledge '${slug}' not found`, closest)
     }
     const parsed = parseFilePath(filePath)
-    // findFile only resolves the indexed kinds, so the session arm is unreachable
-    if (parsed.kind === 'session') throw new HafezError('NOT_FOUND', `Entity or knowledge '${slug}' not found`)
     if (depth === 'frontmatter') return { ...parsed, body: '' }
     if (depth === 'summary') {
       return { ...parsed, body: documentForFile(parsed).bodyBeforeSessionLog(parsed.body) }
     }
     return parsed
+  }
+
+  /** The archive is an attachment of its entity, reached from it on purpose
+   * (#34): a disk read behind the entity's own slug, never an index row. */
+  async function archive(slug: string): Promise<string | null> {
+    const entity = resolveFilePath(vaultPath, slug, 'entity')
+    if (!existsSync(entity)) throw new HafezError('NOT_FOUND', `Entity '${slug}' not found`)
+    const path = archiveLogPath(vaultPath, slug)
+    return existsSync(path) ? readFileSync(path, 'utf-8') : null
   }
 
   function rollbackFiles(originals: Map<string, string | null>): void {
@@ -245,12 +253,10 @@ export function createHafez(config: HafezConfig): Hafez {
 
       const finalize = () => {
         updateIndexPostCommit(applied)
-        // index.md regeneration is gated: session-only writes skip it
-        if ([...writtenAll, ...deletedAll].some(isIndexedRelPath)) {
+        // index.md shows the mutable kinds: a session-only write leaves it.
+        if ([...writtenAll, ...deletedAll].some(isMutableRelPath)) {
           regenerateIndexSafe()
         }
-        // Session creates carry no index upserts — they are not indexed
-        // entities and never notified.
         for (const a of applied) {
           if (a.indexUpserts.length > 0) onWrite?.(a.result.slug, single ? single.action : 'batch')
         }
@@ -407,9 +413,11 @@ export function createHafez(config: HafezConfig): Hafez {
       simulateLinks: (slug, links) => { simulatedLinks.set(slug, links) },
       // Read from disk, not the index: the validate phase must see the vault
       // as `validate` will, and a stale index row would let a linked note go.
+      // The mutable kinds only: a session note's related are a record of
+      // what it touched, and a record must not keep a note from being deleted.
       referrers: (slug) => {
         const candidates = new Set(simulated.keys())
-        for (const kind of INDEXED_KINDS) {
+        for (const kind of MUTABLE_KINDS) {
           for (const fp of scanVaultDir(join(vaultPath, kindDir(kind)))) candidates.add(basename(fp, '.md'))
         }
         return [...candidates]
@@ -537,8 +545,11 @@ export function createHafez(config: HafezConfig): Hafez {
       withIndex(idx => idx.queryRelatedTo(slug, relation), { items: [], total: 0 }),
     query_knowledge: async (opts?: KnowledgeQueryOpts) =>
       withIndex(idx => idx.queryKnowledge(opts), { items: [], total: 0 }),
+    query_sessions: async (opts?: SessionQueryOpts) =>
+      withIndex(idx => idx.querySessions(opts), { items: [], total: 0 }),
+    archive,
     validate,
-    search: async (query: string, kind?: 'entity' | 'knowledge' | 'all'): Promise<SearchResult[]> =>
+    search: async (query: string, kind?: SearchKind): Promise<SearchResult[]> =>
       withIndex(idx => { idx.syncIfStale(); return idx.search(query, kind) }, []),
     rebuildIndex: async () => {
       if (readOnly) throw new HafezError('VALIDATION_FAILED', 'Hafez instance is read-only')
@@ -558,10 +569,20 @@ export function createHafez(config: HafezConfig): Hafez {
       return s
     },
     changelog: (since: string) => journal.changelog(since),
+    close: () => {
+      // Forget the handle even if closing it throws: a retry must not
+      // re-throw, and getIndex() must never hand out a closed handle.
+      try {
+        _index?.close()
+      } finally {
+        _index = null
+        _indexInitialized = false
+      }
+    },
   }
 }
 
 export { HafezError } from './types.js'
-export type { Hafez, HafezConfig, HafezErrorCode, EntityType, EntityStatus, EntityQueryOpts, KnowledgeQueryOpts, UnifiedQueryOpts, AllQueryOpts, SortField, EntitySortField, EntityFrontmatter, KnowledgeFrontmatter, ParsedFile, SessionLogEntry, UpdateFields, UpdateResult, CreateEntityFields, CreateKnowledgeFields, QueryFilter, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, ReadDepth, ConfidenceLevel, LinkRelation, GitConfig, Journal, SearchResult, VaultStats, ChangelogEntry, KnowledgeSubtype } from './types.js'
+export type { Hafez, HafezConfig, HafezErrorCode, EntityType, EntityStatus, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, SessionQueryResult, SearchKind, UnifiedQueryOpts, AllQueryOpts, SortField, EntitySortField, KnowledgeSortField, SessionSortField, EntityFrontmatter, KnowledgeFrontmatter, ParsedFile, SessionLogEntry, UpdateFields, UpdateResult, CreateEntityFields, CreateKnowledgeFields, QueryFilter, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, ReadDepth, ConfidenceLevel, LinkRelation, GitConfig, Journal, SearchResult, VaultStats, ChangelogEntry, KnowledgeSubtype } from './types.js'
 export { getBrief, getNextActions } from './document.js'
 export { parseSessionLogHeading, parseSessionLog } from './document.js'

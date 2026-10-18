@@ -1,10 +1,10 @@
 // tests/integration.test.ts
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { knowledgeBodyTemplate } from '../src/templates.js'
 import type { BatchOperation, KnowledgeSubtype } from '../src/types.js'
 import { asEntity, asKnowledge, readEntity } from './helpers/vault-files.js'
-import { mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { simpleGit } from 'simple-git'
@@ -28,7 +28,7 @@ beforeAll(async () => {
   await git.push('origin', branch)
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, git: { push: false } })
@@ -126,7 +126,7 @@ describe('Integration: Capture and Triage', () => {
     await os.update(slug, { status: 'active' })
     // Note: changing type requires direct file edit, not part of update()
     // The triage workflow uses update for status, the type stays as-is or requires re-creation
-    const after = await os.read(slug, 'frontmatter')
+    const after = asEntity(await os.read(slug, 'frontmatter'))
     expect(after.frontmatter.status).toBe('active')
   })
 })
@@ -228,7 +228,7 @@ describe('Integration: Knowledge metadata updates', () => {
     const os = makeOS()
     await os.create('knowledge', 'Domain Update Test', { domain: ['old-domain'] })
     await os.update('domain-update-test', { domain: ['engineering', 'architecture'] })
-    const fm = (await os.read('domain-update-test', 'frontmatter')).frontmatter
+    const fm = asKnowledge(await os.read('domain-update-test', 'frontmatter')).frontmatter
     expect(fm.domain).toEqual(['engineering', 'architecture'])
   })
 
@@ -244,7 +244,7 @@ describe('Integration: Knowledge metadata updates', () => {
     const os = makeOS()
     await os.create('knowledge', 'Tags Update Test')
     await os.update('tags-update-test', { tags: ['tag-a', 'tag-b'] })
-    const fm = (await os.read('tags-update-test', 'frontmatter')).frontmatter
+    const fm = asKnowledge(await os.read('tags-update-test', 'frontmatter')).frontmatter
     expect(fm.tags).toEqual(['tag-a', 'tag-b'])
   })
 
@@ -319,7 +319,7 @@ describe('Integration: Knowledge metadata updates', () => {
     const os = makeOS()
     await os.create('entity', 'Kind Guard Entity Domain', { type: 'project' })
     await os.update('kind-guard-entity-domain', { domain: ['new-domain', 'extra'] })
-    const fm = (await os.read('kind-guard-entity-domain', 'frontmatter')).frontmatter
+    const fm = asEntity(await os.read('kind-guard-entity-domain', 'frontmatter')).frontmatter
     expect(fm.domain).toEqual(['new-domain', 'extra'])
   })
 
@@ -345,7 +345,7 @@ describe('Integration: Knowledge metadata updates', () => {
     await expect(
       os.update('kind-guard-entity-tags', { tags: ['t'], related: [] })
     ).resolves.toBeDefined()
-    const fm = (await os.read('kind-guard-entity-tags', 'frontmatter')).frontmatter
+    const fm = asEntity(await os.read('kind-guard-entity-tags', 'frontmatter')).frontmatter
     expect(fm.tags).toEqual(['t'])
   })
 })
@@ -447,14 +447,14 @@ describe('domain unification', () => {
   it('creates entity with array domain', async () => {
     const os = makeOS()
     await os.create('entity', 'Multi Domain Entity', { type: 'project', domain: ['ai', 'infrastructure'] })
-    const result = await os.read('multi-domain-entity', 'frontmatter')
+    const result = asEntity(await os.read('multi-domain-entity', 'frontmatter'))
     expect(result.frontmatter.domain).toEqual(['ai', 'infrastructure'])
   })
 
   it('treats empty domain array as no domain on create', async () => {
     const os = makeOS()
     await os.create('entity', 'Empty Domain Entity', { type: 'project', domain: [] })
-    const fm = (await os.read('empty-domain-entity', 'frontmatter')).frontmatter
+    const fm = asEntity(await os.read('empty-domain-entity', 'frontmatter')).frontmatter
     expect(fm.domain).toBeUndefined()
   })
 
@@ -462,7 +462,7 @@ describe('domain unification', () => {
     const os = makeOS()
     await os.create('entity', 'Clear Domain Entity', { type: 'project', domain: ['old'] })
     await os.update('clear-domain-entity', { domain: [] })
-    const fm = (await os.read('clear-domain-entity', 'frontmatter')).frontmatter
+    const fm = asEntity(await os.read('clear-domain-entity', 'frontmatter')).frontmatter
     expect(fm.domain).toBeUndefined()
   })
 

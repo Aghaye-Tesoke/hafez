@@ -10,9 +10,9 @@
 // instead of crafting real git commits with forged author dates.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { serializeFile } from '../src/vault.js'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -53,7 +53,7 @@ beforeAll(() => {
   }
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 describe('stats recents with same-day ties', () => {
   it('recently_created lists the 5 most recently committed, newest first', async () => {

@@ -11,11 +11,11 @@
 // A diff is a regression unless the golden is intentionally regenerated.
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { simpleGit } from 'simple-git'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { serializeFile } from '../src/vault.js'
 import { parseBatchInput } from '../src/cli/commands.js'
 
@@ -106,7 +106,7 @@ beforeAll(() => {
 })
 
 afterAll(() => {
-  rmSync(ROOT, { recursive: true, force: true })
+  removeTemp(ROOT)
 })
 
 describe('batch regression fixtures', () => {

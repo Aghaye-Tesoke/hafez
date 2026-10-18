@@ -1,0 +1,3 @@
+# LF in every checkout, whatever core.autocrlf says: surfaces, fixtures and
+# goldens are compared byte for byte against LF renders (#177).
+* text=auto eol=lf

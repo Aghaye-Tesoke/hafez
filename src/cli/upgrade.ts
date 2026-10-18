@@ -30,7 +30,7 @@ import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { UsageError, helpIfAsked } from './args.js'
 import { HARNESSES, detectAgent, isHarness } from '../harness.js'
-import { checkInstall, fixBrokenMarkers, legacyLine, removeLegacy, type BlockCheck, type LegacyCheck, type SkillCheck } from './install.js'
+import { checkInstall, fixBrokenMarkers, legacyLine, removeLegacy, vaultRepoFlag, type BlockCheck, type LegacyCheck, type SkillCheck } from './install.js'
 
 const PLAIN_SEMVER = /^\d+\.\d+\.\d+$/
 const REGISTRY_TIMEOUT_MS = 3000
@@ -235,7 +235,7 @@ function blockSteps({ blocks, skills }: Integration, upgrading: boolean, env: Up
     const targets = upgrading ? blocks : blocks.filter(blockDrift)
     return (targets.length > 0 ? targets : skillsOnly).map(b => ({
       kind: 'command',
-      text: `hafez onboard --install --mode always-on --harness ${b.harness}`,
+      text: `hafez onboard --install --mode always-on --harness ${b.harness}${vaultRepoFlag(b.vaultRepo)}`,
     }))
   }
   const harness = detectAgent(env)
@@ -248,7 +248,8 @@ function blockSteps({ blocks, skills }: Integration, upgrading: boolean, env: Up
 
 /** The action list, in execution order. Every command is built from static
  * constants; the only interpolated values are the regex-validated version,
- * the quoted package root, and harness ids from the HARNESSES table. */
+ * the quoted package root, harness ids from the HARNESSES table, and a cloud
+ * Block's vault repo, which `findRegion` reads only when it passes `isVaultRepo`. */
 function deriveSteps(
   state: Omit<UpgradeState, 'steps' | 'alternativeInstall'>,
   ctx: { packageRoot: string; env: UpgradeDeps['env'] },

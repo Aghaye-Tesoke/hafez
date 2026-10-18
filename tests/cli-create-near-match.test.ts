@@ -6,11 +6,11 @@
 // prints one relate line. `create entity` and `capture` never near-match.
 // `batch` writes and warns, never refuses.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { HafezError, type Hafez } from '../src/types.js'
 import { cmdCreate, cmdCapture, cmdBatch } from '../src/cli/commands.js'
 import { exitCodeFor } from '../src/cli/index.js'
-import { mkdirSync, rmSync, readdirSync, writeFileSync } from 'fs'
+import { mkdirSync, readdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -30,7 +30,7 @@ beforeEach(async () => {
     description: 'Retries share one budget per endpoint.',
   })
 })
-afterEach(() => rmSync(TMP, { recursive: true, force: true }))
+afterEach(() => removeTemp(TMP))
 
 const knowledgeFiles = () => readdirSync(join(VAULT, 'knowledge')).sort()
 

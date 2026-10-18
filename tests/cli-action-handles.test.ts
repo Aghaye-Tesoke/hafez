@@ -5,11 +5,11 @@
 // command-function seam over a memory-Journal factory: the string a command
 // returns and the vault file afterwards.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdirSync, rmSync, readFileSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { cmdRead, cmdUpdate } from '../src/cli/commands.js'
 import { localDay } from '../src/dates.js'
@@ -25,7 +25,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
   os = createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })
 })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 const fileOf = (slug: string) => readFileSync(join(VAULT, 'entities', `${slug}.md`), 'utf-8')
 const OPEN_LINE = /^- \[ \] ([0-9a-f]+) {2}(.+)$/

@@ -2,19 +2,19 @@
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { helpIfAsked, parseArgs, splitList, str, MisuseError, RenderedError, UnknownFlagError, UsageError, type FlagSpec, type FlagValue } from './args.js'
-import type { Hafez, ParsedFile, ReadDepth, UpdateFields, UpdateResult, EntityType, QueryFilter, ConfidenceLevel, KnowledgeSubtype, CreateEntityFields, CreateKnowledgeFields, BatchOperation, KnowledgeQueryOpts, QueryResult, KnowledgeQueryResult } from '../types.js'
+import type { Hafez, ParsedFile, ReadDepth, UpdateFields, UpdateResult, EntityType, QueryFilter, ConfidenceLevel, KnowledgeSubtype, CreateEntityFields, CreateKnowledgeFields, BatchOperation, KnowledgeQueryOpts, QueryResult, KnowledgeQueryResult, SessionQueryResult, SearchKind, UnifiedResult } from '../types.js'
 import { HafezError } from '../types.js'
 import { BatchOperationSchema, normalizeAliases, opErrorLine, batchInvalidHeader } from '../batch-ops.js'
 import { formatBatchError } from './batch-errors.js'
 import { parseDigestInput, digest } from '../digest.js'
 import { detectAgent } from '../harness.js'
-import { getActionItems } from '../document.js'
+import { getActionItems, parseSessionLogHeading } from '../document.js'
 import { resemblances } from '../near-match.js'
 import { actionAge, agedActions, staleHandles, stalenessDaysOf } from '../stale.js'
 import { slugify } from '../vault.js'
 import { ITEMS, footerOp, type FooterInput, type MisuseRetry, type NearMatchNote } from '../surfaces/items.js'
 import { placeIn } from '../surfaces/surfaces.js'
-import { formatEntityHeader, formatKnowledgeHeader, formatQueryTable, formatKnowledgeTable, formatSearchResults, formatValidation, formatStats, formatChangelog } from './format.js'
+import { formatEntityHeader, formatKnowledgeHeader, formatSessionHeader, formatQueryTable, formatKnowledgeTable, formatSessionTable, formatSearchResults, formatValidation, formatStats, formatChangelog } from './format.js'
 
 export interface CommandOpts {
   json?: boolean
@@ -27,8 +27,8 @@ function jsonOut(data: unknown): string {
   return JSON.stringify(data, null, 2)
 }
 
-const READ_USAGE = 'Usage: hafez read <slug> [--depth frontmatter|summary|full]'
-const READ_FLAGS: FlagSpec = { depth: 'string' }
+const READ_USAGE = 'Usage: hafez read <slug> [--depth frontmatter|summary|full] [--archive]'
+const READ_FLAGS: FlagSpec = { depth: 'string', archive: 'boolean' }
 
 export async function cmdRead(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
   const { flags, positionals } = parseArgs(args, READ_FLAGS, READ_USAGE)
@@ -42,21 +42,48 @@ export async function cmdRead(os: Hafez, args: string[], opts: CommandOpts = {})
       ? new RenderedError('NOT_FOUND', jsonOut({ slug, closest }), 'stdout')
       : new RenderedError('NOT_FOUND', ITEMS.slugMissRecovery.render({ slug, closest }), 'stderr')
   })
+  if (flags.archive) {
+    // The archive is an entity's: reached from it on purpose (#34).
+    if (result.kind !== 'entity') throw new UsageError(`--archive reads an entity's archived log entries; '${slug}' is a ${result.kind === 'session' ? 'session note' : 'knowledge note'}\n${READ_USAGE}`)
+    const archive = await os.archive(slug)
+    if (opts.json) return jsonOut({ slug, archive })
+    return archive ?? `no archive for ${slug}`
+  }
+  // A session note is read, never written: no Footer (#35).
+  if (result.kind === 'session') {
+    if (opts.json) return jsonOut(result)
+    return formatSessionHeader(result.frontmatter, result.body)
+  }
   const footer = await footerFor(os, slug, result, depth)
+  const pointers = result.kind === 'entity' ? await pointersFor(os, slug) : null
   if (opts.json) {
     const writes = footerOp(footer)
     // A frontmatter-depth read carries no body, so it has no actions to list.
-    if (result.kind !== 'entity' || depth === 'frontmatter') return jsonOut({ ...result, writes })
-    return jsonOut({ ...result, actions: agedActions(result.body, result.frontmatter), writes })
+    if (result.kind !== 'entity' || depth === 'frontmatter') return jsonOut({ ...result, ...pointers, writes })
+    return jsonOut({ ...result, actions: agedActions(result.body, result.frontmatter), ...pointers, writes })
   }
   const fm = result.frontmatter as Record<string, any>
   const days = stalenessDaysOf(fm)
   const staleMark = (added: string | null) => ITEMS.staleMarker.render(actionAge(added, days))
   const text = result.kind === 'entity'
-    ? formatEntityHeader(fm, ITEMS.handles.render(result.body, staleMark), await parentLine(os, fm.parent))
+    ? formatEntityHeader(fm, ITEMS.handles.render(result.body, staleMark), await parentLine(os, fm.parent), [
+      ITEMS.sessionsLine.render({ slug, ...pointers!.sessions }),
+      ITEMS.archivePointer.render({ slug, entries: pointers!.archive_entries }),
+    ].filter(Boolean))
     : formatKnowledgeHeader(fm, result.body)
   // Trailing newlines only: the Footer brings its own blank line.
   return `${text.replace(/\n+$/, '')}\n${ITEMS.writeLine.render(footer)}`
+}
+
+/** What hangs off an entity elsewhere: the sessions that touched it (the
+ * look back, #35) and its archived log entries (#34). Counted at read time,
+ * nothing written. */
+async function pointersFor(os: Hafez, slug: string): Promise<{ sessions: { count: number; latest: string | null }; archive_entries: number }> {
+  const sessions = (await os.related_to(slug)).items.filter((i): i is UnifiedResult & { kind: 'session' } => i.kind === 'session')
+  const latest = sessions.reduce<string | null>((max, s) => (max === null || s.session_date > max ? s.session_date : max), null)
+  const archive = await os.archive(slug)
+  const entries = archive ? archive.split('\n').filter(line => parseSessionLogHeading(line)).length : 0
+  return { sessions: { count: sessions.length, latest }, archive_entries: entries }
 }
 
 /** The `parent:` line's value: the slug with the parent's description. The
@@ -84,8 +111,8 @@ async function staleAfterWrite(os: Hafez, slug: string): Promise<string[]> {
 
 /** The Footer for a file `read` returned at `depth`. The Footer is the same
  * at every depth, so its Handle comes from the whole file, not from the body
- * this depth shows. */
-async function footerFor(os: Hafez, slug: string, result: ParsedFile, depth: ReadDepth): Promise<FooterInput> {
+ * this depth shows. A session note has none: it is never written to. */
+async function footerFor(os: Hafez, slug: string, result: Exclude<ParsedFile, { kind: 'session' }>, depth: ReadDepth): Promise<FooterInput> {
   return { slug, agent: detectAgent(), ...(result.kind === 'entity'
     ? {
       target: { kind: 'entity', type: result.frontmatter.type },
@@ -94,14 +121,16 @@ async function footerFor(os: Hafez, slug: string, result: ParsedFile, depth: Rea
     : { target: { kind: 'knowledge', subtype: result.frontmatter.subtype } }) }
 }
 
-const QUERY_USAGE = `Usage: hafez query [--kind entity|knowledge|all] [--filter ...] [--type t] [--parent slug] [--related-to slug] [--domain d] [--confidence c] [--subtype s] [--tag t] [--since d] [--before d] [--created-since d] [--created-before d] [--sort-by f] [--sort-order asc|desc] [--limit n] [--offset n]
+const QUERY_USAGE = `Usage: hafez query [--kind entity|knowledge|session|all] [--filter ...] [--type t] [--parent slug] [--related-to slug] [--domain d] [--confidence c] [--subtype s] [--tag t] [--since d] [--before d] [--created-since d] [--created-before d] [--sort-by f] [--sort-order asc|desc] [--limit n] [--offset n]
 
-  --filter active|paused|done matches entity status; knowledge notes carry no
-  status, so under --kind all they are always included alongside the matching
-  entities. --filter stale|capture are entity-only views and return no
-  knowledge. --filter/--type/--parent are rejected with --kind knowledge, and
-  --confidence/--subtype are rejected with --kind entity, rather than being
-  silently dropped. --related-to takes no other query flags.`
+  --filter active|paused|done matches entity status; knowledge and session
+  notes carry no status, so under --kind all they are always included
+  alongside the matching entities. --filter stale|capture are entity-only
+  views and return no knowledge. --filter/--type/--parent are rejected with
+  --kind knowledge, and --confidence/--subtype are rejected with --kind
+  entity, rather than being silently dropped. --kind session lists session
+  notes newest first and takes the time window, sort and paging flags only.
+  --related-to takes --kind to narrow to one kind and no other query flag.`
 const QUERY_FLAGS: FlagSpec = {
   kind: 'string', filter: 'string', type: 'string', parent: 'string', 'related-to': 'string',
   domain: 'string', confidence: 'string', subtype: 'string', tag: 'string',
@@ -112,7 +141,7 @@ const QUERY_FLAGS: FlagSpec = {
 /** Every flag the query parser accepts, for the branch-support matrix. */
 export const QUERY_FLAG_NAMES = Object.keys(QUERY_FLAGS)
 
-export type QueryBranch = 'entity' | 'knowledge' | 'all' | 'related-to'
+export type QueryBranch = 'entity' | 'knowledge' | 'session' | 'all' | 'related-to'
 
 /** Which flags each kind branch actually applies. A branch that cannot honour
  * a flag rejects it (below) instead of dropping it: `--kind knowledge --filter
@@ -121,8 +150,9 @@ export type QueryBranch = 'entity' | 'knowledge' | 'all' | 'related-to'
 export const QUERY_FLAG_SUPPORT: Record<QueryBranch, readonly string[]> = {
   entity: ['kind', 'filter', 'type', 'parent', 'domain', 'tag', 'since', 'before', 'created-since', 'created-before', 'sort-by', 'sort-order', 'limit', 'offset'],
   knowledge: ['kind', 'domain', 'confidence', 'subtype', 'tag', 'since', 'before', 'created-since', 'created-before', 'sort-by', 'sort-order', 'limit', 'offset'],
+  session: ['kind', 'since', 'before', 'created-since', 'created-before', 'sort-by', 'sort-order', 'limit', 'offset'],
   all: ['kind', 'filter', 'type', 'parent', 'domain', 'confidence', 'subtype', 'tag', 'since', 'before', 'created-since', 'created-before', 'sort-by', 'sort-order', 'limit', 'offset'],
-  'related-to': ['related-to'],
+  'related-to': ['related-to', 'kind'],
 }
 
 const FLAG_SCOPE_REASON: Record<string, string> = {
@@ -133,16 +163,17 @@ const FLAG_SCOPE_REASON: Record<string, string> = {
   subtype: 'knowledge notes only',
 }
 
-const QUERY_KINDS = ['entity', 'knowledge', 'all'] as const
+const QUERY_KINDS = ['entity', 'knowledge', 'session', 'all'] as const
 
 function rejectUnsupportedFlags(branch: QueryBranch, flags: Record<string, FlagValue>): void {
   const supported = new Set(QUERY_FLAG_SUPPORT[branch])
   for (const [name, value] of Object.entries(flags)) {
     if (value === undefined || supported.has(name)) continue
     const where = branch === 'related-to'
-      ? 'with --related-to (it returns every entity and knowledge note linked to the slug)'
+      ? 'with --related-to (it returns every entity, knowledge note and session note linked to the slug)'
       : `with --kind ${branch}`
-    const reason = FLAG_SCOPE_REASON[name] ? ` — ${FLAG_SCOPE_REASON[name]}` : ''
+    const scope = branch === 'session' && (name === 'domain' || name === 'tag') ? 'a session note carries none' : FLAG_SCOPE_REASON[name]
+    const reason = scope ? ` — ${scope}` : ''
     throw new UsageError(`--${name} is not supported ${where}${reason}\n${QUERY_USAGE}`)
   }
 }
@@ -158,9 +189,10 @@ function intFlag(raw: string | undefined, name: string): number | undefined {
 export async function cmdQuery(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
   const { flags } = parseArgs(args, QUERY_FLAGS, QUERY_USAGE)
   const relatedTo = str(flags['related-to'])
-  const branch: QueryBranch = relatedTo !== undefined ? 'related-to' : (str(flags.kind) ?? 'entity') as QueryBranch
-  if (branch !== 'related-to' && !QUERY_KINDS.includes(branch as any)) {
-    throw new UsageError(`--kind must be one of ${QUERY_KINDS.join(', ')} (got "${branch}")\n${QUERY_USAGE}`)
+  const kindFlag = str(flags.kind)
+  const branch: QueryBranch = relatedTo !== undefined ? 'related-to' : (kindFlag ?? 'entity') as QueryBranch
+  if (kindFlag !== undefined && !QUERY_KINDS.includes(kindFlag as any)) {
+    throw new UsageError(`--kind must be one of ${QUERY_KINDS.join(', ')} (got "${kindFlag}")\n${QUERY_USAGE}`)
   }
   rejectUnsupportedFlags(branch, flags)
 
@@ -184,17 +216,15 @@ export async function cmdQuery(os: Hafez, args: string[], opts: CommandOpts = {}
   const sortOpts = { sort_by: sortBy, sort_order: sortOrder, limit, offset }
   const timeOpts = { since, before, createdSince, createdBefore }
 
-  // --related-to: always returns both entities and knowledge
+  // --related-to: every kind linked to the slug, the sessions that touched
+  // an entity included; --kind narrows to one (the entity header's
+  // `--kind session --related-to` line)
   if (relatedTo) {
-    const result = await os.related_to(relatedTo)
+    const linked = await os.related_to(relatedTo)
+    const items = kindFlag && kindFlag !== 'all' ? linked.items.filter(i => i.kind === kindFlag) : linked.items
+    const result = { items, total: items.length }
     if (opts.json) return jsonOut(result)
-    const { items: results, total } = result
-    const entities = results.filter(r => r.kind === 'entity')
-    const knowledge = results.filter(r => r.kind === 'knowledge')
-    const sections: string[] = []
-    if (entities.length > 0) sections.push('## Entities\n\n' + formatQueryTable(entities as any, total))
-    if (knowledge.length > 0) sections.push('## Knowledge\n\n' + formatKnowledgeTable(knowledge as any, total))
-    return sections.length > 0 ? sections.join('\n\n') : 'No results.'
+    return formatUnifiedSections(result.items, result.total)
   }
 
   const queryOpts = { filter, type, parent, domain, ...timeOpts, tags, ...sortOpts }
@@ -208,18 +238,18 @@ export async function cmdQuery(os: Hafez, args: string[], opts: CommandOpts = {}
     return formatKnowledgeTable(result.items, result.total)
   }
 
-  // --kind all: query both entities and knowledge via unified query
+  // --kind session: the session notes alone, newest first
+  if (branch === 'session') {
+    const result = await os.query_sessions({ ...timeOpts, ...sortOpts })
+    if (opts.json) return jsonOut(result)
+    return formatSessionTable(result.items, result.total)
+  }
+
+  // --kind all: every kind via the unified query, sessions included
   if (branch === 'all') {
     const result = await os.queryUnified({ ...queryOpts, kind: 'all', confidence, subtype })
     if (opts.json) return jsonOut(result)
-    const { items, total } = result
-    const entities = items.filter(i => i.kind === 'entity')
-    const knowledge = items.filter(i => i.kind === 'knowledge')
-    const sections: string[] = []
-    if (entities.length > 0) sections.push('## Entities\n\n' + formatQueryTable(entities as QueryResult[]))
-    if (knowledge.length > 0) sections.push('## Knowledge\n\n' + formatKnowledgeTable(knowledge as KnowledgeQueryResult[]))
-    if (items.length < total) sections.push(`\nShowing ${items.length} of ${total}`)
-    return sections.length > 0 ? sections.join('\n\n') : 'No results.'
+    return formatUnifiedSections(result.items, result.total)
   }
 
   // --kind entity (default): query entities
@@ -228,14 +258,35 @@ export async function cmdQuery(os: Hafez, args: string[], opts: CommandOpts = {}
   return formatQueryTable(result.items, result.total)
 }
 
-const SEARCH_USAGE = 'Usage: hafez search <terms> [--kind entity|knowledge|all]'
+/** One section per kind present, in the order entities, knowledge,
+ * sessions; a page line when the page is short of the total. */
+function formatUnifiedSections(items: UnifiedResult[], total: number): string {
+  const entities = items.filter((i): i is UnifiedResult & { kind: 'entity' } => i.kind === 'entity')
+  const knowledge = items.filter((i): i is UnifiedResult & { kind: 'knowledge' } => i.kind === 'knowledge')
+  const sessions = items.filter((i): i is UnifiedResult & { kind: 'session' } => i.kind === 'session')
+  const sections: string[] = []
+  if (entities.length > 0) sections.push('## Entities\n\n' + formatQueryTable(entities as QueryResult[]))
+  if (knowledge.length > 0) sections.push('## Knowledge\n\n' + formatKnowledgeTable(knowledge as KnowledgeQueryResult[]))
+  if (sessions.length > 0) sections.push('## Sessions\n\n' + formatSessionTable(sessions as SessionQueryResult[]))
+  if (items.length < total) sections.push(`\nShowing ${items.length} of ${total}`)
+  return sections.length > 0 ? sections.join('\n\n') : 'No results.'
+}
+
+const SEARCH_USAGE = `Usage: hafez search <terms> [--kind entity|knowledge|session|all]
+
+  Without --kind, entities and knowledge notes are searched. --kind all adds
+  the session notes; --kind session searches them alone.`
 const SEARCH_FLAGS: FlagSpec = { kind: 'string' }
+const SEARCH_KINDS = ['entity', 'knowledge', 'session', 'all'] as const
 
 export async function cmdSearch(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
   const { flags, positionals } = parseArgs(args, SEARCH_FLAGS, SEARCH_USAGE)
   const terms = positionals.join(' ')
   if (!terms) throw new UsageError(SEARCH_USAGE)
-  const kind = (str(flags.kind) ?? 'all') as 'entity' | 'knowledge' | 'all'
+  const kind = str(flags.kind) as SearchKind | undefined
+  if (kind !== undefined && !SEARCH_KINDS.includes(kind)) {
+    throw new UsageError(`--kind must be one of ${SEARCH_KINDS.join(', ')} (got "${kind}")\n${SEARCH_USAGE}`)
+  }
   const results = await os.search(terms, kind)
   if (opts.json) return jsonOut(results)
   return formatSearchResults(results)
@@ -484,7 +535,14 @@ async function updateFailure(os: Hafez, slug: string | undefined, err: unknown, 
   if (slug === undefined || (!misuse && !missing) || (opts.json && misuse)) return err
   let retry: MisuseRetry
   try {
-    retry = { footer: await footerFor(os, slug, await os.read(slug, 'full'), 'full') }
+    const file = await os.read(slug, 'full')
+    // The Op Spec resolves no session note, so the update missed; the slug
+    // names one all the same. Say what it is instead of offering a Footer
+    // it will never have.
+    if (file.kind === 'session') {
+      return new RenderedError('VALIDATION_FAILED', `'${slug}' is a session note: written once and read, never updated. What matters from it belongs on the entity it touched.`, 'stderr')
+    }
+    retry = { footer: await footerFor(os, slug, file, 'full') }
   } catch (readErr) {
     if (!(readErr instanceof HafezError) || readErr.code !== 'NOT_FOUND') return err
     retry = { miss: { slug, closest: readErr.details ?? [] } }

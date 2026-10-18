@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { createHafez, HafezError } from '../src/index.js'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'fs'
+import { HafezError } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { mkdtempSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createIndex } from '../src/db.js'
@@ -32,7 +33,7 @@ Summary: Test progress
   })
 
   afterEach(() => {
-    rmSync(vaultDir, { recursive: true, force: true })
+    removeTemp(vaultDir)
   })
 
   it('read() works in readOnly mode', async () => {
@@ -106,7 +107,7 @@ describe('readOnly mode with stale index schema', () => {
   })
 
   afterEach(() => {
-    rmSync(vaultDir, { recursive: true, force: true })
+    removeTemp(vaultDir)
   })
 
   it('query() degrades to empty results instead of crashing on a pre-v6 DB', async () => {

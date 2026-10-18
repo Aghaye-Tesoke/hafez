@@ -6,12 +6,13 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
 import { Readable } from 'stream'
 import { spawnSync } from 'child_process'
-import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, existsSync } from 'fs'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync, existsSync } from 'fs'
 import { simpleGit } from 'simple-git'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
+import { envWithPath } from './helpers/shell-path.js'
 import { cmdBatch, cmdCreate, cmdDigest } from '../src/cli/commands.js'
 import { errorText } from '../src/cli/index.js'
 import { localDay } from '../src/dates.js'
@@ -62,7 +63,7 @@ beforeAll(() => {
 })
 
 afterEach(() => { vi.restoreAllMocks() })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 describe('digest on an unknown slug', () => {
   it('exits non-zero, naming the unknown slug and no other', async () => {
@@ -206,8 +207,9 @@ describe('the hafez-save draft, through a real shell', () => {
   })
 
   it.each(SHELLS)('%s: prose with an apostrophe, a $VAR and a backtick saves', shell => {
-    const env = { ...process.env, PATH: `${shimDir}:${process.env.PATH}` }
-    const slug = spawnSync('hafez', ['create', 'entity', `Shell target ${shell}`, '--type', 'project'], { env, encoding: 'utf-8' }).stdout.trim()
+    const env = envWithPath(shimDir)
+    // Through the shell too: Windows cannot exec the #!/bin/sh shim directly.
+    const slug = spawnSync(shell, ['-c', `hafez create entity 'Shell target ${shell}' --type project`], { env, encoding: 'utf-8' }).stdout.trim()
     const prose = JSON.stringify(PROSE).slice(1, -1).replace(/'/g, apostrophe() ?? "'")
     const command = draft.match(/```\n(hafez digest --data '[\s\S]*?)\n```/)![1]
       .replace(/<slug>/g, slug)

@@ -9,7 +9,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest'
 import { execFileSync, spawnSync } from 'child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, realpathSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, realpathSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { cmdOnboard } from '../src/cli/onboard.js'
@@ -137,6 +137,25 @@ describe('onboard --block: the three folders', () => {
     expect(await block(home, cwd)).toContain(LINE)
   })
 
+  it('matches a resource that reaches the git root through a symlink', async () => {
+    const work = tempDir('work-')
+    const root = repo(work, 'checkout')
+    const link = join(work, 'link')
+    // A junction on Windows, which needs no privilege; the type is ignored elsewhere.
+    symlinkSync(root, link, 'junction')
+    const { home } = setup([{ ...AUTH, resource: link }])
+    expect(await block(home, root)).toContain(LINE)
+  })
+
+  // git prints `C:/…`, and a resource may be typed in any letter case (#189).
+  it.runIf(process.platform === 'win32')('matches a resource equal to the git root in another spelling', async () => {
+    const root = repo(tempDir('work-'), 'checkout')
+    const { home } = setup([{ ...AUTH, resource: root.toLowerCase().replaceAll('\\', '/') }])
+    const cwd = join(root, 'src')
+    mkdirSync(cwd)
+    expect(await block(home, cwd)).toContain(LINE)
+  })
+
   it('matches a resource equal to the git root\'s remote URL, however it is spelled', async () => {
     const root = repo(tempDir('work-'), 'checkout')
     git(root, 'remote', 'add', 'origin', 'git@github.com:Acme/Auth-Service.git')
@@ -235,7 +254,9 @@ describe('onboard --block: any failure prints nothing', () => {
     const home = tempDir('hafez-home-')
     const stdout = execFileSync('node', [join(process.cwd(), 'dist', 'cli.js'), 'onboard', '--block'], {
       cwd: home,
-      env: { PATH: process.env.PATH, HOME: home },
+      // os.homedir() reads USERPROFILE on Windows: without it the CLI finds
+      // the real user's config, and the real vault.
+      env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
       encoding: 'utf-8',
     })
     expect(stdout).toBe('')
@@ -246,7 +267,7 @@ describe('onboard --block: any failure prints nothing', () => {
   const cli = (home: string, ...args: string[]) =>
     spawnSync('node', [join(process.cwd(), 'dist', 'cli.js'), ...args], {
       cwd: home,
-      env: { PATH: process.env.PATH, HOME: home },
+      env: { PATH: process.env.PATH, HOME: home, USERPROFILE: home },
       encoding: 'utf-8',
     })
 

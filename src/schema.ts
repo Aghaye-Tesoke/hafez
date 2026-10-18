@@ -32,6 +32,15 @@ export function validateKnowledgeFrontmatter(fm: Record<string, any>): string[] 
   return errors
 }
 
+/** A session note: its name and created stamp, nothing else is required. */
+export function validateSessionFrontmatter(fm: Record<string, any>): string[] {
+  const errors: string[] = []
+  if (!fm.name || typeof fm.name !== 'string') errors.push('missing required field: name')
+  if (!fm.created) errors.push('missing required field: created')
+  if (fm.related !== undefined && !Array.isArray(fm.related)) errors.push('session related must be an array')
+  return errors
+}
+
 export function validateKnowledgeSubtype(fm: Record<string, any>): string[] {
   const errors: string[] = []
   if (fm.subtype && !VALID_SUBTYPES.includes(fm.subtype)) {

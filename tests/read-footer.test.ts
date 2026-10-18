@@ -6,10 +6,10 @@
 // the Footer's fields against the Op Spec update shape. The four read samples
 // are checked whole in tests/surfaces.test.ts.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdirSync, rmSync } from 'fs'
+import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { cmdQuery, cmdRead, cmdSearch, cmdUpdate, UPDATE_FLAGS } from '../src/cli/commands.js'
 import { ITEMS, footerOp } from '../src/surfaces/items.js'
@@ -29,7 +29,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
   os = createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })
 })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 const DEPTHS: ReadDepth[] = ['frontmatter', 'summary', 'full']
 const FOOTER_START = '\n\n---\n'

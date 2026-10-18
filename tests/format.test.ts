@@ -197,7 +197,7 @@ describe('formatValidation', () => {
   it('renders clean report', () => {
     const result = formatValidation({
       broken_slugs: [], orphaned_knowledge: [], missing_fields: [],
-      total_entities: 10, total_knowledge: 5,
+      total_entities: 10, total_knowledge: 5, total_sessions: 2,
     })
     expect(result).toContain('Vault OK')
     expect(result).toContain('10 entities')
@@ -209,7 +209,7 @@ describe('formatValidation', () => {
       broken_slugs: [{ slug: 'x', field: 'parent', issue: 'not found' }],
       orphaned_knowledge: ['lonely'],
       missing_fields: [{ slug: 'z', field: 'name', issue: 'missing required field' }],
-      total_entities: 10, total_knowledge: 5,
+      total_entities: 10, total_knowledge: 5, total_sessions: 2,
     })
     expect(result).toContain('Broken Slugs')
     expect(result).toContain('x: not found')
@@ -222,7 +222,7 @@ describe('formatValidation', () => {
     const result = formatValidation({
       broken_slugs: [{ slug: 'x', field: 'parent', issue: 'not found' }],
       orphaned_knowledge: [], missing_fields: [],
-      total_entities: 10, total_knowledge: 5,
+      total_entities: 10, total_knowledge: 5, total_sessions: 2,
     })
     expect(result).not.toContain('Vault OK')
   })

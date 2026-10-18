@@ -9,18 +9,20 @@
 // `--install` and `--remove` write the files Hafez owns outside the vault
 // (install.ts). The binary has no interactive prompts: the agent asks, then
 // passes the answer as a flag. `--block` is the SessionStart hook's render
-// (block-hook.ts) and writes nothing.
+// (block-hook.ts) and writes nothing. `--cloud` prints the setup script for a
+// Claude Code cloud environment, whose `--install --vault-repo` writes the
+// Block with the rule that attaches the vault repo (#160).
 
 import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { UsageError, parseArgs, str } from './args.js'
 import { HARNESSES, ONBOARD_HARNESSES, detectAgent, isHarness, isOnboardHarness, type HarnessId, type OnboardHarness } from '../harness.js'
-import { MODES, SKILL_DIRS, fixBrokenMarkers, install, installState, instructionsFile, isMode, legacyLine, remove, removeLegacy, type InstallState, type Mode } from './install.js'
+import { MODES, SKILL_DIRS, fixBrokenMarkers, install, installState, instructionsFile, isMode, legacyLine, remove, removeLegacy, vaultRepoFlag, type InstallState, type Mode } from './install.js'
 import { noVaultMessage, resolveVaultPath, type ConfigHome } from './resolve-vault.js'
 import { HafezError } from '../types.js'
 import { kindDir, scanVaultDir } from '../vault.js'
-import { ITEMS } from '../surfaces/items.js'
+import { ITEMS, isVaultRepo } from '../surfaces/items.js'
 import { renderBlock } from '../surfaces/surfaces.js'
 import { blockHook, type BlockHookCtx } from './block-hook.js'
 
@@ -29,9 +31,10 @@ const MODE_IDS = MODES.join('|')
 
 const ONBOARD_USAGE = `Usage:
   hafez onboard
-  hafez onboard --install --mode <${MODE_IDS}> [--harness <${HARNESS_IDS}>] [--confirm]
+  hafez onboard --install --mode <${MODE_IDS}> [--harness <${HARNESS_IDS}>] [--vault-repo <owner>/<repo>] [--confirm]
   hafez onboard --remove [--confirm]
-  hafez onboard --block [--harness <${HARNESS_IDS}>]`
+  hafez onboard --block [--harness <${HARNESS_IDS}>]
+  hafez onboard --cloud --vault-repo <owner>/<repo>`
 
 /** What `onboard` reads from its surroundings, each defaulting to the process's. */
 export type OnboardCtx = Partial<ConfigHome> & Pick<BlockHookCtx, 'cwd' | 'vaultFlag'>
@@ -44,7 +47,7 @@ export function cmdOnboard(args: string[], ctx: OnboardCtx = {}): string | Promi
   const { home = homedir(), env = process.env, cwd, vaultFlag } = ctx
   const { flags, positionals } = parseArgs(
     args,
-    { install: 'boolean', remove: 'boolean', block: 'boolean', mode: 'string', harness: 'string', confirm: 'boolean' },
+    { install: 'boolean', remove: 'boolean', block: 'boolean', cloud: 'boolean', mode: 'string', harness: 'string', 'vault-repo': 'string', confirm: 'boolean' },
     ONBOARD_USAGE,
   )
   const fail = (why: string): never => {
@@ -53,9 +56,19 @@ export function cmdOnboard(args: string[], ctx: OnboardCtx = {}): string | Promi
   if (positionals.length) fail(`Unexpected argument: ${positionals[0]}`)
   const mode = str(flags.mode)
   const harnessFlag = str(flags.harness)
+  const vaultRepo = str(flags['vault-repo'])
   const confirm = flags.confirm === true
 
   if (flags.install && flags.remove) fail('--install and --remove are separate commands')
+  if (vaultRepo !== undefined && !isVaultRepo(vaultRepo)) fail(`--vault-repo takes the vault's GitHub repo as <owner>/<repo>, got: ${vaultRepo}`)
+  if (vaultRepo !== undefined && !flags.cloud && !flags.install) fail('--vault-repo goes with --cloud or --install')
+  if (flags.cloud) {
+    if (flags.install || flags.remove || flags.block || mode !== undefined || harnessFlag !== undefined || confirm) {
+      fail('--cloud takes only --vault-repo: it prints the setup script and writes nothing')
+    }
+    if (vaultRepo === undefined) return fail('--cloud needs --vault-repo <owner>/<repo>, the vault\'s GitHub repo')
+    return ITEMS.cloudSetup.render({ vaultRepo })
+  }
   if (flags.block) {
     if (flags.install || flags.remove || mode !== undefined || confirm) fail('--block takes only --harness: it prints the Block and writes nothing')
     if (harnessFlag !== undefined && !isHarness(harnessFlag)) fail(`Unknown harness: ${harnessFlag}`)
@@ -72,7 +85,11 @@ export function cmdOnboard(args: string[], ctx: OnboardCtx = {}): string | Promi
     if (!isHarness(harness)) {
       return fail(harnessFlag === undefined ? `No harness detected: pass --harness <${HARNESS_IDS}>` : `Unknown harness: ${harnessFlag}`)
     }
-    return install({ home, harness, mode, confirm })
+    // The cloud Block's rule is Claude Code's: cloud sessions attach repos there.
+    if (vaultRepo !== undefined && (mode !== 'always-on' || harness !== 'claude-code')) {
+      fail('--vault-repo is for a Claude Code cloud container: --mode always-on --harness claude-code')
+    }
+    return install({ home, harness, mode, confirm, vaultRepo })
   }
   if (mode !== undefined || harnessFlag !== undefined || confirm) fail('--mode, --harness and --confirm go with --install, --remove or --block')
   const harness = detectAgent(env)
@@ -164,7 +181,8 @@ export function renderOnboard({ home, harness, vault }: { home: string; harness:
   const teaching = (m: Mode) => ITEMS.teachingLines.render({ harness, mode: m })
   const line2 = (m: Mode) => ITEMS.teachingLines.render({ harness, mode: m, line2Only: true })
   const instructionsRel = `~/${instructionsFile(home, instructions)}`
-  const block = `\`\`\`\`\n${renderBlock()}\`\`\`\``
+  // A cloud Block stays one: its install line and Block keep the vault repo.
+  const block = `\`\`\`\`\n${renderBlock(state.vaultRepo)}\`\`\`\``
   const showBlock = `show the user the Block below word for word, not a summary, say it goes into ${instructionsRel} between two marker lines and nothing else in that file changes, and get a yes. Then run:`
 
   const status = [
@@ -212,7 +230,7 @@ export function renderOnboard({ home, harness, vault }: { home: string; harness:
         ...(state.legacy === null ? [] : [`${removeLegacy(instructionsRel, state.legacy)} Do this before either install below.`, '']),
         `Always-on: ${showBlock}`,
         '',
-        'hafez onboard --install --mode always-on',
+        `hafez onboard --install --mode always-on${vaultRepoFlag(state.vaultRepo)}`,
         '',
         'Invoke-only: no file of theirs is edited. Run:',
         '',

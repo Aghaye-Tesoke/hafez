@@ -4,10 +4,10 @@
 // known substring-match defects — each flip is an explicit, reviewed bugfix
 // in the commit that lands the Document ops, mirroring the C3 method.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { parseFilePath } from '../src/vault.js'
 import { countSessionLogEntries } from '../src/document.js'
-import { mkdirSync, rmSync } from 'fs'
+import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -19,7 +19,7 @@ beforeAll(() => {
   mkdirSync(join(VAULT, 'entities'), { recursive: true })
   mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
 })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 function makeOS() {
   return createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })

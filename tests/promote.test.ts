@@ -1,6 +1,6 @@
 // tests/promote.test.ts
 import { describe, it, expect, beforeEach } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez } from './helpers/hafez.js'
 import { HafezError } from '../src/types.js'
 import { exitCodeFor } from '../src/cli/index.js'
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs'
@@ -97,7 +97,7 @@ describe('promote', () => {
     const slug = await os.capture('Descriptive capture')
     await os.update(slug, { description: 'Carried over' })
     await os.promote(slug, 'knowledge')
-    const file = await os.read(slug)
+    const file = asKnowledge(await os.read(slug))
     expect(file.frontmatter.description).toBe('Carried over')
   })
 

@@ -6,10 +6,10 @@
 // or the error thrown, and the vault file afterwards. The three update
 // samples are checked whole in tests/surfaces.test.ts.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdirSync, rmSync, readFileSync } from 'fs'
+import { mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { cmdRead, cmdUpdate } from '../src/cli/commands.js'
 import { RenderedError, UsageError } from '../src/cli/args.js'
@@ -29,7 +29,7 @@ beforeAll(async () => {
   await os.create('entity', 'Auth Refactor', { type: 'project', add_actions: ['Migrate the mobile client', 'Remove the cookie fallback'] })
   await os.create('entity', 'Platform', { type: 'project' })
 })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 let seq = 0
 const entity = async (actions: string[] = []) =>

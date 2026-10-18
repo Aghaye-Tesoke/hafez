@@ -6,8 +6,8 @@
 // exempt; a knowledge note is never given one. The agent is detected from the
 // Harness; the `agent` field overrides it. Library seam over a memory Journal.
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
-import { createHafez } from '../src/index.js'
-import { mkdirSync, rmSync } from 'fs'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -48,7 +48,7 @@ beforeAll(() => {
 })
 
 afterEach(() => { vi.unstubAllEnvs() })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 describe('every path adds the entry', () => {
   it('a batch update with brief and no session_log writes one progress entry', async () => {

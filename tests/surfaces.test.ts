@@ -28,7 +28,7 @@ import {
 } from '../src/surfaces/surfaces.js'
 import { SURFACE_FILES, renderSurfaceFiles, type SurfaceFile } from './helpers/surface-samples.js'
 
-// The contract lives under docs/, which never ships (tools/release.sh
+// The contract lives under docs/, which never ships (tools/overlay.sh
 // PRIVATE_PATHS): its owner-table check runs only where the file exists.
 const CONTRACT = 'docs/agent-contract/README.md'
 

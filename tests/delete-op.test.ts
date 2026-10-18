@@ -6,13 +6,13 @@
 // delete. Links are judged as the vault would stand after the earlier ops of
 // the same batch, so dry-run and apply agree.
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { HafezError, type Hafez, type Journal } from '../src/types.js'
 import { serializeFile } from '../src/vault.js'
 import { cmdDelete, cmdBatch } from '../src/cli/commands.js'
 import { getOpSchema } from '../src/cli/schema-introspect.js'
 import { readEntity } from './helpers/vault-files.js'
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from 'fs'
+import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal, type MemoryJournal } from './helpers/memory-journal.js'
@@ -33,7 +33,7 @@ beforeEach(async () => {
   await os.create('knowledge', 'Twin A', { synthesis: 'first copy' })
   await os.create('knowledge', 'Twin B', { synthesis: 'second copy' })
 })
-afterEach(() => rmSync(TMP, { recursive: true, force: true }))
+afterEach(() => removeTemp(TMP))
 
 const knowledgeFile = (slug: string) => join(VAULT, 'knowledge', `${slug}.md`)
 const sessionFile = (slug: string) => join(VAULT, 'sessions', `${slug}.md`)

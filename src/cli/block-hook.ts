@@ -35,12 +35,16 @@ export async function blockHook(ctx: BlockHookCtx): Promise<string | null> {
     // A --vault flag is not checked by resolution; opening a non-vault would
     // leave an index file in it.
     if (typeof vaultPath !== 'string' || !isVault(vaultPath)) return null
-    const cwd = realpathSync(ctx.cwd ?? process.cwd())
+    const dir = ctx.cwd ?? process.cwd()
+    // A deleted working directory: no folder to match.
+    if (!existsSync(dir)) return null
+    const cwd = canonical(dir)
     const folders = foldersOf(cwd)
     const remotes = remoteUrls(cwd)
 
     const { createHafez } = await import('../index.js')
-    const { items } = await createHafez({ vaultPath, git: { push: false } }).query({ filter: 'all' })
+    const os = createHafez({ vaultPath, git: { push: false } })
+    const { items } = await os.query({ filter: 'all' }).finally(() => os.close())
     const matches = items
       .filter(e => folders.some(f => basename(f) === e.slug) || (e.resource !== null && resourceMatches(e.resource, folders, remotes)))
       // Active first: the status tuple is ordered active, paused, done.
@@ -70,11 +74,24 @@ function foldersOf(cwd: string): string[] {
   const [top, common] = out?.split('\n') ?? []
   // Before git 2.31 `--path-format` is echoed back, not obeyed: no git root.
   if (top && common && isAbsolute(top) && isAbsolute(common)) {
-    folders.push(top)
+    const root = canonical(top)
+    folders.push(root)
     // A linked worktree shares the main checkout's `.git` as its common dir.
-    if (basename(common) === '.git' && dirname(common) !== top) folders.push(dirname(common))
+    // The shape is read off git's own path: a symlinked `.git` resolves to a
+    // directory with some other name.
+    const main = canonical(dirname(common))
+    if (basename(common) === '.git' && main !== root) folders.push(main)
   }
   return [...new Set(folders)]
+}
+
+/** One spelling per folder, so paths from git, the working directory and a
+ * `resource` compare equal: git prints `C:/…` on Windows, realpath `C:\…`.
+ * The native realpath, since only it returns the filesystem's own letter case
+ * (`c:\users\…` is `C:\Users\…`) and long names for 8.3 ones. */
+function canonical(path: string): string {
+  const abs = resolve(path)
+  return existsSync(abs) ? realpathSync.native(abs) : abs
 }
 
 /** Every remote's URL, normalised. */
@@ -95,9 +112,6 @@ function normaliseUrl(url: string): string {
 }
 
 function resourceMatches(resource: string, folders: string[], remotes: string[]): boolean {
-  if (isAbsolute(resource)) {
-    const path = resolve(resource)
-    return folders.includes(existsSync(path) ? realpathSync(path) : path)
-  }
+  if (isAbsolute(resource)) return folders.includes(canonical(resource))
   return remotes.includes(normaliseUrl(resource))
 }

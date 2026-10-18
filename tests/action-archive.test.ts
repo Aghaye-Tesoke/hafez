@@ -6,10 +6,10 @@
 // seam over a memory-Journal factory: the string a command returns and the
 // vault files afterwards.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createMemoryJournal, type MemoryJournal } from './helpers/memory-journal.js'
 import { cmdRead, cmdUpdate } from '../src/cli/commands.js'
 import { digest } from '../src/digest.js'
@@ -29,7 +29,7 @@ beforeAll(() => {
   journal = createMemoryJournal()
   os = createHafez({ vaultPath: VAULT, persistence: journal })
 })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 const entityRel = (slug: string) => `entities/${slug}.md`
 const archiveRel = (slug: string) => `entities/archive/${slug}-log.md`

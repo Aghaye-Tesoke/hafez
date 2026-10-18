@@ -33,8 +33,15 @@ export type PlanStatus = typeof PLAN_STATUSES[number]
  * lives on knowledge notes only. Asking for one on the entity branch is a
  * validation error, not a silent fall back to recency, so the entity opts
  * type declares only what that branch can actually sort by. */
-export type SortField = 'last_touched' | 'created' | 'name' | 'staleness' | 'last_reinforced' | 'reinforcement_count'
-export type EntitySortField = Exclude<SortField, 'last_reinforced' | 'reinforcement_count'>
+export type SortField = 'last_touched' | 'created' | 'name' | 'staleness' | 'last_reinforced' | 'reinforcement_count' | 'session_date'
+export type EntitySortField = Exclude<SortField, 'last_reinforced' | 'reinforcement_count' | 'session_date'>
+export type KnowledgeSortField = Exclude<SortField, 'session_date'>
+/** A session note carries only its dates and its name. */
+export type SessionSortField = 'session_date' | 'created' | 'name'
+
+/** What `search` reaches. Unset is the working set, entity + knowledge;
+ * `all` is literal, sessions included. */
+export type SearchKind = 'entity' | 'knowledge' | 'session' | 'all'
 
 export interface EntityQueryOpts {
   filter?: QueryFilter
@@ -61,7 +68,20 @@ export interface KnowledgeQueryOpts {
   createdSince?: string   // ISO date — created >= createdSince
   createdBefore?: string  // ISO date — created <= createdBefore
   tags?: string[]
-  sort_by?: SortField
+  sort_by?: KnowledgeSortField
+  sort_order?: 'asc' | 'desc'
+  limit?: number
+  offset?: number
+}
+
+/** Sessions carry no status, domain or tags: the time window (`since`/`before`
+ * against `session-date`), sort and paging are all a session query takes. */
+export interface SessionQueryOpts {
+  since?: string          // ISO date — session_date >= since
+  before?: string         // ISO date — session_date <= before
+  createdSince?: string
+  createdBefore?: string
+  sort_by?: SessionSortField
   sort_order?: 'asc' | 'desc'
   limit?: number
   offset?: number
@@ -69,7 +89,9 @@ export interface KnowledgeQueryOpts {
 
 /** `kind: 'all'` (or unset): reaches both sides, so it takes opts from both
  * and can honour every sort field. Status filters narrow the entity side only
- * — knowledge notes carry no status and are never excluded by one. */
+ * — knowledge notes carry no status and are never excluded by one. Unset
+ * is the working set, entity + knowledge; `all` is literal and reaches the
+ * sessions too. */
 export interface AllQueryOpts extends Omit<EntityQueryOpts, 'sort_by'> {
   kind?: 'all'
   confidence?: ConfidenceLevel
@@ -87,6 +109,7 @@ export type UnifiedQueryOpts =
   | AllQueryOpts
   | (EntityQueryOpts & { kind: 'entity' })
   | (KnowledgeQueryOpts & { kind: 'knowledge' })
+  | (SessionQueryOpts & { kind: 'session' })
 
 // --- Frontmatter ---
 
@@ -137,9 +160,8 @@ export type ParsedVaultFile =
   | { kind: 'knowledge'; frontmatter: KnowledgeFrontmatter; body: string }
   | { kind: 'session'; frontmatter: SessionFrontmatter; body: string }
 
-/** What read() returns: the indexed arms of ParsedVaultFile (a session slug is
- * never resolvable through read()), so consumers narrow on `kind`. */
-export type ParsedFile = Extract<ParsedVaultFile, { kind: 'entity' | 'knowledge' }>
+/** What read() returns: any vault file, so consumers narrow on `kind`. */
+export type ParsedFile = ParsedVaultFile
 
 // --- Session log ---
 
@@ -262,9 +284,18 @@ export interface KnowledgeQueryResult {
   last_touched: string | null
 }
 
+export interface SessionQueryResult {
+  slug: string
+  name: string
+  session_date: string
+  created: string
+  related: string[]
+}
+
 export type UnifiedResult =
   | (QueryResult & { kind: 'entity' })
   | (KnowledgeQueryResult & { kind: 'knowledge' })
+  | (SessionQueryResult & { kind: 'session' })
 
 export interface ValidationIssue {
   slug: string
@@ -278,11 +309,12 @@ export interface ValidationReport {
   missing_fields: ValidationIssue[]
   total_entities: number
   total_knowledge: number
+  total_sessions: number
 }
 
 export interface SearchResult {
   slug: string
-  kind: 'entity' | 'knowledge'
+  kind: 'entity' | 'knowledge' | 'session'
   name: string
   snippet: string
   type?: EntityType
@@ -306,7 +338,7 @@ export interface VaultStats {
 
 export interface ChangelogEntry {
   slug: string
-  kind: 'entity' | 'knowledge'
+  kind: 'entity' | 'knowledge' | 'session'
   operation: 'created' | 'updated' | 'deleted'
   timestamp: string
   commit_message: string
@@ -367,7 +399,7 @@ export interface BatchValidationReport {
 
 // --- Errors ---
 
-export type HafezErrorCode = 'NOT_FOUND' | 'SLUG_EXISTS' | 'VALIDATION_FAILED' | 'GIT_PUSH_FAILED' | 'GIT_COMMIT_FAILED' | 'VAULT_LOCKED'
+export type HafezErrorCode = 'NOT_FOUND' | 'SLUG_EXISTS' | 'VALIDATION_FAILED' | 'GIT_PUSH_FAILED' | 'GIT_COMMIT_FAILED' | 'GIT_READ_FAILED' | 'VAULT_LOCKED'
 
 export class HafezError extends Error {
   constructor(public code: HafezErrorCode, message: string, public details?: string[]) {
@@ -388,16 +420,19 @@ export interface GitConfig {
  * production (src/git.ts); tests may inject an in-memory adapter.
  */
 export interface Journal {
-  /** Persist one logical change: stage written+deleted paths (vault-relative)
-   * and commit under message. Must clean up its own partial state (e.g.
-   * staged files) before rethrowing on a commit-stage failure; a push-stage
-   * failure surfaces as GIT_PUSH_FAILED with the commit kept. */
+  /** Persist one logical change: stage written+deleted paths (vault-relative,
+   * '/'-separated on every platform) and commit under message. Must clean up
+   * its own partial state (e.g. staged files) before rethrowing on a
+   * commit-stage failure; a push-stage failure surfaces as GIT_PUSH_FAILED
+   * with the commit kept. */
   commit(written: string[], deleted: string[], message: string): Promise<void>
   /** Bidirectional sync with the remote, if any. */
   sync(): Promise<{ pulled: boolean; pushed: boolean; remote: boolean }>
-  /** History-derived changelog for entities/ and knowledge/ since a date. */
+  /** History-derived changelog for the indexed dirs since a date. Empty when
+   * the repo has no commits; any other git failure throws `GIT_READ_FAILED`. */
   changelog(since: string): Promise<ChangelogEntry[]>
-  /** Newest history timestamp per vault file (modified = any change, added = creation). */
+  /** Newest history timestamp per vault file (modified = any change, added = creation).
+   * Empty when the repo has no commits; any other git failure throws `GIT_READ_FAILED`. */
   fileTimes(mode: 'modified' | 'added'): Promise<Map<string, string>>
 }
 
@@ -431,9 +466,18 @@ export interface Hafez {
   children(slug: string): Promise<{ items: QueryResult[], total: number }>
   related_to(slug: string, relation?: string): Promise<{ items: UnifiedResult[], total: number }>
   query_knowledge(opts?: KnowledgeQueryOpts): Promise<{ items: KnowledgeQueryResult[], total: number }>
+  query_sessions(opts?: SessionQueryOpts): Promise<{ items: SessionQueryResult[], total: number }>
+  /** An entity's archived log entries (`entities/archive/<slug>-log.md`), as
+   * written; null when it has none. Read from disk, never indexed: the
+   * archive is reached from its entity on purpose, never found by search. */
+  archive(slug: string): Promise<string | null>
   validate(): Promise<ValidationReport>
-  search(query: string, kind?: 'entity' | 'knowledge' | 'all'): Promise<SearchResult[]>
+  search(query: string, kind?: SearchKind): Promise<SearchResult[]>
   rebuildIndex(): Promise<void>
   stats(): Promise<VaultStats>
   changelog(since: string): Promise<ChangelogEntry[]>
+  /** Release the SQLite index handle. Idempotent; the next call that needs
+   * the index reopens it. Call before deleting the vault: Windows cannot
+   * remove a directory holding an open file. */
+  close(): void
 }

@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { gitChangelog } from '../src/git.js'
-import { createHafez } from '../src/index.js'
-import { mkdirSync, writeFileSync, rmSync } from 'fs'
+import { gitChangelog, gitFileTimes } from '../src/git.js'
+import { HafezError } from '../src/types.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { mkdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { simpleGit } from 'simple-git'
@@ -43,7 +44,7 @@ beforeAll(async () => {
   await git.commit('init vault scaffold')
 })
 
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 describe('gitChangelog', () => {
   it('returns changelog entries for recent commits', async () => {
@@ -114,7 +115,7 @@ describe('gitChangelog rename lines (promote crosses directories)', () => {
     await git.commit('rename: promoted-note -> renamed-note')
   })
 
-  afterAll(() => rmSync(REPO, { recursive: true, force: true }))
+  afterAll(() => removeTemp(REPO))
 
   it('reports the promote destination as a created knowledge entry', async () => {
     const entries = await gitChangelog(REPO, since)
@@ -162,7 +163,7 @@ describe('changelog surfaces a real promote', () => {
     await git.commit('init')
   })
 
-  afterAll(() => rmSync(VAULT, { recursive: true, force: true }))
+  afterAll(() => removeTemp(VAULT))
 
   it('lists the promoted slug under its new kind', async () => {
     const os = createHafez({ vaultPath: VAULT, git: { push: false } })
@@ -171,5 +172,50 @@ describe('changelog surfaces a real promote', () => {
 
     const entries = await os.changelog(new Date(Date.now() - 120000).toISOString())
     expect(entries.some(e => e.slug === slug && e.kind === 'knowledge')).toBe(true)
+  })
+})
+
+describe('git read failures (#203)', () => {
+  const unborn = join(tmpdir(), 'hafez-test-readfail-unborn-' + Date.now())
+  const notRepo = join(tmpdir(), 'hafez-test-readfail-norepo-' + Date.now())
+  const broken = join(tmpdir(), 'hafez-test-readfail-broken-' + Date.now())
+
+  beforeAll(async () => {
+    for (const dir of [unborn, notRepo, broken]) mkdirSync(join(dir, 'entities'), { recursive: true })
+    await simpleGit(unborn).init()
+    // A real history whose object store is then emptied: HEAD points at a
+    // commit git can no longer read. Not a "no history" phrase.
+    const git = simpleGit(broken)
+    await git.init()
+    await git.addConfig('user.email', 'test@test.com')
+    await git.addConfig('user.name', 'Test')
+    writeFileSync(join(broken, 'entities', 'a.md'), '---\nname: A\n---\n')
+    await git.add('entities/a.md')
+    await git.commit('create: a')
+    rmSync(join(broken, '.git', 'objects'), { recursive: true, force: true })
+    mkdirSync(join(broken, '.git', 'objects'))
+  })
+
+  afterAll(() => { for (const dir of [unborn, notRepo, broken]) removeTemp(dir) })
+
+  it('a repo with no commits reads as no history: empty changelog, empty fileTimes', async () => {
+    expect(await gitChangelog(unborn, '2020-01-01')).toEqual([])
+    expect((await gitFileTimes(unborn, 'modified')).size).toBe(0)
+    expect((await gitFileTimes(unborn, 'added')).size).toBe(0)
+  })
+
+  it.each([
+    ['a directory that is not a git repository', () => notRepo],
+    ['a repo whose object store is gone', () => broken],
+  ])('%s throws GIT_READ_FAILED carrying git\'s message', async (_name, dir) => {
+    const changelog = await gitChangelog(dir(), '2020-01-01').catch(e => e)
+    const times = await gitFileTimes(dir(), 'modified').catch(e => e)
+    for (const err of [changelog, times]) {
+      expect(err, `expected a throw, got ${JSON.stringify(err)}`).toBeInstanceOf(HafezError)
+      expect(err.code, err.message).toBe('GIT_READ_FAILED')
+      expect(err.message).toMatch(/^git read failed: \S/)
+      expect(err.details?.length).toBeGreaterThan(0)
+      expect(err.message).toContain(err.details[0])
+    }
   })
 })

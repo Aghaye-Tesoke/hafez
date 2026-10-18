@@ -5,6 +5,7 @@ import { HafezError } from '../src/types.js'
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
+import { execSync } from 'child_process'
 import { simpleGit } from 'simple-git'
 
 const TMP = join(tmpdir(), 'hafez-test-git-' + Date.now())
@@ -724,6 +725,27 @@ describe('local-only vault (no remote configured)', () => {
     const status = await git.status()
     expect(status.isClean()).toBe(true)
   })
+
+  it('commits under a shell that exports the env keys simple-git scans (PAGER, GIT_ASKPASS, …)', async () => {
+    // The factory hands process.env to simple-git, which rejects these keys
+    // unless each category is allowed. The user's shell carries them routinely
+    // (VS Code sets GIT_ASKPASS; desktops set SSH_ASKPASS; PAGER is common).
+    const scanned = {
+      PAGER: 'less', VISUAL: 'vi', GIT_ASKPASS: '/usr/bin/true', SSH_ASKPASS: '/usr/bin/true', GIT_SSH_COMMAND: 'ssh',
+      // conda's git activation and Git for Windows shells export this; 4.0 moved it to its own category.
+      GIT_EXEC_PATH: execSync('git --exec-path').toString().trim(),
+      GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: 'store'
+    }
+    const saved = Object.fromEntries(Object.keys(scanned).map(k => [k, process.env[k]]))
+    Object.assign(process.env, scanned)
+    try {
+      writeFileSync(join(TMP3, 'entities', 'env-item.md'), '---\nname: Env Item\ntype: entity\nstatus: active\ncreated: 2026-01-01\nlast-touched: 2026-01-01\n---\n')
+      await gitCommitAndPush(TMP3, ['entities/env-item.md'], 'add env item')
+      expect((await simpleGit(TMP3).log()).latest?.message).toBe('add env item')
+    } finally {
+      for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v)
+    }
+  })
 })
 
 describe('createGitJournal fileTimes (recents tiebreak source)', () => {
@@ -734,7 +756,7 @@ describe('createGitJournal fileTimes (recents tiebreak source)', () => {
 
   beforeAll(async () => {
     mkdirSync(join(REPO, 'entities'), { recursive: true })
-    const git = simpleGit(REPO)
+    const git = simpleGit({ baseDir: REPO, allowEnvironment: ['GIT_AUTHOR_DATE', 'GIT_COMMITTER_DATE'] })
     await git.init()
     await git.addConfig('user.email', 'test@test.com')
     await git.addConfig('user.name', 'Test')

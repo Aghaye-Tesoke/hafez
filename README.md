@@ -1,5 +1,7 @@
 # Hafez
 
+[![CI](https://github.com/shrvn-r/hafez/actions/workflows/public.yml/badge.svg?branch=main)](https://github.com/shrvn-r/hafez/actions/workflows/public.yml)
+
 **A knowledge and project vault shared between you and your agents.** *Hafez* (حافظ) is Persian for "the keeper — the one who memorizes," after the poet. Plain markdown files you own, backed by SQLite full-text search and git.
 
 ## Why
@@ -76,6 +78,23 @@ plus `--allow-remote=root`, which npm 12+ requires for a remote URL:
 ```bash
 npm install -g https://github.com/shrvn-r/hafez/releases/latest/download/hafez.tgz --allow-scripts=better-sqlite3 --allow-remote=root
 ```
+
+### Cloud sessions
+
+A Claude Code cloud session (claude.ai/code, the mobile app) starts in a fresh
+container: no `hafez`, no vault, no Block. Keep the vault in a private GitHub
+repo and print the environment's setup script for it:
+
+```bash
+hafez onboard --cloud --vault-repo <owner>/<vault-repo>
+```
+
+Paste the script into the cloud environment's Setup script; the Trusted network
+policy is enough. It installs Hafez, registers the vault when it is attached to
+the session, and writes a Block with one rule more: a session started without
+the vault attached attaches it, clones it and registers it, with one approval
+from you. The script never clones the vault itself, because it runs without
+GitHub credentials. Writes push to the vault's `main` like anywhere else.
 
 ## Updating
 
@@ -161,7 +180,7 @@ Three kinds of documents, all markdown + YAML frontmatter:
 
 - **Entities** (`entities/*.md`) — the things you're working on. Types: `capture` (inbox item), `entity` (anything worth tracking), `project` (has outcomes). Statuses: `active | paused | done`. Bodies start from a per-type template (capture: `## Notes`; entity: `## Context`; project: `## Purpose` + `## Goals`) plus a `## Session Log` of dated agent entries; `## Brief` (freeform handoff context) and `## Next Actions` (checkbox list) appear when first written to.
 - **Knowledge** (`knowledge/*.md`) — durable insights that outlive any one project. Subtypes `insight | plan`; confidence levels `observation → pattern → principle` (promoted manually). Bodies hold `## Synthesis`, `## Evidence`, and `## Sources` — evidence accumulates over time via `--add-evidence`.
-- **Sessions** (`sessions/*.md`) — session summaries written via `batch`, kept as history, not indexed.
+- **Sessions** (`sessions/*.md`) — session summaries written at save time, never updated. Readable (`hafez read <slug>`), listed newest first (`hafez query --kind session`), and the look back from an entity (`hafez query --related-to <slug>`); search and query reach them only under `--kind session` or `--kind all`.
 
 Frontmatter at a glance:
 
@@ -181,9 +200,9 @@ Links (`parent`, `related`) are validated — they must point at slugs that exis
 
 | Command | What it does |
 |---|---|
-| `hafez read <slug> [--depth frontmatter\|summary\|full]` | Read an entity or knowledge note |
-| `hafez query [--filter active\|paused\|done\|stale\|capture\|all] [--type] [--kind entity\|knowledge\|all] [--domain] [--tag] [--parent] [--related-to] [--limit]` | Filter and list |
-| `hafez search <terms> [--kind ...]` | FTS5 full-text search |
+| `hafez read <slug> [--depth frontmatter\|summary\|full] [--archive]` | Read an entity, knowledge or session note; `--archive` an entity's archived log entries |
+| `hafez query [--filter active\|paused\|done\|stale\|capture\|all] [--type] [--kind entity\|knowledge\|session\|all] [--domain] [--tag] [--parent] [--related-to] [--limit]` | Filter and list |
+| `hafez search <terms> [--kind entity\|knowledge\|session\|all]` | FTS5 full-text search (default: entities and knowledge) |
 | `hafez create <entity\|knowledge> <name> [flags]` | Create a document |
 | `hafez capture <name> [--notes]` | Quick inbox capture |
 | `hafez promote <slug> <entity\|project\|knowledge>` | Promote a capture upward |
@@ -197,6 +216,7 @@ Links (`parent`, `related`) are validated — they must point at slugs that exis
 | `hafez validate` / `hafez index rebuild` | Integrity check / rebuild the read index |
 | `hafez onboard` | Setup status, then the script your agent follows: Mode, install, permissions, seeding |
 | `hafez onboard --install --mode <always-on\|invoke-only>` / `--remove` | Write (or remove) the two skills and, always-on, the marked Block in the harness's instructions file |
+| `hafez onboard --cloud --vault-repo <owner>/<repo>` | Print the setup script for Claude Code cloud sessions |
 | `hafez schema [op] [--examples]` | Machine-readable JSON schema for every operation |
 | `hafez export --okf [--out <dir>]` | Read-only OKF v0.1 bundle export |
 

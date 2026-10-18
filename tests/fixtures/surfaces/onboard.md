@@ -1,11 +1,11 @@
-Three renders from `hafez onboard`. Each fenced block is one complete output.
+Four renders from `hafez onboard`. Each fenced block is one complete output.
 
 ## `hafez onboard --block` (what the SessionStart hook prints)
 
 The Block exactly as in `block.md`, then one line per entity matching the folder. The folder is the working directory, its git root, and, in a linked worktree, the main repository's root; each is matched exactly, and no directory in between is tried. No match: the Block alone.
 
 ````
-<!-- hafez:begin 6adb94431f00 -->
+<!-- hafez:begin 5fedf39ccb96 -->
 (the Block)
 <!-- hafez:end -->
 
@@ -16,7 +16,7 @@ hafez read auth-refactor (Move session handling from cookies to short-lived toke
 Several matches, all printed, active first; an entity with no description gets its slug alone:
 
 ````
-<!-- hafez:begin 6adb94431f00 -->
+<!-- hafez:begin 5fedf39ccb96 -->
 (the Block)
 <!-- hafez:end -->
 
@@ -115,4 +115,31 @@ Invoke-only, line 2:
 
 ```
 2. Hafez is invoke-only: nothing is loaded and nothing is written unless you ask. Say "read <name>" to load, "note this" to write.
+```
+
+## `hafez onboard --cloud --vault-repo ana/vault` (the setup script for Claude Code cloud sessions)
+
+````
+Each Claude Code cloud session is a fresh container: no `hafez`, no vault, no Block. Paste this into the cloud environment's Setup script; the Trusted network policy is enough.
+
+```
+#!/bin/bash
+npm install -g hafez --allow-scripts=better-sqlite3 || exit 0
+VAULT=/home/user/vault
+if [ -d "$VAULT/.git" ]; then
+  hafez init --register "$VAULT"
+fi
+hafez onboard --install --mode always-on --harness claude-code --vault-repo ana/vault || true
+```
+
+Attach ana/vault when you start a session, with push access, and the script registers it. The script cannot clone it: it runs without GitHub credentials. A session started without it attached is told by the Block to attach, clone and register it.
+````
+
+The Block its install line writes is the Block in `block.md` with the repo in its begin marker and one paragraph more, after the first:
+
+```
+<!-- hafez:begin e2323a1fb962 vault-repo=ana/vault -->
+…
+**Cloud session.** If `hafez init` shows no registered vault: attach `ana/vault` to this session (add_repo, push access), clone it to /home/user/vault, run `hafez init --register /home/user/vault`, then continue. Never create a throwaway vault.
+…
 ```

@@ -24,7 +24,17 @@ export function localDay(d: Date = new Date()): string {
  * now"), and any explicit instant must anchor to the same local day boundary
  * the stamps and query comparisons use. Relative forms (`7.days.ago`) are
  * already local and pass through untouched.
+ *
+ * The offset is spelled out: without one git applies its own idea of the
+ * local zone, and Git for Windows ignores an IANA `TZ` that Node honours,
+ * so the two disagreed about where the day starts.
  */
 export function normalizeSinceDate(since: string): string {
-  return /^\d{4}-\d{2}-\d{2}$/.test(since) ? `${since}T00:00:00` : since
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(since)
+  if (!m) return since
+  // The day's first instant: 01:00 where a DST jump skips midnight.
+  const start = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  const offset = -start.getTimezoneOffset()
+  const zone = `${offset < 0 ? '-' : '+'}${pad(Math.floor(Math.abs(offset) / 60))}${pad(Math.abs(offset) % 60)}`
+  return `${localDay(start)}T${pad(start.getHours())}:${pad(start.getMinutes())}:00${zone}`
 }

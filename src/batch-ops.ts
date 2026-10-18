@@ -366,7 +366,9 @@ function claimNew(
   info: ResolvedTarget,
   build?: () => void,
 ): OpCheckResult['primaryCode'] {
-  const taken = ctx.existsAnywhere(slug)
+  // A session note holds its slug too: every kind shares one index row per
+  // slug, so a create must not take one a session already has.
+  const taken = ctx.existsAnywhere(slug) || ctx.sessionExists(slug)
   if (taken) errors.push(`Slug '${slug}' already exists`)
   if (build) { try { build() } catch (err) { pushErr(errors, err) } }
   if (!taken) ctx.simulate(slug, info)

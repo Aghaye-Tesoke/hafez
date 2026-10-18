@@ -21,7 +21,7 @@ interface IndexEntry {
  * imports from this file. */
 export interface VaultIndexRow {
   slug: string
-  kind: 'entity' | 'knowledge'
+  kind: 'entity' | 'knowledge' | 'session'
   name: string
   type: string | null
   status: string | null

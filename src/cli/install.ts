@@ -15,6 +15,7 @@ import { dirname, join } from 'path'
 import { HafezError } from '../types.js'
 import { HARNESSES, type HarnessId } from '../harness.js'
 import { contentHash, renderBlock, renderHafezSaveSkill, renderHafezSkill } from '../surfaces/surfaces.js'
+import { isVaultRepo } from '../surfaces/items.js'
 
 export const MODES = ['always-on', 'invoke-only'] as const
 export type Mode = (typeof MODES)[number]
@@ -51,7 +52,8 @@ function hashState(found: Installed | null, rendered: string): HashState {
 
 // --- The Block region ---
 
-const BEGIN = /^<!-- hafez:begin ([0-9a-f]{12}) -->$/
+/** The hash, then a cloud Block's vault repo (#160). */
+const BEGIN = /^<!-- hafez:begin ([0-9a-f]{12})(?: vault-repo=(\S+))? -->$/
 const END = '<!-- hafez:end -->'
 
 /** What broken markers are, for a refusal or a report about `path`. */
@@ -63,11 +65,13 @@ export const fixBrokenMarkers = (path: string, rerun: string) =>
   `${brokenMarkers(path)} Fix or delete them by hand, then re-run \`${rerun}\`.`
 
 /** The marked region in a file: `start`..`end` is the begin marker through the
- * end marker, without the end marker's line break; `next` is past that break. */
+ * end marker, without the end marker's line break; `next` is past that break.
+ * `vaultRepo`: a cloud Block's, from its begin marker. */
 interface Region extends Installed {
   start: number
   end: number
   next: number
+  vaultRepo?: string
 }
 
 /** Find the one Block region in `file`, or null when there are no markers.
@@ -87,8 +91,9 @@ function findRegion(file: string, displayPath: string): Region | null {
   if (begins.length === 0 && ends.length === 0) return null
   const [begin] = begins
   const [end] = ends
-  const hash = begin ? BEGIN.exec(begin.line)?.[1] : undefined
-  if (begins.length !== 1 || ends.length !== 1 || end.start < begin.start || !hash || end.line !== END) {
+  const [, hash, vaultRepo] = (begin && BEGIN.exec(begin.line)) || []
+  if (begins.length !== 1 || ends.length !== 1 || end.start < begin.start || !hash || end.line !== END
+    || (vaultRepo !== undefined && !isVaultRepo(vaultRepo))) {
     throw new HafezError(
       'VALIDATION_FAILED',
       `${brokenMarkers(displayPath)} Fix or delete them by hand, then re-run.`,
@@ -101,8 +106,12 @@ function findRegion(file: string, displayPath: string): Region | null {
     hash,
     body: file.slice(begin.next, end.start),
     text: file.slice(begin.start, end.start + END.length),
+    ...(vaultRepo !== undefined && { vaultRepo }),
   }
 }
+
+/** The flag that keeps an install a cloud one, for every printed install line. */
+export const vaultRepoFlag = (vaultRepo: string | undefined) => (vaultRepo === undefined ? '' : ` --vault-repo ${vaultRepo}`)
 
 // --- The 1.x section ---
 
@@ -214,7 +223,14 @@ function skillSteps(home: string, want: 'write' | 'remove'): Step[] {
   })
 }
 
-const RENDERED = findRegion(renderBlock(), 'the render')!
+const RENDERS = new Map<string | undefined, Region>()
+
+/** The Block Hafez writes, as a region; with `vaultRepo`, the cloud Block. A
+ * found Block is checked against the render for its own marker's repo. */
+function rendered(vaultRepo?: string): Region {
+  if (!RENDERS.has(vaultRepo)) RENDERS.set(vaultRepo, findRegion(renderBlock(vaultRepo), 'the render')!)
+  return RENDERS.get(vaultRepo)!
+}
 
 interface BlockOpts {
   home: string
@@ -225,15 +241,18 @@ interface BlockOpts {
   rerun: string
   /** Appended to the absent and removed lines, e.g. ` (invoke-only)`. */
   suffix?: string
+  /** Write the cloud Block for this vault repo. */
+  vaultRepo?: string
 }
 
-function blockStep({ home, rel, want, confirm, rerun, suffix = '' }: BlockOpts): Step {
+function blockStep({ home, rel, want, confirm, rerun, suffix = '', vaultRepo }: BlockOpts): Step {
   const path = join(home, rel)
   const label = `Block in ~/${rel}`
   const file = readInstalled(path)
   const text = file ?? ''
   const region = findRegion(text, `~/${rel}`)
-  const state = hashState(region, RENDERED.text)
+  const target = rendered(want === 'write' ? vaultRepo : region?.vaultRepo)
+  const state = hashState(region, target.text)
 
   if (region && state === 'hand-edited' && !confirm) {
     return {
@@ -244,7 +263,7 @@ function blockStep({ home, rel, want, confirm, rerun, suffix = '' }: BlockOpts):
         rerun,
         '',
         '````diff',
-        lineDiff(region.body, RENDERED.body),
+        lineDiff(region.body, target.body),
         '````',
       ].join('\n'),
     }
@@ -256,11 +275,11 @@ function blockStep({ home, rel, want, confirm, rerun, suffix = '' }: BlockOpts):
   if (state === 'current') return { line: `${label}: current` }
   if (!region) {
     const before = text === '' || text.endsWith('\n') ? text : `${text}\n`
-    return { line: `${label}: written`, write: () => write(path, before + renderBlock()) }
+    return { line: `${label}: written`, write: () => write(path, before + renderBlock(vaultRepo)) }
   }
   return {
     line: `${label}: replaced (was ${state})`,
-    write: () => write(path, text.slice(0, region.start) + RENDERED.text + text.slice(region.end)),
+    write: () => write(path, text.slice(0, region.start) + target.text + text.slice(region.end)),
   }
 }
 
@@ -307,19 +326,23 @@ export interface InstallState {
   onboarded: boolean
   /** The line of a 1.x section in the instructions file, else null. */
   legacy: number | null
+  /** The Block is a cloud Block, for this vault repo. */
+  vaultRepo?: string
 }
 
 export function installState(home: string, harness: HarnessId): InstallState {
   const { instructions } = HARNESSES[harness]
   let block: InstallState['block'] = null
   let legacy: number | null = null
+  let vaultRepo: string | undefined
   if (instructions !== null) {
     const rel = instructionsFile(home, instructions)
     const text = readInstalled(join(home, rel)) ?? ''
     let region: Region | null | undefined
     try {
       region = findRegion(text, `~/${rel}`)
-      block = hashState(region, RENDERED.text)
+      vaultRepo = region?.vaultRepo
+      block = hashState(region, rendered(vaultRepo).text)
     } catch {
       block = 'broken'
     }
@@ -333,13 +356,15 @@ export function installState(home: string, harness: HarnessId): InstallState {
   const states = new Set(skills.map(s => s.state))
   const [only] = states
   const merged = states.size === 1 ? only : states.has('hand-edited') ? 'hand-edited' : 'stale'
-  return { block, skills: merged, onboarded: skills.some(s => s.hashed), legacy }
+  return { block, skills: merged, onboarded: skills.some(s => s.hashed), legacy, ...(vaultRepo !== undefined && { vaultRepo }) }
 }
 
 // --- The two commands ---
 
-export function install(opts: { home: string; harness: HarnessId; mode: Mode; confirm: boolean }): string {
-  const { home, harness, mode, confirm } = opts
+/** `vaultRepo`: the install is for a cloud container, whose Block carries
+ * the rule that attaches that repo as the vault (#160). */
+export function install(opts: { home: string; harness: HarnessId; mode: Mode; confirm: boolean; vaultRepo?: string }): string {
+  const { home, harness, mode, confirm, vaultRepo } = opts
   const { label, instructions } = HARNESSES[harness]
   const steps = skillSteps(home, 'write')
   const tail: string[] = []
@@ -360,8 +385,9 @@ export function install(opts: { home: string; harness: HarnessId; mode: Mode; co
       rel,
       want: mode === 'always-on' ? 'write' : 'remove',
       confirm,
-      rerun: `hafez onboard --install --harness ${harness} --mode ${mode} --confirm`,
+      rerun: `hafez onboard --install --harness ${harness} --mode ${mode}${vaultRepoFlag(vaultRepo)} --confirm`,
       suffix: mode === 'invoke-only' ? ' (invoke-only)' : '',
+      vaultRepo,
     }))
   }
   const out = run({ header: `${label}, ${mode}:`, steps, tail, unchanged: 'Nothing changed: the install is current.', listAll: true })
@@ -387,6 +413,8 @@ export interface BlockCheck {
   state: Exclude<HashState, 'absent'> | 'broken'
   /** The Block Hafez writes has changed since this one was written. */
   renderChanged: boolean
+  /** A cloud Block: the vault repo it was written for. */
+  vaultRepo?: string
 }
 
 export interface LegacyCheck {
@@ -420,8 +448,10 @@ export function checkInstall(home: string): { skills: SkillCheck[]; blocks: Bloc
     const line = findLegacy(text, region)
     if (line !== null) legacy.push({ harness, path, line })
     if (!region) continue
-    const state = hashState(region, RENDERED.text) as BlockCheck['state']
-    blocks.push({ harness, path, state, renderChanged: region.hash !== RENDERED.hash })
+    const { vaultRepo } = region
+    const render = rendered(vaultRepo)
+    const state = hashState(region, render.text) as BlockCheck['state']
+    blocks.push({ harness, path, state, renderChanged: region.hash !== render.hash, ...(vaultRepo !== undefined && { vaultRepo }) })
   }
   return { skills, blocks, legacy }
 }

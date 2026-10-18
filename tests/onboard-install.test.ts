@@ -271,7 +271,8 @@ describe('onboard --remove', () => {
     const home = makeHome()
     mkdirSync(join(home, '.claude/skills'), { recursive: true })
     mkdirSync(join(home, '.agents'), { recursive: true })
-    symlinkSync(join(home, '.claude/skills'), join(home, '.agents/skills'))
+    // A junction on Windows, which needs no privilege; the type is ignored elsewhere.
+    symlinkSync(join(home, '.claude/skills'), join(home, '.agents/skills'), 'junction')
     install(home, 'always-on')
 
     const out = onboard(home, ['--remove'])
@@ -344,6 +345,80 @@ describe('onboard --install: harness targets', () => {
   })
 })
 
+describe('onboard --install --vault-repo: a cloud container (#160)', () => {
+  const CLOUD = renderBlock('ana/vault')
+
+  it('writes the cloud Block, whose rule attaches, clones and registers that repo', () => {
+    const home = makeHome({ [CLAUDE_MD]: USER_TEXT })
+    const out = install(home, 'always-on', '--vault-repo', 'ana/vault')
+
+    expect(get(home, CLAUDE_MD)).toBe(`${USER_TEXT}${CLOUD}`)
+    expect(CLOUD.split('\n')[0]).toMatch(/^<!-- hafez:begin [0-9a-f]{12} vault-repo=ana\/vault -->$/)
+    expect(CLOUD).toContain('**Cloud session.** If `hafez init` shows no registered vault: attach `ana/vault` to this session (add_repo, push access), clone it to /home/user/vault, run `hafez init --register /home/user/vault`, then continue.')
+    expect(out).toContain('- Block in ~/.claude/CLAUDE.md: written')
+  })
+
+  it('leaves the desktop Block without the rule, so it does not go stale', () => {
+    expect(BLOCK).not.toContain('Cloud session')
+    expect(BLOCK).not.toBe(CLOUD)
+  })
+
+  it('reads its own Block back as current', () => {
+    const home = makeHome()
+    install(home, 'always-on', '--vault-repo', 'ana/vault')
+    expect(install(home, 'always-on', '--vault-repo', 'ana/vault')).toContain('Nothing changed: the install is current.')
+  })
+
+  it('swaps one Block for the other: another repo, or none', () => {
+    const home = makeHome({ [CLAUDE_MD]: USER_TEXT })
+    install(home, 'always-on', '--vault-repo', 'ana/vault')
+    expect(install(home, 'always-on', '--vault-repo', 'ana/notes')).toContain('- Block in ~/.claude/CLAUDE.md: replaced (was stale)')
+    expect(get(home, CLAUDE_MD)).toBe(`${USER_TEXT}${renderBlock('ana/notes')}`)
+    expect(install(home, 'always-on')).toContain('- Block in ~/.claude/CLAUDE.md: replaced (was stale)')
+    expect(get(home, CLAUDE_MD)).toBe(`${USER_TEXT}${BLOCK}`)
+  })
+
+  it('--remove clears a cloud Block', () => {
+    const home = makeHome({ [CLAUDE_MD]: USER_TEXT })
+    install(home, 'always-on', '--vault-repo', 'ana/vault')
+    onboard(home, ['--remove'])
+    expect(get(home, CLAUDE_MD)).toBe(USER_TEXT)
+  })
+})
+
+describe('onboard --cloud --vault-repo', () => {
+  const script = (out: string) => /^```\n([\s\S]*?)\n```$/m.exec(out)![1]
+
+  it('prints the setup script for that repo and writes nothing', () => {
+    const home = makeHome()
+    const out = onboard(home, ['--cloud', '--vault-repo', 'ana/vault']) as string
+    expect(script(out)).toBe([
+      '#!/bin/bash',
+      'npm install -g hafez --allow-scripts=better-sqlite3 || exit 0',
+      'VAULT=/home/user/vault',
+      'if [ -d "$VAULT/.git" ]; then',
+      '  hafez init --register "$VAULT"',
+      'fi',
+      'hafez onboard --install --mode always-on --harness claude-code --vault-repo ana/vault || true',
+    ].join('\n'))
+    expect(has(home, '.claude')).toBe(false)
+  })
+
+  it('never clones (the setup script runs without GitHub credentials) and no step fails session start', () => {
+    const lines = script(onboard(makeHome(), ['--cloud', '--vault-repo', 'ana/vault']) as string).split('\n')
+    expect(lines.join('\n')).not.toContain('git clone')
+    expect(lines.filter(l => l.startsWith('npm ') || l.startsWith('hafez onboard')).every(l => / \|\| (exit 0|true)$/.test(l))).toBe(true)
+  })
+
+  it('its install line is one this command accepts, and writes the cloud Block', () => {
+    const home = makeHome()
+    const line = script(onboard(home, ['--cloud', '--vault-repo', 'ana/vault']) as string).split('\n').at(-1)!
+    const args = line.replace(/^hafez onboard /, '').replace(/ \|\| true$/, '').split(' ')
+    onboard(home, args)
+    expect(get(home, CLAUDE_MD)).toBe(renderBlock('ana/vault'))
+  })
+})
+
 describe('onboard: usage errors', () => {
   it.each([
     ['--install without --mode', ['--install', '--harness', 'claude-code']],
@@ -358,6 +433,18 @@ describe('onboard: usage errors', () => {
     ['--block with --mode', ['--block', '--mode', 'always-on']],
     ['--block with --confirm', ['--block', '--confirm']],
     ['--block with an unknown harness', ['--block', '--harness', 'emacs']],
+    ['--cloud without --vault-repo', ['--cloud']],
+    ['--cloud with --install', ['--cloud', '--install', '--mode', 'always-on', '--vault-repo', 'ana/vault']],
+    ['--cloud with --harness', ['--cloud', '--harness', 'claude-code', '--vault-repo', 'ana/vault']],
+    ['--vault-repo alone', ['--vault-repo', 'ana/vault']],
+    ['--vault-repo with --block', ['--block', '--vault-repo', 'ana/vault']],
+    ['--vault-repo not <owner>/<repo>', ['--cloud', '--vault-repo', 'vault']],
+    ['--vault-repo with shell in it', ['--cloud', '--vault-repo', 'ana/vault;rm']],
+    ['--vault-repo a clone URL\'s .git', ['--cloud', '--vault-repo', 'ana/vault.git']],
+    ['--vault-repo ..', ['--cloud', '--vault-repo', 'ana/..']],
+    ['--vault-repo .', ['--cloud', '--vault-repo', 'ana/.']],
+    ['--vault-repo with invoke-only', ['--install', '--mode', 'invoke-only', '--harness', 'claude-code', '--vault-repo', 'ana/vault']],
+    ['--vault-repo for another harness', ['--install', '--mode', 'always-on', '--harness', 'codex', '--vault-repo', 'ana/vault']],
   ])('%s', (_, args) => {
     const home = makeHome()
     expect(() => onboard(home, args, { CLAUDECODE: '1' })).toThrow(UsageError)

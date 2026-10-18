@@ -8,8 +8,8 @@
 // the CLI passes no session_log of its own. Command-function seam over a
 // memory Journal.
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
-import { createHafez } from '../src/index.js'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createMemoryJournal } from './helpers/memory-journal.js'
@@ -49,7 +49,7 @@ beforeAll(() => {
 })
 
 afterEach(() => { vi.unstubAllEnvs() })
-afterAll(() => rmSync(TMP, { recursive: true, force: true }))
+afterAll(() => removeTemp(TMP))
 
 describe('update without --log — the binary adds the entry', () => {
   it('--brief alone writes one progress entry naming the field', async () => {

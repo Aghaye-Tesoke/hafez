@@ -57,6 +57,9 @@ const CLAUDE_MD = '.claude/CLAUDE.md'
 const BLOCK_INNER = renderBlock().split('\n').slice(1, -2).join('\n') + '\n'
 /** A Block region whose marker carries `hash` over `inner`. */
 const region = (inner: string, hash = contentHash(inner)) => `<!-- hafez:begin ${hash} -->\n${inner}<!-- hafez:end -->\n`
+/** A cloud Block region: its begin marker names the vault repo. */
+const cloudRegion = (inner: string, hash = contentHash(inner), repo = 'ana/vault') =>
+  `<!-- hafez:begin ${hash} vault-repo=${repo} -->\n${inner}<!-- hafez:end -->\n`
 /** A skill an older build wrote: its own hash matches, the render does not. */
 const OLD_SKILL = (() => {
   const body = '# An older hafez skill\n'
@@ -345,6 +348,35 @@ describe('the Block and the skills', () => {
     expect(onboardSteps(s)).toEqual([{ kind: 'command', text: ONBOARD('always-on') }])
     expect(await text({ home })).toContain('- Block in ~/.claude/CLAUDE.md: stale')
     expect(snapshot(home)).toEqual(before)
+  })
+
+  it('a current cloud Block (#160) is current and names its vault repo', async () => {
+    const home = makeHome({ files: { [CLAUDE_MD]: renderBlock('ana/vault') } })
+    const s = await state({ home })
+    expect(s.integration!.blocks).toEqual([{ harness: 'claude-code', path: '~/.claude/CLAUDE.md', state: 'current', renderChanged: false, vaultRepo: 'ana/vault' }])
+  })
+
+  it('a stale cloud Block, worded unlike any render, points at the cloud install: the repo is its marker\'s', async () => {
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: cloudRegion('## Hafez\n\nAn older cloud Block.\n') } })
+    const s = await state({ home })
+    expect(s.integration!.blocks[0]).toMatchObject({ state: 'stale', vaultRepo: 'ana/vault' })
+    expect(onboardSteps(s)).toEqual([{ kind: 'command', text: `${ONBOARD('always-on')} --vault-repo ana/vault` }])
+  })
+
+  it('a hand-edited cloud Block is checked against the cloud render: no drift, nothing offered', async () => {
+    const inner = renderBlock('ana/vault').split('\n').slice(1, -2).join('\n') + '\n'
+    const edited = inner.replace('Never create a throwaway vault.', 'Never create a throwaway vault!')
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: cloudRegion(edited, contentHash(inner)) } })
+    const s = await state({ home })
+    expect(s.integration!.blocks[0]).toMatchObject({ state: 'hand-edited', renderChanged: false, vaultRepo: 'ana/vault' })
+    expect(onboardSteps(s)).toEqual([])
+  })
+
+  it('a marker repo that is not <owner>/<repo> is broken markers, never read into a command', async () => {
+    const home = makeHome({ mode: 'always-on', files: { [CLAUDE_MD]: cloudRegion('## Hafez\n', undefined, 'ana/vault;rm') } })
+    const s = await state({ home })
+    expect(s.integration!.blocks[0]).toMatchObject({ state: 'broken' })
+    expect(JSON.stringify(s.steps)).not.toContain('vault;rm')
   })
 
   it('a Codex Block points at the Codex install', async () => {

@@ -8,10 +8,10 @@
 // to the read-project draft's day, against the read-project and
 // update-output drafts.
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
-import { mkdirSync, rmSync, readFileSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { cmdRead, cmdUpdate } from '../src/cli/commands.js'
 import { actionAge } from '../src/stale.js'
@@ -48,7 +48,7 @@ beforeAll(() => {
 })
 afterAll(() => {
   vi.useRealTimers()
-  rmSync(TMP, { recursive: true, force: true })
+  removeTemp(TMP)
 })
 
 let seq = 0

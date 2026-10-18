@@ -6,12 +6,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'fs'
+import { mkdirSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { simpleGit } from 'simple-git'
 import { serializeFile } from '../src/vault.js'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { createMemoryJournal } from './helpers/memory-journal.js'
 import { localDay } from '../src/dates.js'
 
@@ -44,7 +44,7 @@ beforeAll(async () => {
 })
 
 afterAll(() => {
-  rmSync(TMP, { recursive: true, force: true })
+  removeTemp(TMP)
 })
 
 describe('cross-process write lock (COR-2)', () => {

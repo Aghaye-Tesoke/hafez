@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { generateVaultIndex } from '../src/knowledge-index.js'
-import { createHafez } from '../src/index.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync } from 'fs'
 import { join } from 'path'
 import matter from 'gray-matter'
@@ -167,7 +167,7 @@ describe('generateVaultIndex', () => {
     mkdirSync(empty, { recursive: true })
     generateVaultIndex(empty)
     expect(existsSync(join(empty, 'index.md'))).toBe(false)
-    rmSync(empty, { recursive: true, force: true })
+    removeTemp(empty)
   })
 })
 
@@ -312,7 +312,7 @@ describe('local excludes in a gitfile vault (git worktree)', () => {
     mkdirSync(join(vault, 'entities'), { recursive: true })
   })
 
-  afterEach(() => rmSync(base, { recursive: true, force: true }))
+  afterEach(() => removeTemp(base))
 
   it('keeps index.md and the index DB out of git status when .git is a gitfile', async () => {
     // The vault's .git is a file pointing at the real git dir, not a directory

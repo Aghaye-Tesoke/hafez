@@ -66,7 +66,10 @@ beforeAll(async () => {
 
 afterAll(() => rmSync(TMP, { recursive: true, force: true }))
 
-describe('install:local', () => {
+// install:local is a dev-checkout script in POSIX shell (ln -s, ~, chmod),
+// which npm runs through cmd.exe on Windows. Windows installs through npm and
+// `onboard --install` instead (#177).
+describe.skipIf(process.platform === 'win32')('install:local', () => {
   // Isolated HOME: the script must never touch the real user's ~/.local/bin
   // or ~/.claude/skills when the test suite runs (contributors, CI, and the
   // release preflight all run tests on machines whose HOME is not ours).
@@ -440,7 +443,7 @@ describe('exit-code contract (C5)', () => {
     expect(update.stdout).toContain('[--complete-action handle-or-text (repeats)] [--remove-action handle-or-text (repeats)]')
     const read = run('read', 'test-proj', '--help')
     expect(read.exitCode, read.stderr).toBe(0)
-    expect(read.stdout.trim()).toBe('Usage: hafez read <slug> [--depth frontmatter|summary|full]')
+    expect(read.stdout.trim()).toBe('Usage: hafez read <slug> [--depth frontmatter|summary|full] [--archive]')
     for (const [args, usage] of [
       [['upgrade', '-h'], 'Usage: hafez upgrade [--json]'],
       [['index', '--help'], 'Usage: hafez index rebuild'],

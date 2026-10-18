@@ -139,6 +139,27 @@ describe('bare onboard: re-run walks only what is not current', () => {
     expect(out).toContain(INVOKE_ONLY_LINE_2)
   })
 
+  it('reads a cloud Block (#160) as current: no install step that would drop its rule', () => {
+    const home = makeHome({ ...INSTALLED, '.claude/CLAUDE.md': renderBlock('ana/vault'), [SETTINGS]: settings({ allow: true, hook: true }) })
+    const out = onboard(home, makeVault(3, 0))
+    expect(out).toContain('Claude Code (this harness): Block current | skills current')
+    expect(steps(out)).not.toContain('2. Install')
+  })
+
+  it('with a cloud Block stale, the install step keeps it a cloud Block', () => {
+    const home = makeHome({
+      ...INSTALLED,
+      '.claude/CLAUDE.md': renderBlock('ana/vault'),
+      '.agents/skills/hafez/SKILL.md': olderSkill(renderHafezSkill),
+      [SETTINGS]: settings({ allow: true, hook: true }),
+    })
+    const out = onboard(home, makeVault(3, 0))
+    expect(steps(out)).toContain('2. Install')
+    expect(out).toContain('\nhafez onboard --install --mode always-on --vault-repo ana/vault\n')
+    expect(out).toContain(renderBlock('ana/vault'))
+    expect(out).not.toContain(renderBlock())
+  })
+
   it('with only a skill stale, walks the install step and not the hook step', () => {
     const home = makeHome({
       ...INSTALLED,
