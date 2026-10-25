@@ -73,5 +73,9 @@
   "bugs": {
     "url": "https://github.com/shrvn-r/hafez/issues"
   },
-  "homepage": "https://github.com/shrvn-r/hafez#readme"
+  "homepage": "https://github.com/shrvn-r/hafez#readme",
+  "allowScripts": {
+    "better-sqlite3@12.6.2": true,
+    "esbuild@0.28.2": true
+  }
 }
