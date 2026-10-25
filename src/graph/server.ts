@@ -167,8 +167,7 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS, hea
       if (stopped) return
       try {
         sidecar = await collectHeat(os, { transcriptRoot, sidecarPath })
-        await rebuild()
-        live.broadcast()
+        await live.rebuildAndBroadcast()
       } catch {
         // The collector or the rebuild failed: the Graph stays as it was and
         // the next run tries again.

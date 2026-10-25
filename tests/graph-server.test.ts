@@ -651,7 +651,8 @@ describe('hafez graph', () => {
 
   /** Spawn the CLI and resolve with the child once its first stdout line is out. */
   function startCli(...args: string[]): Promise<{ child: ChildProcess; line: string }> {
-    const child = spawn('node', [CLI, '--vault', VAULT, 'graph', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, XDG_CONFIG_HOME: join(TMP, 'config') } })
+    // A temp home: the child's default transcript root and sidecar are then empty and under TMP, never the developer's.
+    const child = spawn('node', [CLI, '--vault', VAULT, 'graph', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, HOME: join(TMP, 'home'), USERPROFILE: join(TMP, 'home'), XDG_CONFIG_HOME: join(TMP, 'config') } })
     return new Promise((resolve, reject) => {
       let out = ''
       let err = ''
@@ -670,7 +671,7 @@ describe('hafez graph', () => {
     const exited = new Promise<number | null>(resolve => child.on('exit', code => resolve(code)))
     try {
       expect(line).toContain(`http://127.0.0.1:${port}`)
-      // The CLI's server draws heat too; the rest of the Graph is the index's.
+      // The CLI's server draws heat on project nodes (from vault touches here: the temp home has no transcripts), which os.graph does not; the rest is the index's.
       const served = JSON.parse((await get(`http://127.0.0.1:${port}/graph`)).body)
       for (const node of served.nodes) { delete node.heat; delete node.last_active; delete node.heat_source }
       expect(served).toEqual(await os.graph(ALL_LAYERS))
