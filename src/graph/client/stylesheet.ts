@@ -281,6 +281,13 @@ button, input, select { font: inherit; color: inherit; }
 #panel .md blockquote { padding-left: calc(var(--s) * 2.5); border-left: 2px solid var(--border); color: var(--muted); }
 #panel a.wiki, #panel .md a { color: var(--gold); text-decoration: none; border-bottom: 1px dotted ${mix('gold', 50)}; }
 #panel .line { display: flex; gap: calc(var(--s) * 1.5); align-items: center; }
+#panel .finish .warn { color: var(--amber); }
+#panel .finish p { margin: 0 0 var(--s); }
+#panel .finish .row { display: flex; gap: calc(var(--s) * 1.5); margin-top: calc(var(--s) * 1.5); }
+#panel .finish .slug { display: block; width: 100%; margin-top: var(--s); padding: calc(var(--s) * 1.5) calc(var(--s) * 2); background: var(--inset);
+  border: 1px solid var(--border); border-radius: var(--r-md); font: var(--fs-base) var(--mono); color: var(--text2); outline: none; }
+#panel .finish .slug:focus { border-color: ${mix('gold', 40)}; }
+#panel .finish .btn:disabled { opacity: 0.4; cursor: default; }
 `
 
 /** The page's one stylesheet. */

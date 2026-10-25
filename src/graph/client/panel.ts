@@ -15,6 +15,7 @@ import { markSelection, neighbours } from './focus.js'
 import { renderMarkdown, type RenderOpts } from './markdown.js'
 import { el } from './shell.js'
 import { localDay } from '../../dates.js'
+import { canFinish, finishUrl, finishWarning, typedMatches, type FinishStep } from './finish.js'
 import { ageText, badges, childRows, linkCounts, noteFacts, placingLine } from './note-view.js'
 
 /** What the panel needs from the graph view, handed over once by main.ts. */
@@ -61,6 +62,9 @@ const ACTIONS_SHOWN = 6
 const COPY_RESET_MS = 1500
 
 let view: View | null = null
+/** Where the Mark finished control is, for one node: it survives a live reload's re-render, a new selection resets it. */
+let lastNote: Note | null = null
+let finishing: { id: string; step: FinishStep; typed: string; problem?: string } | null = null
 /** Where focus was when the panel opened: it goes back there on close. */
 let returnTo: HTMLElement | null = null
 const panel = el('div', { id: 'panel', hidden: '', tabindex: '-1', 'aria-label': 'Note' })
@@ -93,6 +97,7 @@ export function selectNode(id: string, ease = true): boolean {
   const changed = state.selected?.id !== id
   const opening = panel.hidden
   if (opening) returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  if (changed) finishing = null
   state.selected = node
   markSelection(node, view.drawn().links)
   render(node, null)
@@ -134,6 +139,7 @@ export function closePanel(): void {
 function render(node: DrawNode, note: Note | null, problem?: string): void {
   // Rebuilding drops the focused element: focus stays in the panel.
   const hadFocus = panel.contains(document.activeElement)
+  lastNote = note
   const fm = note?.frontmatter ?? {}
   const text = (key: string, fallback?: string) => (typeof fm[key] === 'string' ? fm[key] as string : fallback)
   const today = localDay()
@@ -205,8 +211,70 @@ function render(node: DrawNode, note: Note | null, problem?: string): void {
   rows('Related', neighbours(node, state.links, byId, 'related', 'both'), drawn)
   rows('Wiki-links', neighbours(node, state.links, byId, 'mention', 'both'), drawn)
 
+  if (canFinish(node)) finishSection(node)
+
   if (NOTE_KINDS.has(node.kind)) section('', 'read').append(lineRow(`hafez read ${node.id}`))
   if (hadFocus) panel.focus({ preventScroll: true })
+}
+
+/** The one write the page makes: Mark finished, in three steps (the button,
+ * the warning, the typed slug). A project that finishes explodes once and
+ * never un-explodes, so each step is a way out. The POST changes nothing on
+ * the page itself: the live channel delivers the commit and the Graph reloads. */
+function finishSection(node: DrawNode): void {
+  if (finishing?.id !== node.id) finishing = { id: node.id, step: 'idle', typed: '' }
+  const flow = finishing
+  const go = (step: FinishStep, problem?: string) => {
+    flow.step = step
+    flow.problem = problem
+    // Another selection since the click resets the flow: a late answer changes nothing.
+    if (finishing === flow && state.selected?.id === flow.id) render(state.selected, lastNote)
+  }
+  const button = (label: string, onClick: () => void, cls = 'btn') => {
+    const b = el('button', { class: cls, type: 'button' }, label)
+    b.addEventListener('click', onClick)
+    return b
+  }
+  const sec = section('Finish', 'finish')
+  const cancel = () => { flow.typed = ''; go('idle') }
+  const escape = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    cancel()
+  }
+  sec.addEventListener('keydown', escape)
+
+  if (flow.step === 'idle') sec.append(button('Mark finished', () => go('confirm')))
+  else if (flow.step === 'confirm') {
+    const [first, second] = finishWarning(node).split('\n')
+    sec.append(el('p', { class: 'warn' }, first), el('p', {}, second),
+      el('div', { class: 'row' }, button('Continue', () => go('type')), button('Cancel', cancel)))
+  } else if (flow.step === 'sending') sec.append(el('p', { class: 'muted' }, 'Finishing…'))
+  else if (flow.step === 'failed') {
+    sec.append(el('p', { class: 'warn' }, `Could not finish: ${flow.problem}`),
+      el('div', { class: 'row' }, button('Try again', () => go('type')), button('Cancel', cancel)))
+  } else {
+    const input = el('input', { class: 'slug', type: 'text', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Type the slug to confirm' })
+    input.value = flow.typed
+    const send = el('button', { class: 'btn', type: 'button' }, 'Finish')
+    const sync = () => { send.disabled = !typedMatches(input.value, node.id) }
+    const submit = () => {
+      if (send.disabled) return
+      go('sending')
+      void fetch(finishUrl(node.id), { method: 'POST', credentials: 'omit' }).then(res => {
+        // Ok: the line stays until the live reload lands and the node is done.
+        if (!res.ok) go('failed', `HTTP ${res.status}`)
+      }).catch((error: unknown) => go('failed', error instanceof Error ? error.message : String(error)))
+    }
+    input.addEventListener('input', () => { flow.typed = input.value; sync() })
+    input.addEventListener('keydown', event => { if (event.key === 'Enter') submit() })
+    send.addEventListener('click', submit)
+    sync()
+    sec.append(el('label', { class: 'label' }, 'Type the slug to confirm', input),
+      el('div', { class: 'row' }, send, button('Cancel', cancel)))
+    queueMicrotask(() => input.focus({ preventScroll: true }))
+  }
 }
 
 /** touched · open actions · parent · N children · most-linked · N · in <parent>. */
