@@ -605,6 +605,37 @@ describe('heat (#galaxy)', () => {
     await expect(live.collect()).resolves.toBeUndefined()
     expect((await get(`${live.url}/graph`)).status).toBe(200)
   })
+
+  it('a Graph rebuild that fails during collect() leaves the server live: collect() resolves, later commits still push, close() resolves', async () => {
+    const watcher = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
+    let failNext = false
+    const flaky: InternalHafez = {
+      ...watcher,
+      graph: async opts => {
+        if (failNext) {
+          failNext = false
+          throw new Error('boom')
+        }
+        return watcher.graph(opts)
+      },
+    }
+    const live = await startGraphServer({ os: flaky, port: 0, pollMs: 25, heat: { transcriptRoot: root, sidecarPath: join(TMP, 'hours-flaky.json') } })
+    const events = subscribe(`${live.url}/events`)
+    try {
+      await events.ready
+      await live.collect() // the start-up run settles first; its frames carry no change
+      failNext = true
+      await expect(live.collect()).resolves.toBeUndefined()
+      expect(failNext).toBe(false) // the failing rebuild did run
+      await os.update('worker', { brief: 'Still live' })
+      let frame = await events.next() as { changes: unknown[] }
+      while (frame.changes.length === 0) frame = await events.next() as { changes: unknown[] }
+      expect(frame).toEqual({ type: 'commit', changes: [{ slug: 'worker', kind: 'entity', op: 'update' }] })
+    } finally {
+      events.close()
+    }
+    await expect(live.close()).resolves.toBeUndefined()
+  })
 })
 
 describe('the port', () => {

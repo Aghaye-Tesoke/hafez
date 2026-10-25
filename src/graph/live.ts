@@ -37,7 +37,13 @@ export async function startLive(os: Hafez, pollMs: number, rebuild: () => Promis
   let stopped = false
   /** Polls and replays run one at a time, in order. */
   let chain: Promise<void> = Promise.resolve()
-  const serial = (task: () => Promise<void>): Promise<void> => (chain = chain.then(task))
+  // The chain itself never rejects, so one task's failure cannot stop the ones
+  // queued after it, nor stop() awaiting it; the caller gets the task's own result.
+  const serial = <T>(task: () => Promise<T>): Promise<T> => {
+    const run = chain.then(task)
+    chain = run.then(() => undefined, () => undefined)
+    return run
+  }
   let timer: NodeJS.Timeout | undefined
 
   async function poll(): Promise<void> {
