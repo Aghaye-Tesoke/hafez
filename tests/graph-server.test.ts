@@ -704,12 +704,35 @@ describe('heat (#galaxy)', () => {
   })
 
   it('collect() tells an open page with a commit event naming no note', async () => {
-    const live = await start({ transcriptRoot: root, sidecarPath: join(TMP, 'hours-events.json') })
+    // A root of its own, empty until the start-up run has settled, so the
+    // collection under test is the one that changes the Graph.
+    const own = join(TMP, 'transcripts-events')
+    const live = await start({ transcriptRoot: own, sidecarPath: join(TMP, 'hours-events.json') })
+    await live.collect()
+    mkdirSync(join(own, 'proj'), { recursive: true })
+    writeFileSync(join(own, 'proj', 'a.jsonl'), [
+      JSON.stringify({ type: 'user', timestamp: stamp('09:00:00'), cwd }),
+      JSON.stringify({ type: 'user', timestamp: stamp('09:10:00') }),
+    ].join('\n') + '\n')
     const events = subscribe(`${live.url}/events`)
     try {
       await events.ready
       await live.collect()
       expect(await events.next()).toEqual({ type: 'commit', changes: [] })
+    } finally {
+      events.close()
+    }
+  })
+
+  it('a collect() that leaves the Graph as it was sends no frame', async () => {
+    const live = await start({ transcriptRoot: root, sidecarPath: join(TMP, 'hours-quiet.json') })
+    await live.collect() // settles the start-up run; the Graph now holds the hours
+    const events = subscribe(`${live.url}/events`)
+    try {
+      await events.ready
+      await live.collect()
+      const frame = await Promise.race([events.next(), new Promise(resolve => setTimeout(() => resolve('quiet'), 300))])
+      expect(frame).toBe('quiet')
     } finally {
       events.close()
     }

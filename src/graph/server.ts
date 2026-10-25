@@ -104,16 +104,20 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS, hea
   const sidecarPath = heatOpts?.sidecarPath ?? defaultSidecarPath()
   // The last collection's hours; until this run's finishes, what the previous run left on disk.
   let sidecar: Sidecar = heatOpts ? readSidecar(sidecarPath) : emptySidecar()
-  const rebuild = async () => {
+  /** Refreshes the cached Graph; true when it differs from the one it replaced. */
+  const rebuild = async (): Promise<boolean> => {
     await os.syncIndex()
     let graph = await os.graph({ layers: [...GRAPH_LAYERS] })
     if (heatOpts) {
       const today = localDay()
       graph = withHeat(graph, sidecar, await touchDays(os, today), today)
     }
-    graphJson = JSON.stringify(graph)
+    const next = JSON.stringify(graph)
+    const changed = next !== graphJson
+    graphJson = next
     names = new Map(graph.nodes.map(n => [n.id, n.name]))
     activityJson = undefined
+    return changed
   }
   const live = await startLive(os, pollMs, rebuild)
   await rebuild().catch(async err => { await live.stop(); throw err })

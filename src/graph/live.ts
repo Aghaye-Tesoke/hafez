@@ -20,8 +20,9 @@ export interface Live {
   subscribe(req: IncomingMessage, res: ServerResponse): void
   /** Rebuild the cached Graph, then push one commit event naming no note to
    * every open stream: the Graph changed for a reason history does not record
-   * (a heat collection), so pages refetch it. Queued with the polls, so it
-   * never overlaps their rebuilds. A rebuild failure rejects and sends nothing. */
+   * (a heat collection), so pages refetch it. Nothing is sent when the rebuilt
+   * Graph is the one already cached. Queued with the polls, so it never
+   * overlaps their rebuilds. A rebuild failure rejects and sends nothing. */
   rebuildAndBroadcast(): Promise<void>
   /** Stop polling and wait out a poll in flight, so nothing touches the Hafez
    * instance afterwards (its index is closed next). */
@@ -30,8 +31,9 @@ export interface Live {
 
 /** Start following the Vault from its current cursor; `rebuild` refreshes the
  * cached Graph before an event goes out, so a client refetching on the event
- * reads the new one. */
-export async function startLive(os: Hafez, pollMs: number, rebuild: () => Promise<void>): Promise<Live> {
+ * reads the new one; it resolves true when the Graph differs from the one it
+ * replaced. */
+export async function startLive(os: Hafez, pollMs: number, rebuild: () => Promise<boolean>): Promise<Live> {
   const clients = new Set<ServerResponse>()
   let cursor: string | undefined = (await os.changesSince()).cursor
   let stopped = false
@@ -111,7 +113,7 @@ export async function startLive(os: Hafez, pollMs: number, rebuild: () => Promis
     },
     rebuildAndBroadcast: () => serial(async () => {
       if (stopped) return
-      await rebuild()
+      if (!await rebuild()) return
       const frame = commitFrame({ cursor: cursor ?? '', changes: [] })
       for (const res of clients) res.write(frame)
     }),

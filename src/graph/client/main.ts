@@ -196,6 +196,7 @@ bindPanel(shell.note, {
   },
   focus: focusNode,
   depthControl: () => depthControl(changeDepth),
+  reload,
 })
 
 /** Turn the local graph on, change its depth, or leave it (null). On, the

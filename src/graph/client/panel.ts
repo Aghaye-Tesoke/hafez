@@ -32,6 +32,8 @@ export interface View {
   focus(id: string): void
   /** The local-graph depth control, for the header. */
   depthControl(): HTMLElement
+  /** Refetch the Graph and redraw, as a commit event does. */
+  reload(): Promise<void>
 }
 
 /** The fields of `/note/:slug` the panel shows. */
@@ -280,8 +282,10 @@ function finishSection(node: DrawNode): void {
       if (send.disabled) return
       go('sending')
       void fetch(finishUrl(node.id), { method: 'POST', credentials: 'omit' }).then(res => {
-        // Ok: the line stays until the live reload lands and the node is done.
-        if (!res.ok) go('failed', `HTTP ${res.status}`)
+        // Ok: reload now, so the node is done and the section gone whether or
+        // not the live channel is up; the live reload that follows is idempotent.
+        if (res.ok) void view?.reload()
+        else go('failed', `HTTP ${res.status}`)
       }).catch((error: unknown) => go('failed', error instanceof Error ? error.message : String(error)))
     }
     input.addEventListener('input', () => { flow.typed = input.value; sync() })
