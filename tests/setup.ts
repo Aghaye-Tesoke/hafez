@@ -11,6 +11,7 @@ import { tmpdir } from 'os'
 const home = mkdtempSync(join(tmpdir(), 'hafez-test-home-'))
 writeFileSync(join(home, '.gitconfig'), '[user]\n\tname = Hafez Test\n\temail = test@hafez.invalid\n')
 process.env.HOME = home
+process.env.USERPROFILE = home // os.homedir() reads USERPROFILE on Windows, not HOME
 process.env.XDG_CONFIG_HOME = join(home, '.config')
 delete process.env.GIT_CONFIG_GLOBAL
 delete process.env.GIT_CONFIG_SYSTEM
