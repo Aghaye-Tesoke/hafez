@@ -1,7 +1,11 @@
 // src/graph/server.ts
 // The graph server (#251): the Vault's Graph and the page that draws it,
-// served on 127.0.0.1 over node:http. Read-only by construction: every route
-// is a GET, and none of them reaches a write on the Hafez instance.
+// served on 127.0.0.1 over node:http. Read-only but for one route: every route
+// is a GET except `POST /note/:slug/finish`, which sets a project's status to
+// done and is the only path that reaches a write on the Hafez instance. That
+// route checks the Origin header as well as the Host: a form POST from any
+// other site carries a valid Host header (it is addressed to 127.0.0.1), so
+// the Host check alone would let any page the user visits finish a project.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import type { AddressInfo } from 'net'
 import { readFileSync } from 'fs'
@@ -127,10 +131,18 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS, hea
   // A page on any other origin can reach 127.0.0.1 too; checking the Host
   // header is what keeps DNS rebinding from reading the Vault through it.
   let allowedHosts = new Set<string>()
+  // The one write is a POST, which a page on another origin can send as a form
+  // without reading the reply; only the page this server serves may.
+  let allowedOrigins = new Set<string>()
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     if (!allowedHosts.has(req.headers.host ?? '')) return send(res, 403, { type: 'text/plain', body: 'Forbidden' })
-    if (req.method !== 'GET') return send(res, 405, { type: 'text/plain', body: 'Method Not Allowed' }, { Allow: 'GET' })
     const path = new URL(req.url ?? '/', 'http://localhost').pathname
+    if (isFinishPath(path)) {
+      if (req.method !== 'POST') return send(res, 405, { type: 'text/plain', body: 'Method Not Allowed' }, { Allow: 'GET, POST' })
+      if (!allowedOrigins.has(req.headers.origin ?? '')) return send(res, 403, { type: 'text/plain', body: 'Forbidden' })
+      return void sendFinish(os, res, path.slice(NOTE_PREFIX.length, -FINISH_SUFFIX.length))
+    }
+    if (req.method !== 'GET') return send(res, 405, { type: 'text/plain', body: 'Method Not Allowed' }, { Allow: 'GET' })
     if (path === '/events') return live.subscribe(req, res)
     if (path === '/activity') return void sendActivity(res)
     if (path.startsWith(NOTE_PREFIX)) return void sendNote(os, res, path.slice(NOTE_PREFIX.length))
@@ -157,6 +169,7 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS, hea
   const bound = await (port === undefined ? listenFirstFree(server, DEFAULT_PORT) : listen(server, port))
     .catch(async err => { await live.stop(); throw err })
   allowedHosts = new Set([`127.0.0.1:${bound}`, `localhost:${bound}`])
+  allowedOrigins = new Set([...allowedHosts].map(h => `http://${h}`))
 
   // Collections run one at a time, in order, as live.ts runs its polls.
   let chain: Promise<void> = Promise.resolve()
@@ -234,10 +247,38 @@ async function sendNote(os: Hafez, res: ServerResponse, encoded: string): Promis
     slug = decodeURIComponent(encoded)
     send(res, 200, { type: 'application/json', body: JSON.stringify(await noteJson(os, slug)) })
   } catch (err) {
-    const miss = err instanceof URIError || (err instanceof HafezError && (err.code === 'NOT_FOUND' || err.code === 'VALIDATION_FAILED'))
-    if (!miss) return send(res, 500, { type: 'text/plain', body: (err as Error).message })
-    const closest = err instanceof HafezError && err.code === 'NOT_FOUND' ? err.details ?? [] : []
-    send(res, 404, { type: 'application/json', body: JSON.stringify({ slug, closest }) })
+    sendMiss(res, slug, err)
+  }
+}
+
+/** A slug with no note, or one that cannot name a note at all, is 404 with the
+ * closest slugs; any other failure is 500. */
+function sendMiss(res: ServerResponse, slug: string, err: unknown): void {
+  const miss = err instanceof URIError || (err instanceof HafezError && (err.code === 'NOT_FOUND' || err.code === 'VALIDATION_FAILED'))
+  if (!miss) return send(res, 500, { type: 'text/plain', body: (err as Error).message })
+  const closest = err instanceof HafezError && err.code === 'NOT_FOUND' ? err.details ?? [] : []
+  send(res, 404, { type: 'application/json', body: JSON.stringify({ slug, closest }) })
+}
+
+const FINISH_SUFFIX = '/finish'
+
+/** `/note/<slug>/finish`, and no other path: one slug segment, then `/finish`. */
+function isFinishPath(path: string): boolean {
+  if (!path.startsWith(NOTE_PREFIX) || !path.endsWith(FINISH_SUFFIX)) return false
+  return !path.slice(NOTE_PREFIX.length, -FINISH_SUFFIX.length).includes('/')
+}
+
+/** `POST /note/:slug/finish`: the project's status becomes done. Finishing a
+ * done project succeeds again. A miss is 404 with the closest slugs, as for
+ * `/note`; the live poll sees the commit, so no rebuild here. */
+async function sendFinish(os: Hafez, res: ServerResponse, encoded: string): Promise<void> {
+  let slug = encoded
+  try {
+    slug = decodeURIComponent(encoded)
+    await os.update(slug, { status: 'done' })
+    send(res, 200, { type: 'application/json', body: JSON.stringify({ slug, status: 'done' }) })
+  } catch (err) {
+    sendMiss(res, slug, err)
   }
 }
 

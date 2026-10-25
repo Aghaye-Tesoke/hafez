@@ -22,16 +22,16 @@ const VAULT = join(TMP, 'vault')
 let os: InternalHafez
 let server: GraphServer
 
-interface Reply { status: number; type: string | undefined; body: string }
+interface Reply { status: number; type: string | undefined; allow?: string; body: string }
 
 /** A request through node:http on a fresh connection, so the Host header is ours to set. */
-function get(url: string, host?: string, method = 'GET'): Promise<Reply> {
+function get(url: string, host?: string, method = 'GET', headers: Record<string, string> = {}): Promise<Reply> {
   return new Promise((resolve, reject) => {
-    const req = request(url, { method, agent: false, headers: host ? { Host: host } : {} }, res => {
+    const req = request(url, { method, agent: false, headers: host ? { Host: host, ...headers } : headers }, res => {
       let body = ''
       res.setEncoding('utf-8')
       res.on('data', chunk => { body += chunk })
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, type: res.headers['content-type'], body }))
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, type: res.headers['content-type'], allow: res.headers.allow, body }))
     })
     req.on('error', reject)
     req.end()
@@ -322,9 +322,88 @@ describe('no other routes', () => {
     expect((await get(`${server.url}/graph/extra`)).status).toBe(404)
   })
 
-  it('there are no write routes: anything but GET is 405', async () => {
+  it('every method but GET is 405 on every path except the finish path', async () => {
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
-      expect((await get(`${server.url}/graph`, undefined, method)).status, method).toBe(405)
+      const reply = await get(`${server.url}/graph`, undefined, method)
+      expect(reply.status, method).toBe(405)
+      expect(reply.allow, method).toBe('GET')
+    }
+    const note = await get(`${server.url}/note/worker`, undefined, 'POST', { Origin: server.url })
+    expect(note.status).toBe(405)
+    expect(note.allow).toBe('GET')
+  })
+})
+
+describe('POST /note/:slug/finish', () => {
+  const port = () => new URL(server.url).port
+  const origin = () => `http://127.0.0.1:${port()}`
+  const finish = (slug: string, headers: Record<string, string> = {}, method = 'POST') =>
+    get(`${server.url}/note/${slug}/finish`, undefined, method, headers)
+
+  beforeAll(async () => {
+    await os.create('entity', 'Doomed', { type: 'project' })
+  })
+
+  it('without an Origin it is 403 and the project is untouched', async () => {
+    expect((await finish('doomed')).status).toBe(403)
+    const note = JSON.parse((await get(`${server.url}/note/doomed`)).body)
+    expect(note.frontmatter.status).not.toBe('done')
+  })
+
+  it('from a foreign Origin it is 403', async () => {
+    expect((await finish('doomed', { Origin: 'http://evil.example' })).status).toBe(403)
+    expect((await finish('doomed', { Origin: `http://evil.example:${port()}` })).status).toBe(403)
+  })
+
+  it("from the page's own Origin it sets status done", async () => {
+    const reply = await finish('doomed', { Origin: origin() })
+    expect(reply.status).toBe(200)
+    expect(JSON.parse(reply.body)).toEqual({ slug: 'doomed', status: 'done' })
+    const note = JSON.parse((await get(`${server.url}/note/doomed`)).body)
+    expect(note.frontmatter.status).toBe('done')
+  })
+
+  it('localhost is the second allowed Origin, and finishing a done project is 200', async () => {
+    const reply = await finish('doomed', { Origin: `http://localhost:${port()}` })
+    expect(reply.status).toBe(200)
+    expect(JSON.parse(reply.body)).toEqual({ slug: 'doomed', status: 'done' })
+  })
+
+  it('a slug with no note is 404 with the closest slugs', async () => {
+    const reply = await finish('nobody', { Origin: origin() })
+    expect(reply.status).toBe(404)
+    const body = JSON.parse(reply.body)
+    expect(body.slug).toBe('nobody')
+    expect(Array.isArray(body.closest)).toBe(true)
+  })
+
+  it('any other method on the finish path is 405 with Allow: GET, POST', async () => {
+    const put = await finish('doomed', { Origin: origin() }, 'PUT')
+    expect(put.status).toBe(405)
+    expect(put.allow).toBe('GET, POST')
+    const getReply = await finish('doomed', {}, 'GET')
+    expect(getReply.status).toBe(405)
+    expect(getReply.allow).toBe('GET, POST')
+  })
+
+  it('the Host check still runs first', async () => {
+    const reply = await get(`${server.url}/note/doomed/finish`, 'evil.example.com', 'POST', { Origin: origin() })
+    expect(reply.status).toBe(403)
+  })
+
+  it('the /events stream delivers the commit', async () => {
+    await os.create('entity', 'Pending', { type: 'project' })
+    const watcher = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
+    const live = await startGraphServer({ os: watcher, port: 0, heat: false, pollMs: 25 })
+    const events = subscribe(`${live.url}/events`)
+    try {
+      await events.ready
+      const reply = await get(`${live.url}/note/pending/finish`, undefined, 'POST', { Origin: live.url })
+      expect(reply.status).toBe(200)
+      expect(await events.next()).toEqual({ type: 'commit', changes: [{ slug: 'pending', kind: 'entity', op: 'update' }] })
+    } finally {
+      events.close()
+      await live.close()
     }
   })
 })
