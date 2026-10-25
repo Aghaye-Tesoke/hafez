@@ -377,13 +377,39 @@ describe('POST /note/:slug/finish', () => {
     expect(Array.isArray(body.closest)).toBe(true)
   })
 
-  it('any other method on the finish path is 405 with Allow: GET, POST', async () => {
+  it('any other method on the finish path is 405 with Allow: POST', async () => {
     const put = await finish('doomed', { Origin: origin() }, 'PUT')
     expect(put.status).toBe(405)
-    expect(put.allow).toBe('GET, POST')
+    expect(put.allow).toBe('POST')
     const getReply = await finish('doomed', {}, 'GET')
     expect(getReply.status).toBe(405)
-    expect(getReply.allow).toBe('GET, POST')
+    expect(getReply.allow).toBe('POST')
+  })
+
+  it('only a project can finish: an entity of another type or a knowledge note is 409 and unchanged', async () => {
+    const statusOf = async (slug: string) => JSON.parse((await get(`${server.url}/note/${slug}`)).body).frontmatter.status
+    const before = await statusOf('worker')
+    const commits = (await os.changelog('', 50)).length
+    const entity = await finish('worker', { Origin: origin() })
+    expect(entity.status).toBe(409)
+    expect(JSON.parse(entity.body)).toEqual({ slug: 'worker', error: 'not a project' })
+    expect(await statusOf('worker')).toBe(before)
+    const knowledge = await finish('an-insight', { Origin: origin() })
+    expect(knowledge.status).toBe(409)
+    expect(JSON.parse(knowledge.body)).toEqual({ slug: 'an-insight', error: 'not a project' })
+    expect((await os.changelog('', 50)).length).toBe(commits)
+  })
+
+  it('finishing a done project twice is 200 both times and the second writes nothing', async () => {
+    await os.create('entity', 'Twice', { type: 'project' })
+    const first = await finish('twice', { Origin: origin() })
+    expect(first.status).toBe(200)
+    expect((await os.read('twice', 'full')).body).toContain('hafez-graph')
+    const commits = (await os.changelog('', 50)).length
+    const second = await finish('twice', { Origin: origin() })
+    expect(second.status).toBe(200)
+    expect(JSON.parse(second.body)).toEqual({ slug: 'twice', status: 'done' })
+    expect((await os.changelog('', 50)).length).toBe(commits)
   })
 
   it('only /note/<one non-empty segment>/finish is the finish path', async () => {

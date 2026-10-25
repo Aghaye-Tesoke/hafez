@@ -138,7 +138,8 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS, hea
     if (!allowedHosts.has(req.headers.host ?? '')) return send(res, 403, { type: 'text/plain', body: 'Forbidden' })
     const path = new URL(req.url ?? '/', 'http://localhost').pathname
     if (isFinishPath(path)) {
-      if (req.method !== 'POST') return send(res, 405, { type: 'text/plain', body: 'Method Not Allowed' }, { Allow: 'GET, POST' })
+      // The finish path answers POST alone: Allow names the one method it takes.
+      if (req.method !== 'POST') return send(res, 405, { type: 'text/plain', body: 'Method Not Allowed' }, { Allow: 'POST' })
       if (!allowedOrigins.has(req.headers.origin ?? '')) return send(res, 403, { type: 'text/plain', body: 'Forbidden' })
       return void sendFinish(os, res, path.slice(NOTE_PREFIX.length, -FINISH_SUFFIX.length))
     }
@@ -271,14 +272,21 @@ function isFinishPath(path: string): boolean {
   return !path.slice(NOTE_PREFIX.length, -FINISH_SUFFIX.length).includes('/')
 }
 
-/** `POST /note/:slug/finish`: the project's status becomes done. Finishing a
- * done project succeeds again. A miss is 404 with the closest slugs, as for
- * `/note`; the live poll sees the commit, so no rebuild here. */
+/** `POST /note/:slug/finish`: the project's status becomes done. Only a
+ * project can finish: any other note is 409 and nothing is written. Finishing a
+ * done project succeeds again and writes nothing (no commit, no log entry). A
+ * miss is 404 with the closest slugs, as for `/note`; the live poll sees the
+ * commit, so no rebuild here. The Session Log entry names the agent
+ * `hafez-graph`. */
 async function sendFinish(os: Hafez, res: ServerResponse, encoded: string): Promise<void> {
   let slug = encoded
   try {
     slug = decodeURIComponent(encoded)
-    await os.update(slug, { status: 'done' })
+    const note = await os.read(slug, 'summary')
+    if (note.kind !== 'entity' || note.frontmatter.type !== 'project') {
+      return send(res, 409, { type: 'application/json', body: JSON.stringify({ slug, error: 'not a project' }) })
+    }
+    if (note.frontmatter.status !== 'done') await os.update(slug, { status: 'done', agent: 'hafez-graph' })
     send(res, 200, { type: 'application/json', body: JSON.stringify({ slug, status: 'done' }) })
   } catch (err) {
     sendMiss(res, slug, err)
