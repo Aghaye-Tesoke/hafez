@@ -267,6 +267,8 @@ Its six groups take three kinds of answer. **One-way edges** (a `related` kept o
 | `hafez schema [op] [--examples]` | Machine-readable JSON schema for every operation |
 | `hafez export --okf [--out <dir>]` | Read-only OKF v0.1 bundle export |
 
+In the graph, project nodes carry `last_active`, `heat` (0..1) and `heat_source`: `hours` when the entity has a folder `resource` and its time is mined from Claude Code transcripts (timestamps only, never the conversation), `touches` when it has none and heat comes from the vault's own history. The mined hours live in a sidecar, `hours.json`, under the hafez config directory, never in the vault; the graph server rebuilds it at start and every ten minutes. The server's one write is `POST /note/<slug>/finish`, accepted only from the page it serves; the panel's three-step Mark finished control uses it.
+
 This is not exhaustive — `hafez --help` lists every command, and `hafez schema <op>` prints the machine-readable shape of any op. Add `--json` to any command for structured output.
 
 ## Library usage
