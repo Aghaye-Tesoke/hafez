@@ -19,7 +19,7 @@
 - Only `kind: 'entity'` nodes with `type: 'project'` carry heat fields. Captures, entities, knowledge, and layer nodes never do.
 - The server keeps its Host check on every route. The finish route adds an Origin check: the `Origin` header must equal `http://<allowed host>` for one of the two allowed hosts, or the request is 403.
 - `src/graph/fields.ts` stays free of imports (tests/graph-bundle.test.ts enforces it).
-- Every commit on branch `galaxy` of `Aghaye-Tesoke/hafez`. Commit messages end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+- Every commit on branch `galaxy` of `Aghaye-Tesoke/hafez`. Commit messages end with the Claude Code attribution trailer of the model that authored the commit (`Co-Authored-By: Claude <model> <noreply@anthropic.com>`); the trailer is honest about authorship, not fixed to one model.
 - Run the suite with `npm test` (its `pretest` builds and typechecks). On this Windows machine run npm scripts from Git Bash; the build script is POSIX.
 
 ## Review Focus

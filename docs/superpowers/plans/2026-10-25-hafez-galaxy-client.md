@@ -22,7 +22,7 @@
 - Pitch black background (`#000000`), no starfield wallpaper, one bloom pass, labels in the existing fonts via sprite text.
 - Bundle `dist/graph/client.js` under 1.5 MB minified; first paint under two seconds on the current vault (about 50 notes).
 - `tests/graph-bundle.test.ts`'s rule stands: client modules import values from outside `client/` only from `dates.ts`, `graph/fields.ts`, `graph/fonts.ts`.
-- Commits on branch `galaxy` of `Aghaye-Tesoke/hafez`, each ending `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`. Run npm scripts from Git Bash on this Windows machine.
+- Commits on branch `galaxy` of `Aghaye-Tesoke/hafez`, each ending with the Claude Code attribution trailer of the model that authored the commit. Run npm scripts from Git Bash on this Windows machine.
 
 ## Review Focus
 
