@@ -31,8 +31,9 @@ async function allResources(os: Hafez): Promise<Array<{ slug: string; resource: 
   }
 }
 
-/** Scans transcripts into the sidecar at `sidecarPath` and returns it. */
-export async function collectHeat(os: Hafez, opts: CollectOpts): Promise<Sidecar> {
+/** Scans transcripts into a sidecar and returns it, writing nothing. A slug
+ * appears in `days` only when a positive minute landed on it in the window. */
+export async function scanHeat(os: Hafez, opts: CollectOpts): Promise<Sidecar> {
   const now = opts.now ?? new Date()
   const previous = readSidecar(opts.sidecarPath)
   const resources = await allResources(os)
@@ -43,14 +44,19 @@ export async function collectHeat(os: Hafez, opts: CollectOpts): Promise<Sidecar
   for (const [cwd, perDay] of byCwd) {
     const slug = hostSlug(cwd, resources)
     if (slug === undefined) continue
-    const into = (days[slug] ??= {})
     for (const [day, minutes] of Object.entries(perDay)) {
-      if (daysBetween(day, today) > WINDOW_DAYS) continue
+      if (minutes <= 0 || daysBetween(day, today) > WINDOW_DAYS) continue
+      const into = (days[slug] ??= {})
       into[day] = (into[day] ?? 0) + minutes
     }
   }
 
-  const sidecar: Sidecar = { version: 1, generated: now.toISOString(), files: cache, days }
+  return { version: 1, generated: now.toISOString(), files: cache, days }
+}
+
+/** Scans transcripts into the sidecar at `sidecarPath` and returns it. */
+export async function collectHeat(os: Hafez, opts: CollectOpts): Promise<Sidecar> {
+  const sidecar = await scanHeat(os, opts)
   writeSidecar(opts.sidecarPath, sidecar)
   return sidecar
 }

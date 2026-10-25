@@ -21,9 +21,9 @@ import { DEFAULT_POLL_MS, startLive } from './live.js'
 import { FONT_FILES } from './fonts.js'
 import { activity } from './activity.js'
 import { withHeat } from './heat/apply.js'
-import { collectHeat } from './heat/collect.js'
+import { scanHeat } from './heat/collect.js'
 import { WINDOW_DAYS } from './heat/heat.js'
-import { defaultSidecarPath, emptySidecar, readSidecar, type Sidecar } from './heat/sidecar.js'
+import { defaultSidecarPath, emptySidecar, readSidecar, writeSidecar, type Sidecar } from './heat/sidecar.js'
 import { daysBetween, localDay } from '../dates.js'
 
 /** Where the port search starts when no port is asked for. */
@@ -184,7 +184,13 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS, hea
     return chain = chain.then(async () => {
       if (stopped) return
       try {
-        sidecar = await collectHeat(os, { transcriptRoot, sidecarPath })
+        sidecar = await scanHeat(os, { transcriptRoot, sidecarPath })
+        try {
+          writeSidecar(sidecarPath, sidecar)
+        } catch (err) {
+          // The hours are in memory and the Graph uses them; only the cache is lost.
+          console.error(`hafez graph: could not write hours.json (${(err as NodeJS.ErrnoException).code ?? (err as Error).message})`)
+        }
         await live.rebuildAndBroadcast()
       } catch {
         // The collector or the rebuild failed: the Graph stays as it was and

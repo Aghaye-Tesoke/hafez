@@ -746,6 +746,21 @@ describe('heat (#galaxy)', () => {
     expect((await get(`${live.url}/graph`)).status).toBe(200)
   })
 
+  it('a sidecar that cannot be written still feeds the Graph and reports once on stderr', async () => {
+    const blocked = join(TMP, 'blocked-hours')
+    writeFileSync(blocked, 'a file, not a directory')
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      const live = await start({ transcriptRoot: root, sidecarPath: join(blocked, 'hours.json') })
+      await expect(live.collect()).resolves.toBeUndefined()
+      expect((await nodeOf(live, 'hub')).heat_source).toBe('hours')
+      expect(err).toHaveBeenCalled()
+      expect(String(err.mock.calls[0]![0])).toMatch(/^hafez graph: could not write hours\.json \(.+\)$/)
+    } finally {
+      err.mockRestore()
+    }
+  })
+
   it('a Graph rebuild that fails during collect() leaves the server live: collect() resolves, later commits still push, close() resolves', async () => {
     const watcher = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
     let failNext = false

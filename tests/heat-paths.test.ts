@@ -13,6 +13,15 @@ describe('normalizePath', () => {
   })
 })
 
+describe('normalizePath notes', () => {
+  it('strips only a final parenthesised note', () => {
+    expect(normalizePath('C:/p (old)/repo (branch v1)')).toBe('c:/p (old)/repo')
+  })
+  it('keeps a parenthesis that is not at the end', () => {
+    expect(normalizePath('C:/Program Files (x86)/app')).toBe('c:/program files (x86)/app')
+  })
+})
+
 describe('isPathResource', () => {
   it('rejects URLs', () => {
     expect(isPathResource('https://cadbase.ai')).toBe(false)
@@ -36,6 +45,12 @@ describe('hostSlug', () => {
   })
   it('does not match across a name boundary', () => {
     expect(hostSlug('D:/CLAUDE/AUTOMAZON2', resources)).toBeUndefined()
+  })
+  it('never matches a blank, whitespace-only or slash-only resource', () => {
+    const odd = [{ slug: 'blank', resource: '' }, { slug: 'space', resource: '   ' }, { slug: 'slash', resource: '/' }, { slug: 'slashes', resource: '\\' }]
+    expect(hostSlug('D:/CLAUDE/anything', odd)).toBeUndefined()
+    expect(hostSlug('/anything', odd)).toBeUndefined()
+    expect(hostSlug('', odd)).toBeUndefined()
   })
   it('never matches a URL or a missing resource', () => {
     expect(hostSlug('https://cadbase.ai', resources)).toBeUndefined()

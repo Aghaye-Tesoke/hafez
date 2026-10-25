@@ -5,13 +5,14 @@
 // so that the comparison is on folders, not on how they were typed.
 
 /**
- * Normalizes a path for comparison: drops a trailing ` (...)` note, uses `/`
+ * Normalizes a path for comparison: drops a final ` (...)` note (one with no
+ * parentheses inside, so `Program Files (x86)/app` keeps its `(x86)`), uses `/`
  * separators, maps a WSL mount (`/mnt/d/x`) to a drive (`d:/x`), lowercases,
  * and strips trailing slashes.
  */
 export function normalizePath(p: string): string {
   return p
-    .replace(/ \(.*\)$/, '')
+    .replace(/ \([^()]*\)$/, '')
     .replace(/\\/g, '/')
     .replace(/^\/mnt\/([a-z])\//i, '$1:/')
     .toLowerCase()
@@ -26,8 +27,8 @@ export function isPathResource(resource: string): boolean {
 /**
  * The slug whose path resource is the cwd itself or an ancestor of it, cut at
  * a `/` boundary so `automazon` does not claim `automazon2`. When several
- * resources hold the cwd, the longest one wins. URLs and null resources are
- * skipped.
+ * resources hold the cwd, the longest one wins. URLs, null resources and
+ * resources that normalize to nothing (blank, or only slashes) are skipped.
  */
 export function hostSlug(
   cwd: string,
@@ -39,6 +40,7 @@ export function hostSlug(
   for (const { slug, resource } of resources) {
     if (resource === null || !isPathResource(resource)) continue
     const folder = normalizePath(resource)
+    if (folder === '') continue
     const holds = here === folder || here.startsWith(folder + '/')
     if (holds && folder.length > bestLength) {
       best = slug
