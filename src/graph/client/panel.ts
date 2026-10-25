@@ -65,6 +65,8 @@ let view: View | null = null
 /** Where the Mark finished control is, for one node: it survives a live reload's re-render, a new selection resets it. */
 let lastNote: Note | null = null
 let lastProblem: string | undefined
+/** Whether focus was in the panel (or nowhere) when the current render began: only then may the Finish control take it. */
+let focusWasHere = false
 let finishing: { id: string; step: FinishStep; typed: string; problem?: string } | null = null
 /** Where focus was when the panel opened: it goes back there on close. */
 let returnTo: HTMLElement | null = null
@@ -140,6 +142,7 @@ export function closePanel(): void {
 function render(node: DrawNode, note: Note | null, problem?: string): void {
   // Rebuilding drops the focused element: focus stays in the panel.
   const hadFocus = panel.contains(document.activeElement)
+  focusWasHere = hadFocus || document.activeElement === document.body || document.activeElement === null
   lastNote = note
   lastProblem = problem
   const fm = note?.frontmatter ?? {}
@@ -239,8 +242,9 @@ function finishSection(node: DrawNode): void {
   }
   const sec = section('Finish', 'finish')
   // render's panel.focus() has run by the time a microtask does: focus goes into the control, so Escape reaches it.
-  const focusIn = (target: HTMLElement) => queueMicrotask(() => target.focus({ preventScroll: true }))
-  sec.tabIndex = -1
+  // A background re-render (a live reload) while focus is elsewhere leaves it there.
+  const mine = focusWasHere
+  const focusIn = (target: HTMLElement) => { if (mine) queueMicrotask(() => target.focus({ preventScroll: true })) }
   const cancel = () => { flow.typed = ''; go('idle') }
   const escape = (event: KeyboardEvent) => {
     if (event.key !== 'Escape') return
@@ -258,6 +262,7 @@ function finishSection(node: DrawNode): void {
       el('div', { class: 'row' }, next, button('Cancel', cancel)))
     focusIn(next)
   } else if (flow.step === 'sending') {
+    sec.tabIndex = -1
     sec.append(el('p', { class: 'muted' }, 'Finishing…'))
     focusIn(sec)
   }
