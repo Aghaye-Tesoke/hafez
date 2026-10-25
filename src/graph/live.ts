@@ -18,6 +18,10 @@ export interface Live {
   /** Hold `res` open as an SSE stream until the client goes away; a
    * `Last-Event-ID` on `req` is replayed the changes since it first. */
   subscribe(req: IncomingMessage, res: ServerResponse): void
+  /** Push one commit event naming no note to every open stream: the Graph was
+   * rebuilt for a reason history does not record (a heat collection), so pages
+   * refetch it. */
+  broadcast(): void
   /** Stop polling and wait out a poll in flight, so nothing touches the Hafez
    * instance afterwards (its index is closed next). */
   stop(): Promise<void>
@@ -97,6 +101,10 @@ export async function startLive(os: Hafez, pollMs: number, rebuild: () => Promis
       else res.write(idFrame(cursor ?? ''))
       clients.add(res)
       res.on('close', () => clients.delete(res))
+    },
+    broadcast() {
+      const frame = commitFrame({ cursor: cursor ?? '', changes: [] })
+      for (const res of clients) res.write(frame)
     },
     async stop() {
       stopped = true

@@ -5,6 +5,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http'
 import type { AddressInfo } from 'net'
 import { readFileSync } from 'fs'
+import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { HafezError, type Hafez } from '../types.js'
@@ -15,6 +16,11 @@ import { parseSessionLog } from '../document.js'
 import { DEFAULT_POLL_MS, startLive } from './live.js'
 import { FONT_FILES } from './fonts.js'
 import { activity } from './activity.js'
+import { withHeat } from './heat/apply.js'
+import { collectHeat } from './heat/collect.js'
+import { WINDOW_DAYS } from './heat/heat.js'
+import { defaultSidecarPath, emptySidecar, readSidecar, type Sidecar } from './heat/sidecar.js'
+import { daysBetween, localDay } from '../dates.js'
 
 /** Where the port search starts when no port is asked for. */
 export const DEFAULT_PORT = 4747
@@ -26,10 +32,17 @@ export interface GraphServerOpts {
   port?: number
   /** How often to look for Vault changes, in ms (default DEFAULT_POLL_MS). */
   pollMs?: number
+  /** Project heat from Claude Code's session transcripts. On by default; `false`
+   * leaves the Graph without heat. The collector runs once at start and every
+   * `intervalMs` (default 10 minutes). */
+  heat?: { transcriptRoot?: string; sidecarPath?: string; intervalMs?: number } | false
 }
 
 export interface GraphServer {
   url: string
+  /** Run the heat collector now, rebuild the Graph and tell open pages. Runs
+   * never overlap; a collector failure is swallowed and the Graph stays as it was. */
+  collect(): Promise<void>
   /** Stop the server, drop open connections and close the Hafez instance's index. */
   close(): Promise<void>
 }
@@ -53,9 +66,26 @@ const PAGE = `<!doctype html>
 </html>
 `
 
+/** How often the heat collector runs, in ms. */
+const HEAT_INTERVAL_MS = 600_000
+
+/** Each entity's commit days within the heat window, from the whole history. */
+async function touchDays(os: Hafez, today: string): Promise<Map<string, string[]>> {
+  const touches = new Map<string, string[]>()
+  for (const e of await os.changelog('', 400)) {
+    if (e.kind !== 'entity') continue
+    const day = localDay(new Date(e.timestamp))
+    if (daysBetween(day, today) > WINDOW_DAYS) continue
+    const days = touches.get(e.slug)
+    if (days) days.push(day)
+    else touches.set(e.slug, [day])
+  }
+  return touches
+}
+
 interface Body { type: string; body: string | Buffer }
 
-export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS }: GraphServerOpts): Promise<GraphServer> {
+export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS, heat }: GraphServerOpts): Promise<GraphServer> {
   // Every layer: the page holds them all and toggles them locally (#257).
   let graphJson = ''
   /** Each node's name by id, for `/activity`'s rows. */
@@ -65,9 +95,18 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS }: G
   // The server trusts its poll (#264, #271): the index syncs here, at start and
   // on each commit the poll sees, never per request. On an instance whose
   // indexSync is 'manual', `/note` then reads the index as the Graph drew it.
+  const heatOpts = heat === false ? undefined : heat ?? {}
+  const transcriptRoot = heatOpts?.transcriptRoot ?? join(homedir(), '.claude', 'projects')
+  const sidecarPath = heatOpts?.sidecarPath ?? defaultSidecarPath()
+  // The last collection's hours; until this run's finishes, what the previous run left on disk.
+  let sidecar: Sidecar = heatOpts ? readSidecar(sidecarPath) : emptySidecar()
   const rebuild = async () => {
     await os.syncIndex()
-    const graph = await os.graph({ layers: [...GRAPH_LAYERS] })
+    let graph = await os.graph({ layers: [...GRAPH_LAYERS] })
+    if (heatOpts) {
+      const today = localDay()
+      graph = withHeat(graph, sidecar, await touchDays(os, today), today)
+    }
     graphJson = JSON.stringify(graph)
     names = new Map(graph.nodes.map(n => [n.id, n.name]))
     activityJson = undefined
@@ -119,9 +158,37 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS }: G
     .catch(async err => { await live.stop(); throw err })
   allowedHosts = new Set([`127.0.0.1:${bound}`, `localhost:${bound}`])
 
+  // Collections run one at a time, in order, as live.ts runs its polls.
+  let chain: Promise<void> = Promise.resolve()
+  let stopped = false
+  const collect = (): Promise<void> => {
+    if (!heatOpts) return Promise.resolve()
+    return chain = chain.then(async () => {
+      if (stopped) return
+      try {
+        sidecar = await collectHeat(os, { transcriptRoot, sidecarPath })
+        await rebuild()
+        live.broadcast()
+      } catch {
+        // The collector or the rebuild failed: the Graph stays as it was and
+        // the next run tries again.
+      }
+    })
+  }
+  let timer: NodeJS.Timeout | undefined
+  if (heatOpts) {
+    void collect()
+    timer = setInterval(() => { void collect() }, heatOpts.intervalMs ?? HEAT_INTERVAL_MS)
+    timer.unref()
+  }
+
   return {
     url: `http://127.0.0.1:${bound}`,
+    collect,
     close: async () => {
+      stopped = true
+      clearInterval(timer)
+      await chain
       await live.stop()
       await new Promise<void>(resolve => {
         server.close(() => resolve())

@@ -51,7 +51,7 @@ beforeAll(async () => {
   await os.create('entity', 'Worker', { type: 'entity', parent: 'hub' })
   await os.create('knowledge', 'An Insight', { related: ['hub'] })
   await os.batch([{ op: 'create', kind: 'session', name: 'Standup', fields: { related: ['worker'] } }])
-  server = await startGraphServer({ os, port: 0 })
+  server = await startGraphServer({ os, port: 0, heat: false })
 })
 afterAll(async () => {
   await server?.close()
@@ -116,7 +116,7 @@ describe('GET /note/:slug', () => {
   it('reads the entity whole once for the note and its log', async () => {
     const reads: string[] = []
     const counting: InternalHafez = { ...os, read: (slug, depth) => { reads.push(`${slug} ${depth ?? 'full'}`); return os.read(slug, depth) } }
-    const own = await startGraphServer({ os: counting, port: 0 })
+    const own = await startGraphServer({ os: counting, port: 0, heat: false })
     try {
       expect((await get(`${own.url}/note/hub`)).status).toBe(200)
     } finally {
@@ -139,7 +139,7 @@ describe('GET /note/:slug', () => {
   it('follows the poll, not the files: a hand-made child shows once its commit is seen, as read --json then gives it', async () => {
     // A server on an instance whose reads trust the index, as `hafez graph` runs it.
     const watcher = createInternalHafez({ vaultPath: VAULT, git: { push: false }, indexSync: 'manual' })
-    const live = await startGraphServer({ os: watcher, port: 0, pollMs: 25 })
+    const live = await startGraphServer({ os: watcher, port: 0, heat: false, pollMs: 25 })
     const events = subscribe(`${live.url}/events`)
     const childrenOf = (note: { children: Array<{ slug: string }> }) => note.children.map(c => c.slug)
     try {
@@ -201,7 +201,7 @@ describe('GET /activity (#278)', () => {
     await os.create('knowledge', 'Fresh Insight', {})
 
     const watcher = createInternalHafez({ vaultPath: VAULT, git: { push: false }, indexSync: 'manual' })
-    const live = await startGraphServer({ os: watcher, port: 0 })
+    const live = await startGraphServer({ os: watcher, port: 0, heat: false })
     try {
       const res = await get(`${live.url}/activity`)
       expect(res.status).toBe(200)
@@ -223,7 +223,7 @@ describe('GET /activity (#278)', () => {
 
   it('lists the last 20 rows', async () => {
     await os.batch(Array.from({ length: 25 }, (_, i) => ({ op: 'create' as const, kind: 'knowledge' as const, name: `Batch Note ${i}` })))
-    const live = await startGraphServer({ os: createInternalHafez({ vaultPath: VAULT, git: { push: false } }), port: 0 })
+    const live = await startGraphServer({ os: createInternalHafez({ vaultPath: VAULT, git: { push: false } }), port: 0, heat: false })
     try {
       const rows = JSON.parse((await get(`${live.url}/activity`)).body)
       expect(rows).toHaveLength(20)
@@ -242,7 +242,7 @@ describe('GET /activity (#278)', () => {
     ]
     const own = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
     const history: InternalHafez = { ...own, changelog: async (_since, limit) => commits.slice(0, limit).flat() }
-    const live = await startGraphServer({ os: history, port: 0 })
+    const live = await startGraphServer({ os: history, port: 0, heat: false })
     try {
       const rows = JSON.parse((await get(`${live.url}/activity`)).body) as Array<{ slug: string; count: number }>
       expect(rows.map(r => r.slug)).toEqual(['busy', ...Array.from({ length: 19 }, (_, i) => `older-${i}`)])
@@ -258,7 +258,7 @@ describe('GET /activity (#278)', () => {
     const own = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
     const reads: number[] = []
     const history: InternalHafez = { ...own, changelog: async (_since, limit) => { reads.push(limit!); return commits.slice(0, limit).flat() } }
-    const live = await startGraphServer({ os: history, port: 0 })
+    const live = await startGraphServer({ os: history, port: 0, heat: false })
     try {
       const rows = JSON.parse((await get(`${live.url}/activity`)).body) as Array<{ slug: string }>
       expect(rows.map(r => r.slug)).toEqual(['only-0', 'only-1', 'only-2'])
@@ -276,7 +276,7 @@ describe('GET /activity (#278)', () => {
     const commits: ChangelogEntry[][] = [[entry('created', 'knowledge', 'p'), entry('deleted', 'entity', 'p')], [entry('created', 'entity', 'b')], [entry('deleted', 'entity', 'a')]]
     const own = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
     const history: InternalHafez = { ...own, changelog: async (_since, limit) => commits.slice(0, limit).flat() }
-    const live = await startGraphServer({ os: history, port: 0 })
+    const live = await startGraphServer({ os: history, port: 0, heat: false })
     try {
       const rows = JSON.parse((await get(`${live.url}/activity`)).body) as Array<{ slug: string; kind: string; op: string; count: number }>
       expect(rows.map(r => [r.op, r.kind, r.count])).toEqual([['create', 'knowledge', 3]])
@@ -338,7 +338,7 @@ describe('close()', () => {
       syncIndex: async () => { syncs++; await own.syncIndex() },
       graph: async () => { throw new Error('index broken') },
     }
-    await expect(startGraphServer({ os: broken, port: 0, pollMs: 25 })).rejects.toThrow('index broken')
+    await expect(startGraphServer({ os: broken, port: 0, heat: false, pollMs: 25 })).rejects.toThrow('index broken')
     const synced = syncs
     await os.update('worker', { brief: 'After the failed start' })
     await new Promise(resolve => setTimeout(resolve, 200))
@@ -349,13 +349,13 @@ describe('close()', () => {
   it('frees the port and closes the index', async () => {
     const own = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
     const closeIndex = vi.spyOn(own, 'close')
-    const started = await startGraphServer({ os: own, port: 0 })
+    const started = await startGraphServer({ os: own, port: 0, heat: false })
     const port = Number(new URL(started.url).port)
     await (await fetch(`${started.url}/graph`)).text() // fetch keeps the connection alive: it must not hold the port
     await started.close()
     expect(closeIndex).toHaveBeenCalled()
     await expect(get(`${started.url}/graph`)).rejects.toMatchObject({ code: 'ECONNREFUSED' })
-    const again = await startGraphServer({ os: own, port })
+    const again = await startGraphServer({ os: own, port, heat: false })
     expect(again.url).toBe(started.url)
     await again.close()
   })
@@ -402,7 +402,7 @@ function subscribe(url: string, headers: Record<string, string> = {}): { ready: 
 describe('GET /events', () => {
   it('pushes one commit event per write from another Hafez instance, with the Graph rebuilt', async () => {
     const watcher = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
-    const live = await startGraphServer({ os: watcher, port: 0, pollMs: 25 })
+    const live = await startGraphServer({ os: watcher, port: 0, heat: false, pollMs: 25 })
     const events = subscribe(`${live.url}/events`)
     try {
       await events.ready
@@ -433,7 +433,7 @@ describe('GET /events', () => {
         return watcher.graph(opts)
       },
     }
-    const live = await startGraphServer({ os: flaky, port: 0, pollMs: 25 })
+    const live = await startGraphServer({ os: flaky, port: 0, heat: false, pollMs: 25 })
     const events = subscribe(`${live.url}/events`)
     try {
       await events.ready
@@ -458,7 +458,7 @@ describe('GET /events', () => {
         return watcher.changesSince(cursor)
       },
     }
-    const live = await startGraphServer({ os: rewritten, port: 0, pollMs: 25 })
+    const live = await startGraphServer({ os: rewritten, port: 0, heat: false, pollMs: 25 })
     const events = subscribe(`${live.url}/events`)
     try {
       await events.ready
@@ -480,7 +480,7 @@ describe('GET /events', () => {
 
   it('a reconnect sending Last-Event-ID is replayed the changes made while it was away (#278)', async () => {
     const watcher = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
-    const live = await startGraphServer({ os: watcher, port: 0, pollMs: 25 })
+    const live = await startGraphServer({ os: watcher, port: 0, heat: false, pollMs: 25 })
     const first = subscribe(`${live.url}/events`)
     try {
       await first.ready
@@ -513,7 +513,7 @@ describe('GET /events', () => {
 
   it('a stream opens with its cursor as the event id, so a reconnect with nothing missed is replayed nothing (#278)', async () => {
     const watcher = createInternalHafez({ vaultPath: VAULT, git: { push: false } })
-    const live = await startGraphServer({ os: watcher, port: 0, pollMs: 25 })
+    const live = await startGraphServer({ os: watcher, port: 0, heat: false, pollMs: 25 })
     const first = subscribe(`${live.url}/events`)
     try {
       await first.ready
@@ -542,10 +542,75 @@ describe('GET /events', () => {
   })
 })
 
+describe('heat (#galaxy)', () => {
+  const started: GraphServer[] = []
+  const root = join(TMP, 'transcripts')
+  const cwd = join(TMP, 'hub-work')
+  const stamp = (time: string) => `${localDay()}T${time}`
+
+  /** A server of its own on the shared Vault, so the file's server is untouched. */
+  async function start(heat: Parameters<typeof startGraphServer>[0]['heat']): Promise<GraphServer> {
+    const live = await startGraphServer({ os: createInternalHafez({ vaultPath: VAULT, git: { push: false } }), port: 0, heat })
+    started.push(live)
+    return live
+  }
+  const nodeOf = async (live: GraphServer, id: string) =>
+    (JSON.parse((await get(`${live.url}/graph`)).body).nodes as Array<Record<string, unknown>>).find(n => n.id === id)!
+
+  beforeAll(async () => {
+    mkdirSync(join(root, 'proj'), { recursive: true })
+    writeFileSync(join(root, 'proj', 'a.jsonl'), [
+      JSON.stringify({ type: 'user', timestamp: stamp('09:00:00'), cwd }),
+      JSON.stringify({ type: 'user', timestamp: stamp('09:10:00') }),
+    ].join('\n') + '\n')
+    await os.update('hub', { resource: cwd })
+  })
+  afterAll(async () => {
+    for (const live of started) await live.close()
+  })
+
+  it('collect() puts hours-based heat on the project and none on a plain entity', async () => {
+    const live = await start({ transcriptRoot: root, sidecarPath: join(TMP, 'hours.json') })
+    await live.collect()
+    const hub = await nodeOf(live, 'hub')
+    expect(hub.heat_source).toBe('hours')
+    expect(typeof hub.last_active).toBe('string')
+    expect(hub.heat).toBeGreaterThan(0)
+    expect(await nodeOf(live, 'worker')).not.toHaveProperty('heat')
+  })
+
+  it('with heat: false nodes carry no heat fields and collect() does nothing', async () => {
+    const live = await start(false)
+    await live.collect()
+    const hub = await nodeOf(live, 'hub')
+    for (const key of ['heat', 'last_active', 'heat_source']) expect(hub).not.toHaveProperty(key)
+  })
+
+  it('collect() tells an open page with a commit event naming no note', async () => {
+    const live = await start({ transcriptRoot: root, sidecarPath: join(TMP, 'hours-events.json') })
+    const events = subscribe(`${live.url}/events`)
+    try {
+      await events.ready
+      await live.collect()
+      expect(await events.next()).toEqual({ type: 'commit', changes: [] })
+    } finally {
+      events.close()
+    }
+  })
+
+  it('a collector failure does not crash the server: collect() resolves and the Graph still serves', async () => {
+    const blocked = join(TMP, 'blocked')
+    writeFileSync(blocked, 'a file, not a directory')
+    const live = await start({ transcriptRoot: root, sidecarPath: join(blocked, 'hours.json') })
+    await expect(live.collect()).resolves.toBeUndefined()
+    expect((await get(`${live.url}/graph`)).status).toBe(200)
+  })
+})
+
 describe('the port', () => {
   it('without one, the first free port from 4747 is used', async () => {
-    const first = await startGraphServer({ os })
-    const second = await startGraphServer({ os })
+    const first = await startGraphServer({ os, heat: false })
+    const second = await startGraphServer({ os, heat: false })
     try {
       const a = Number(new URL(first.url).port)
       const b = Number(new URL(second.url).port)
@@ -586,7 +651,7 @@ describe('hafez graph', () => {
 
   /** Spawn the CLI and resolve with the child once its first stdout line is out. */
   function startCli(...args: string[]): Promise<{ child: ChildProcess; line: string }> {
-    const child = spawn('node', [CLI, '--vault', VAULT, 'graph', ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn('node', [CLI, '--vault', VAULT, 'graph', ...args], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, XDG_CONFIG_HOME: join(TMP, 'config') } })
     return new Promise((resolve, reject) => {
       let out = ''
       let err = ''
@@ -605,7 +670,10 @@ describe('hafez graph', () => {
     const exited = new Promise<number | null>(resolve => child.on('exit', code => resolve(code)))
     try {
       expect(line).toContain(`http://127.0.0.1:${port}`)
-      expect(JSON.parse((await get(`http://127.0.0.1:${port}/graph`)).body)).toEqual(await os.graph(ALL_LAYERS))
+      // The CLI's server draws heat too; the rest of the Graph is the index's.
+      const served = JSON.parse((await get(`http://127.0.0.1:${port}/graph`)).body)
+      for (const node of served.nodes) { delete node.heat; delete node.last_active; delete node.heat_source }
+      expect(served).toEqual(await os.graph(ALL_LAYERS))
     } finally {
       child.kill('SIGINT')
     }
