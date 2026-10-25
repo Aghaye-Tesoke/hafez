@@ -386,6 +386,18 @@ describe('POST /note/:slug/finish', () => {
     expect(getReply.allow).toBe('GET, POST')
   })
 
+  it('only /note/<one non-empty segment>/finish is the finish path', async () => {
+    const note = await get(`${server.url}/note/finish`)
+    expect(note.status).toBe(404)
+    expect(JSON.parse(note.body).slug).toBe('finish')
+    expect(Array.isArray(JSON.parse(note.body).closest)).toBe(true)
+    for (const path of ['/note//finish', '/note/x/finish/', '/note/a%2Ffinish', '/note/a/b/finish']) {
+      const reply = await get(`${server.url}${path}`, undefined, 'POST', { Origin: origin() })
+      expect(reply.status, path).toBe(405)
+      expect(reply.allow, path).toBe('GET')
+    }
+  })
+
   it('the Host check still runs first', async () => {
     const reply = await get(`${server.url}/note/doomed/finish`, 'evil.example.com', 'POST', { Origin: origin() })
     expect(reply.status).toBe(403)

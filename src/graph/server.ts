@@ -262,9 +262,12 @@ function sendMiss(res: ServerResponse, slug: string, err: unknown): void {
 
 const FINISH_SUFFIX = '/finish'
 
-/** `/note/<slug>/finish`, and no other path: one slug segment, then `/finish`. */
+/** `/note/<slug>/finish`, and no other path: one non-empty slug segment, then
+ * `/finish`. The prefix and suffix may not share their slash, so `/note/finish`
+ * (the note slugged finish) is not a finish path. */
 function isFinishPath(path: string): boolean {
   if (!path.startsWith(NOTE_PREFIX) || !path.endsWith(FINISH_SUFFIX)) return false
+  if (path.length <= NOTE_PREFIX.length + FINISH_SUFFIX.length) return false
   return !path.slice(NOTE_PREFIX.length, -FINISH_SUFFIX.length).includes('/')
 }
 
