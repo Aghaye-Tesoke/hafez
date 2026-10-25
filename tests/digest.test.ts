@@ -1,7 +1,13 @@
 // tests/digest.test.ts
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { mkdirSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { parseDigestInput, digest } from '../src/digest.js'
-import { HafezError, type BatchOperation } from '../src/types.js'
+import { HafezError, type BatchOperation, type Hafez } from '../src/types.js'
+import { createHafez, removeTemp } from './helpers/hafez.js'
+import { createMemoryJournal } from './helpers/memory-journal.js'
+import { cmdRead } from '../src/cli/commands.js'
 
 describe('parseDigestInput', () => {
   it('accepts valid input with all fields', () => {
@@ -164,7 +170,7 @@ describe('digest()', () => {
     expect(sessionNote.fields['session-date']).toBe('2026-03-29')
   })
 
-  it('session note body references narrative and decisions via synthesis field', () => {
+  it('session note carries the narrative as synthesis, decisions and touched slugs as their own fields', () => {
     const ops = digest(
       {
         entities_touched: ['simorgh'],
@@ -178,10 +184,9 @@ describe('digest()', () => {
 
     const creates = ops.filter(o => o.op === 'create') as any[]
     const sessionNote = creates.find(o => o.kind === 'session')
-    // synthesis field carries the body content
-    expect(sessionNote.fields.synthesis).toContain('Auth rewrite session.')
-    expect(sessionNote.fields.synthesis).toContain('Deferred caching')
-    expect(sessionNote.fields.synthesis).toContain('Merged auth middleware')
+    expect(sessionNote.fields.synthesis).toBe('Auth rewrite session.')
+    expect(sessionNote.fields.decisions).toEqual(['Deferred caching', 'Merged auth middleware'])
+    expect(sessionNote.fields.entities_touched).toEqual(['simorgh'])
   })
 
   it('links session note to touched entities via related field', () => {
@@ -274,5 +279,77 @@ describe('digest()', () => {
     for (const op of ops) {
       expect(['update', 'create', 'capture', 'link', 'unlink', 'reinforce', 'promote']).toContain(op.op)
     }
+  })
+})
+
+// #210: the saved note's three sections each hold their own part.
+describe('digest → batch → read: the session note', () => {
+  const TMP = join(tmpdir(), 'hafez-test-digest-note-' + Date.now())
+  const VAULT = join(TMP, 'vault')
+  let os: Hafez
+
+  beforeAll(async () => {
+    mkdirSync(join(VAULT, 'entities'), { recursive: true })
+    mkdirSync(join(VAULT, 'knowledge'), { recursive: true })
+    os = createHafez({ vaultPath: VAULT, persistence: createMemoryJournal() })
+    await os.create('entity', 'x', { type: 'entity' })
+  })
+  afterAll(() => removeTemp(TMP))
+
+  const save = async (input: Parameters<typeof digest>[0]) => {
+    const results = await os.batch(digest(input, new Set(['x'])))
+    return results[results.length - 1]
+  }
+
+  it('puts the narrative in Summary, one bullet per decision in Decisions, a wiki-link per slug in Entities Touched', async () => {
+    const result = await save({ entities_touched: ['x'], decisions: ['d1'], narrative: 'n', session_date: '2026-10-18' })
+    const note = await os.read(result.slug, 'full')
+    expect(note.body.trim()).toBe('## Summary\n\nn\n\n## Entities Touched\n\n- [[x]]\n\n## Decisions\n\n- d1')
+  })
+
+  it('a second save of the same session is skipped, under the name a save before the split gave it', async () => {
+    const input = { entities_touched: ['x'], decisions: ['d1'], narrative: 'n', session_date: '2026-10-18' }
+    await save(input)
+    const result = await save(input)
+    expect(result.slug).toBe('session-2026-10-18-3760b6cd')
+    expect(result.warning).toBe("session 'session-2026-10-18-3760b6cd' already exists — op skipped (batch continues)")
+  })
+
+  it('a session with no decisions and no touched slugs has the narrative and two empty sections, nothing else', async () => {
+    const result = await save({ entities_touched: [], decisions: [], narrative: 'Quiet session.', session_date: '2026-10-19' })
+    const note = await os.read(result.slug, 'full')
+    expect(note.body.trim()).toBe('## Summary\n\nQuiet session.\n\n## Entities Touched\n\n## Decisions')
+  })
+
+  it('read and read --json show the three sections', async () => {
+    const result = await save({ entities_touched: ['x'], decisions: ['Ship it'], narrative: 'Read me.', session_date: '2026-10-20' })
+    const text = await cmdRead(os, [result.slug], {})
+    expect(text).toContain('## Summary\n\nRead me.')
+    expect(text).toContain('## Entities Touched\n\n- [[x]]')
+    expect(text).toContain('## Decisions\n\n- Ship it')
+    const json = JSON.parse(await cmdRead(os, [result.slug], { json: true }))
+    expect(json.body).toContain('## Entities Touched\n\n- [[x]]\n\n## Decisions\n\n- Ship it')
+  })
+
+  it('the touched entities see the session as a mention', async () => {
+    const result = await save({ entities_touched: ['x'], decisions: [], narrative: 'Mention me.', session_date: '2026-10-21' })
+    const { items } = await os.related_to('x', 'mention')
+    expect(items.map(i => i.slug)).toContain(result.slug)
+  })
+
+  it('a decision is prose: one string is never split on its commas', async () => {
+    const op = { op: 'create', kind: 'session', name: 'Session comma', fields: { decisions: 'Keep a, b and c together' } } as unknown as BatchOperation
+    const report = await os.validateBatch([op])
+    expect(report.valid).toBe(false)
+    expect(report.operations[0].errors.join('\n')).toMatch(/decisions/)
+  })
+
+  it('a blank decision is dropped, not a failed save', async () => {
+    const result = await save({ entities_touched: ['x'], decisions: ['  ', 'Kept'], narrative: 'Blank.', session_date: '2026-10-22' })
+    expect(result.status).toBe('ok')
+    expect(result.warning).toBeUndefined()
+    const note = await os.read(result.slug, 'full')
+    expect(note.body).toContain('## Decisions\n\n- Kept')
+    expect(note.body).not.toContain('- \n')
   })
 })

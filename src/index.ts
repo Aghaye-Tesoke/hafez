@@ -1,14 +1,16 @@
 // src/index.ts
-import { parseFilePath, slugify, kindFromPath, kindDir, isMutableRelPath, findVaultFile, findReadableFile, vaultFileExists, resolveFilePath, scanVaultDir, archiveLogPath, MUTABLE_KINDS } from './vault.js'
+import { parseFilePath, slugify, kindFromPath, kindDir, isMutableRelPath, findVaultFile, findReadableFile, vaultFileExists, resolveFilePath, scanVaultDir, archiveLogPath, noteAtRelPath, MUTABLE_KINDS } from './vault.js'
 import { createGitJournal } from './git.js'
 import { validateSessionLogEntry } from './schema.js'
 import { validateVault } from './validate.js'
+import { healthReport } from './health.js'
 import { documentForFile } from './document.js'
 import { createIndex, type HafezIndex } from './db.js'
 import { closestSlugs } from './closest.js'
 import { generateVaultIndex } from './knowledge-index.js'
-import type { Hafez, HafezConfig, DeletableKind, ReadDepth, ParsedFile, UpdateFields, CreateEntityFields, CreateKnowledgeFields, QueryFilter, EntityType, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, UnifiedQueryOpts, LinkRelation, ConfidenceLevel, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, BatchOpValidation, BatchValidationReport, SearchResult, SearchKind, VaultStats } from './types.js'
+import type { Hafez, HafezConfig, DeletableKind, ReadDepth, ParsedFile, UpdateFields, CreateEntityFields, CreateKnowledgeFields, QueryFilter, EntityType, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, UnifiedQueryOpts, LinkRelation, ConfidenceLevel, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, HealthReport, BatchOperation, BatchResult, BatchOpValidation, BatchValidationReport, SearchResult, SearchKind, VaultStats, GraphOpts } from './types.js'
 import { HafezError } from './types.js'
+import type { InternalHafez, InternalHafezConfig } from './internal.js'
 import { BatchOperationSchema, specFor, slugBearingOpNames, sessionAddressingOpNames, notFoundError, normalizeOperations, opErrorLine, batchInvalidHeader, type OpCheckContext, type ResolvedTarget, type FileLinks } from './batch-ops.js'
 import { applyOperation, buildEntityFrontmatter, buildKnowledgeFrontmatter, validateKindFields, type AppliedOp } from './apply.js'
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs'
@@ -16,7 +18,9 @@ import { join, basename } from 'path'
 import { lock as lockVault } from 'proper-lockfile'
 
 export function createHafez(config: HafezConfig): Hafez {
-  const { vaultPath, readOnly = false, git: gitConfig = {}, onWrite } = config
+  const { vaultPath, readOnly = false, git: gitConfig = {}, onWrite, indexSync = 'read' } = config as InternalHafezConfig
+  // When reads catch the index up with the files (src/internal.ts, off the
+  // public types): 'once' is the CLI's (#269), 'manual' the graph server's (#271).
 
   // The persistence seam (CONTEXT.md: Journal). Everything below talks to
   // history through this port; git is just the default adapter.
@@ -72,8 +76,10 @@ export function createHafez(config: HafezConfig): Hafez {
       // outside hafez — a hand edit, a git pull — are represented too; that
       // costs a stat per file, where the old path paid a parse per file on
       // every single mutation.
+      // Under 'once' the process's first read already caught up.
       const idx = getIndex()
-      idx?.syncIfStale()
+      if (indexSync === 'once') idx?.syncForRead()
+      else idx?.syncIfStale()
       generateVaultIndex(vaultPath, idx?.indexEntries())
     } catch (err) {
       process.stderr.write(`Warning: failed to regenerate index.md: ${(err as Error).message}\n`)
@@ -84,7 +90,7 @@ export function createHafez(config: HafezConfig): Hafez {
   let _indexInitialized = false
   function getIndex(): HafezIndex | null {
     if (!_indexInitialized) {
-      _index = readOnly ? createIndex(vaultPath, { readonly: true }) : createIndex(vaultPath)
+      _index = readOnly ? createIndex(vaultPath, { readonly: true, sync: indexSync }) : createIndex(vaultPath, { sync: indexSync })
       // A null read-only open means the on-disk index is missing or from another
       // schema version. Don't latch it: retry on the next call so a long-lived
       // read-only instance starts serving once a write-capable process rebuilds.
@@ -105,7 +111,7 @@ export function createHafez(config: HafezConfig): Hafez {
     if (!filePath) {
       // A miss carries the closest slugs as its details: the recovery the
       // `read` miss output renders (#91).
-      const closest = withIndex(idx => { idx.syncIfStale(); return closestSlugs(slug, idx.indexEntries()) }, [] as string[])
+      const closest = withIndex(idx => { idx.syncForRead(); return closestSlugs(slug, idx.indexEntries()) }, [] as string[])
       throw new HafezError('NOT_FOUND', `Entity or knowledge '${slug}' not found`, closest)
     }
     const parsed = parseFilePath(filePath)
@@ -499,6 +505,10 @@ export function createHafez(config: HafezConfig): Hafez {
     return validateVault(vaultPath)
   }
 
+  async function health(): Promise<HealthReport> {
+    return healthReport(vaultPath)
+  }
+
   async function promote(slug: string, target: 'entity' | 'project' | 'knowledge'): Promise<string> {
     // Rollback safety rides the Spine: applyOperation's promote arm captures
     // both the source file and (for cross-kind moves) the knowledge target
@@ -516,7 +526,8 @@ export function createHafez(config: HafezConfig): Hafez {
     stale: [], no_next_action: [], recently_touched: [], recently_created: [],
   }
 
-  return {
+  // An InternalHafez: syncIndex() is here, off the public Hafez type.
+  const hafez: InternalHafez = {
     read,
     update,
     promote,
@@ -549,8 +560,11 @@ export function createHafez(config: HafezConfig): Hafez {
       withIndex(idx => idx.querySessions(opts), { items: [], total: 0 }),
     archive,
     validate,
+    health,
     search: async (query: string, kind?: SearchKind): Promise<SearchResult[]> =>
-      withIndex(idx => { idx.syncIfStale(); return idx.search(query, kind) }, []),
+      withIndex(idx => { idx.syncForRead(); return idx.search(query, kind) }, []),
+    graph: async (opts?: GraphOpts) => withIndex(idx => idx.queryGraph(opts), { nodes: [], edges: [] }),
+    syncIndex: async () => { withIndex(idx => idx.syncIfStale(), undefined) },
     rebuildIndex: async () => {
       if (readOnly) throw new HafezError('VALIDATION_FAILED', 'Hafez instance is read-only')
       // A rebuild reads every vault file and rewrites the whole index, so it
@@ -562,13 +576,26 @@ export function createHafez(config: HafezConfig): Hafez {
     stats: async () => {
       const idx = getIndex()
       if (!idx) return emptyStats
-      idx.syncIfStale()
+      idx.syncForRead()
       const s = idx.getStats()
       s.recently_touched = await rankRecents(s.recently_touched, 'last_touched', 'modified')
       s.recently_created = await rankRecents(s.recently_created, 'created', 'added')
       return s
     },
-    changelog: (since: string) => journal.changelog(since),
+    changelog: async (since: string, limit?: number) => {
+      if (limit !== undefined && !(Number.isInteger(limit) && limit > 0)) {
+        throw new HafezError('VALIDATION_FAILED', `changelog limit must be a positive whole number of commits, got ${limit}`)
+      }
+      return journal.changelog(since, limit)
+    },
+    changesSince: async (cursor?: string) => {
+      const { cursor: next, files } = await journal.changesSince(cursor)
+      const changes = files.flatMap(({ path, op }) => {
+        const note = noteAtRelPath(path)
+        return note ? [{ ...note, op }] : []
+      })
+      return { cursor: next, changes }
+    },
     close: () => {
       // Forget the handle even if closing it throws: a retry must not
       // re-throw, and getIndex() must never hand out a closed handle.
@@ -580,9 +607,10 @@ export function createHafez(config: HafezConfig): Hafez {
       }
     },
   }
+  return hafez
 }
 
 export { HafezError } from './types.js'
-export type { Hafez, HafezConfig, HafezErrorCode, EntityType, EntityStatus, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, SessionQueryResult, SearchKind, UnifiedQueryOpts, AllQueryOpts, SortField, EntitySortField, KnowledgeSortField, SessionSortField, EntityFrontmatter, KnowledgeFrontmatter, ParsedFile, SessionLogEntry, UpdateFields, UpdateResult, CreateEntityFields, CreateKnowledgeFields, QueryFilter, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, ReadDepth, ConfidenceLevel, LinkRelation, GitConfig, Journal, SearchResult, VaultStats, ChangelogEntry, KnowledgeSubtype } from './types.js'
+export type { Hafez, HafezConfig, HafezErrorCode, EntityType, EntityStatus, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, SessionQueryResult, SearchKind, UnifiedQueryOpts, AllQueryOpts, SortField, EntitySortField, KnowledgeSortField, SessionSortField, EntityFrontmatter, KnowledgeFrontmatter, ParsedFile, SessionLogEntry, UpdateFields, UpdateResult, CreateEntityFields, CreateKnowledgeFields, CreateSessionFields, QueryFilter, QueryResult, KnowledgeQueryResult, UnifiedResult, ValidationReport, BatchOperation, BatchResult, ReadDepth, ConfidenceLevel, LinkRelation, GitConfig, Journal, SearchResult, VaultStats, ChangelogEntry, KnowledgeSubtype, Graph, GraphNode, GraphEdge, GraphOpts, ChangesSince, NoteChange, ChangeOp, FileChange } from './types.js'
 export { getBrief, getNextActions } from './document.js'
 export { parseSessionLogHeading, parseSessionLog } from './document.js'

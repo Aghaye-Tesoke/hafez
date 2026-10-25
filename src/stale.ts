@@ -3,7 +3,7 @@
 // movement. An open next action is stale when unticked that long since its
 // added day; an undated one is stale. Ages count local days (src/dates.ts).
 
-import { localDay } from './dates.js'
+import { daysBetween, localDay } from './dates.js'
 import { getActionItems } from './document.js'
 
 /** The threshold an entity without `staleness-days` gets. */
@@ -17,16 +17,10 @@ export interface ActionAge {
   stale: boolean
 }
 
-/** A YYYY-MM-DD day as a whole day count, so differences ignore DST. */
-const dayNumber = (day: string): number => {
-  const [y, m, d] = day.split('-').map(Number)
-  return Date.UTC(y, m - 1, d) / 86_400_000
-}
-
 /** The entity side of the rule, as SQL over an index row `i` with `@today`
  * bound to localDay(): whole days from its last-touched day to today.
- * julianday of two bare YYYY-MM-DD days differs by exactly `dayNumber`'s
- * difference, so entities and their actions count the same days. */
+ * julianday of two bare YYYY-MM-DD days differs by exactly `daysBetween`
+ * (src/dates.ts), so entities and their actions count the same days. */
 export const ENTITY_AGE_DAYS_SQL = 'CAST(julianday(@today) - julianday(i.last_touched) AS INTEGER)'
 
 /** An entity row is stale when its age is past its threshold, not equal to
@@ -37,7 +31,7 @@ export const ENTITY_STALE_SQL = `${ENTITY_AGE_DAYS_SQL} > COALESCE(i.staleness_d
  * `stalenessDays`: older than the threshold, not equal to it. */
 export function actionAge(added: string | null, stalenessDays: number, today: string = localDay()): ActionAge {
   if (added === null) return { added, age_days: null, stale: true }
-  const age_days = dayNumber(today) - dayNumber(added)
+  const age_days = daysBetween(added, today)
   return { added, age_days, stale: age_days > stalenessDays }
 }
 

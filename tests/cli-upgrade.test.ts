@@ -521,7 +521,7 @@ describe('dev checkout', () => {
     const s = await state({ packageRoot, fetch: jsonFetch({ version: '1.2.3' }) })
     expect(s.steps[0]).toEqual({
       kind: 'command',
-      text: `cd '${packageRoot}' && git pull && npm run build && npm run install:local`,
+      text: `cd '${packageRoot}' && git pull && npm ci && npm run build && npm run install:local`,
     })
     // A bare `git pull && npm run build` would upgrade whatever repo the agent
     // is standing in.

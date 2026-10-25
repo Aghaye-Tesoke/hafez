@@ -14,7 +14,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { createHafez, removeTemp } from './hafez.js'
-import { cmdBatch, cmdCreate, cmdRead, cmdUpdate } from '../../src/cli/commands.js'
+import { cmdBatch, cmdCreate, cmdHealth, cmdRead, cmdUpdate } from '../../src/cli/commands.js'
 import { cmdOnboard } from '../../src/cli/onboard.js'
 import { RenderedError } from '../../src/cli/args.js'
 import { errorText } from '../../src/cli/index.js'
@@ -35,10 +35,12 @@ export const SURFACE_FILES = [
   'tests/fixtures/surfaces/read-insight.md',
   'tests/fixtures/surfaces/read-plan.md',
   'tests/fixtures/surfaces/read-capture.md',
+  'tests/fixtures/surfaces/read-hub.md',
   'tests/fixtures/surfaces/update-output.md',
   'tests/fixtures/surfaces/read-miss.md',
   'tests/fixtures/surfaces/create-knowledge-output.md',
   'tests/fixtures/surfaces/onboard.md',
+  'tests/fixtures/surfaces/health.md',
 ] as const
 
 export type SurfaceFile = (typeof SURFACE_FILES)[number]
@@ -70,9 +72,11 @@ const fence = (body: string, ticks = '```') => `${ticks}\n${body}\n${ticks}`
 const file = (frontmatter: string[], body: string[]) => ['---', ...frontmatter, '---', '', ...body, ''].join('\n')
 
 /** The fixture vault the samples are rendered against: the project, its
- * parent, the insight, the plan, the capture, two entities a miss comes close
- * to, one the second `--block` render also matches, and the note a new
- * knowledge note near-matches. */
+ * parent (a Hub with one unsplit family, a one-way `related` edge and the
+ * decision a note restates), its sibling (the second child, one recurring
+ * name, a `[[slug]]` mention with no edge), the insight, the plan, the
+ * capture, two entities a miss comes close to, one the second `--block`
+ * render also matches, and the note a new knowledge note near-matches. */
 function writeFixtureVault(vault: string, sessionTokensResource: string): void {
   const put = (dir: string, slug: string, text: string) => writeFileSync(join(vault, dir, `${slug}.md`), text)
   mkdirSync(join(vault, 'entities'), { recursive: true })
@@ -118,9 +122,61 @@ function writeFixtureVault(vault: string, sessionTokensResource: string): void {
     'type: project',
     'status: active',
     'created: 2026-05-01',
-    'last-touched: 2026-09-01',
+    'last-touched: 2026-09-10',
     'description: Shared services every product team builds on',
-  ], ['## Brief', '', 'One team, every shared service.']))
+    'related:',
+    '  - meeting-transcript-pipeline',
+  ], [
+    '## Brief',
+    '',
+    'One team, every shared service.',
+    '',
+    '## Next Actions',
+    '',
+    '- [ ] QUEUE Cap the per-tenant depth (added 2026-09-20)',
+    '- [ ] QUEUE Alert when a job is older than an hour (added 2026-09-20)',
+    '- [x] QUEUE Drain the retry backlog (added 2026-09-05)',
+    '',
+    '## Session Log',
+    '',
+    '### 2026-09-10 — claude [progress]',
+    'Summary: Billing Service moved invoicing onto the shared queue',
+    '',
+    '### 2026-09-01 — claude [decision]',
+    'Summary: Webhook retries draw on one shared hourly budget',
+  ]))
+  put('entities', 'billing-service', file([
+    'name: Billing Service',
+    'type: project',
+    'status: active',
+    'created: 2026-08-20',
+    'last-touched: 2026-09-20',
+    'description: Invoices and payouts for every product',
+    'parent: platform',
+  ], [
+    '## Brief',
+    '',
+    "Charges clear through [[auth-refactor]]'s token endpoint; payouts settle through Stripe.",
+    '',
+    '## Next Actions',
+    '',
+    '- [ ] Reconcile the Stripe payouts every Monday (added 2026-09-18)',
+    '- [ ] Move refunds onto Stripe credit notes (added 2026-09-18)',
+    '- [x] Mirror the Stripe webhooks into the ledger (added 2026-09-12)',
+    '- [x] Map every invoice to a Stripe customer (added 2026-09-02)',
+    '- [x] Back-fill the Stripe customer ids (added 2026-09-02)',
+    '- [x] Switch the Stripe sandbox to live keys (added 2026-08-28)',
+    '- [x] Verify the Stripe account for payouts (added 2026-08-22)',
+    '- [x] Open the Stripe account (added 2026-08-20)',
+    '',
+    '## Session Log',
+    '',
+    '### 2026-09-20 — claude [progress]',
+    'Summary: First live payout landed through Stripe',
+    '',
+    '### 2026-09-12 — claude [progress]',
+    'Summary: Every Stripe webhook now mirrors into the ledger',
+  ]))
   put('entities', 'rate-limit-the-token-endpoint', file([
     'name: Rate limit the token endpoint',
     'type: capture',
@@ -208,6 +264,8 @@ function writeFixtureVault(vault: string, sessionTokensResource: string): void {
     'name: Webhook retries share one budget',
     'created: 2026-09-01',
     'description: Every retry to an endpoint draws on one hourly budget.',
+    'related:',
+    '  - platform',
   ], ['## Synthesis', '', 'Every retry to an endpoint draws on one hourly budget.']))
 }
 
@@ -267,6 +325,8 @@ async function renderIn(root: string): Promise<Record<SurfaceFile, string>> {
   files['tests/fixtures/surfaces/read-insight.md'] = await read(['short-lived-tokens-beat-revocation-lists'])
   files['tests/fixtures/surfaces/read-plan.md'] = await read(['cookie-fallback-removal'])
   files['tests/fixtures/surfaces/read-capture.md'] = await read(['rate-limit-the-token-endpoint'])
+  files['tests/fixtures/surfaces/read-hub.md'] = await read(['platform'])
+  files['tests/fixtures/surfaces/health.md'] = `${await cmdHealth(os, [])}\n`
 
   const miss = (slug: string) => printed(cmdRead(os, [slug]))
   files['tests/fixtures/surfaces/read-miss.md'] = [

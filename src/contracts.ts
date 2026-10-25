@@ -15,6 +15,16 @@ export const CONFIDENCE_LEVELS = ['observation', 'pattern', 'principle'] as cons
 // The rename was insight→synthesis for the section/field only; the subtype stays 'insight'.
 export const VALID_SUBTYPES = ['insight', 'plan'] as const
 
+/** The Graph's layers whose nodes are synthetic, one per distinct value
+ * (`<layer>:<value>`); each adds the edge relation of the same name. */
+export const SYNTHETIC_LAYERS = ['tag', 'domain'] as const
+/** The Graph's optional layers (#253): tag and domain nodes, Session nodes. */
+export const GRAPH_LAYERS = [...SYNTHETIC_LAYERS, 'session'] as const
+/** The Graph's edges between notes; the synthetic layers add their own. */
+export const GRAPH_NOTE_RELATIONS = ['parent', 'related', 'mention'] as const
+/** What a write did to a note, as history tells it (changesSince, #258). */
+export const CHANGE_OPS = ['create', 'update', 'delete'] as const
+
 export interface TypeContract {
   type: string
   description: string

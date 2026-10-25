@@ -68,7 +68,7 @@ function git(cwd: string, ...args: string[]): string | null {
 
 /** The working directory, its git root, and in a linked worktree the main
  * repository's root. */
-function foldersOf(cwd: string): string[] {
+export function foldersOf(cwd: string): string[] {
   const folders = [cwd]
   const out = git(cwd, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir')
   const [top, common] = out?.split('\n') ?? []
@@ -95,7 +95,7 @@ function canonical(path: string): string {
 }
 
 /** Every remote's URL, normalised. */
-function remoteUrls(cwd: string): string[] {
+export function remoteUrls(cwd: string): string[] {
   const out = git(cwd, 'config', '--get-regexp', '^remote\\..*\\.url$')
   return out ? out.split('\n').map(line => normaliseUrl(line.slice(line.indexOf(' ') + 1))) : []
 }
@@ -111,7 +111,7 @@ function normaliseUrl(url: string): string {
     .replace(/\.git$/, '')
 }
 
-function resourceMatches(resource: string, folders: string[], remotes: string[]): boolean {
+export function resourceMatches(resource: string, folders: string[], remotes: string[]): boolean {
   if (isAbsolute(resource)) return folders.includes(canonical(resource))
   return remotes.includes(normaliseUrl(resource))
 }

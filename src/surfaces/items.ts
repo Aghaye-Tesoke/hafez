@@ -26,6 +26,7 @@ import {
 import { renderActionHandles } from '../document.js'
 import { slugify } from '../vault.js'
 import type { ActionAge } from '../stale.js'
+import type { Workstream } from '../workstream.js'
 import type { KnowledgeSubtype, UpdateFields, UpdateResult } from '../types.js'
 import { ONBOARD_HARNESSES, type OnboardHarness } from '../harness.js'
 import type { Mode } from '../cli/install.js'
@@ -304,6 +305,39 @@ function renderArchivePointer({ slug, entries }: { slug: string; entries: number
   return `archive: ${entries} older log ${entries === 1 ? 'entry' : 'entries'} · hafez read ${slug} --archive`
 }
 
+/** A child as the `read` header shows it. */
+export interface ChildLine { slug: string; description: string | null; open_actions: number; last_touched: string }
+
+/** How many children the header lists; the rest are one overflow line. */
+export const CHILDREN_SHOWN = 5
+
+/** The `read` header's children block: the count line (children, open
+ * actions across all of them), one `hafez read` line per child (description,
+ * open count, last-touched day) for the first `CHILDREN_SHOWN`, and the
+ * overflow line naming the query that lists the rest. Children arrive sorted
+ * by last-touched descending. No children: no block. */
+function renderChildrenBlock({ slug, children }: { slug: string; children: ChildLine[] }): string {
+  if (children.length === 0) return ''
+  const open = children.reduce((sum, c) => sum + c.open_actions, 0)
+  const shown = children.slice(0, CHILDREN_SHOWN)
+  const width = Math.max(...shown.map(c => c.slug.length))
+  const lines = [`children: ${children.length} · ${open} open action${open === 1 ? '' : 's'}`]
+  for (const c of shown) {
+    const facts = [c.description, `${c.open_actions} open`, c.last_touched].filter(Boolean).join(' · ')
+    lines.push(`  hafez read ${c.slug.padEnd(width)}  ${facts}`)
+  }
+  const rest = children.length - shown.length
+  if (rest > 0) lines.push(`  … and ${rest} more · hafez query --parent ${slug}`)
+  return lines.join('\n')
+}
+
+/** The `read` header's fact line for one unsplit prefix family (#230):
+ * its open-line count and the family, and that no child carries it. A
+ * fact, never a filled create line or a question. */
+function renderWorkstreamLine({ prefix, open_actions }: Workstream): string {
+  return `workstream: ${open_actions} open action${open_actions === 1 ? '' : 's'} with \`${prefix}\`; no child named it`
+}
+
 /** The line after an update's success while Stale lines remain on the entity. */
 function renderStaleReminder({ handles }: { handles: string[] }): string {
   const n = handles.length
@@ -328,8 +362,11 @@ function renderUpdateMisuse(input: { error: string; details?: string[] } & Misus
 const CREATE_TYPES: (typeof ENTITY_TYPES)[number][] = ['project', 'entity']
 const RELATIONS = ['parent', 'related'] as const
 
+/** The entity create line, one text everywhere: the Block, the skill body and
+ * the `read` miss. `--parent` carries the placement rule in its placeholder
+ * (#226, #230); at a miss with nothing read the agent drops it. */
 const createEntityLine = (name: string) =>
-  `hafez create entity "${name}" --type ${oneOf(CREATE_TYPES)} --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"`
+  `hafez create entity "${name}" --type ${oneOf(CREATE_TYPES)} --parent <slug you read, or its parent> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"`
 
 const CREATE_LINES = fence([
   createEntityLine('<name>'),
@@ -451,6 +488,20 @@ export const ITEMS = {
     render: ({ slug, description }: { slug: string; description: string | null }): string =>
       description ? `${slug} (${description})` : slug,
   },
+  childrenBlock: {
+    label: 'Children block: the Hub\'s children as read lines',
+    owner: 'readHeader',
+    invokeOnly: 'same',
+    evidence: '#230',
+    render: renderChildrenBlock,
+  },
+  workstreamLine: {
+    label: 'Workstream fact line: an unsplit prefix family',
+    owner: 'readHeader',
+    invokeOnly: 'same',
+    evidence: '#230',
+    render: renderWorkstreamLine,
+  },
   sessionsLine: {
     label: 'Sessions line: the look back from an entity',
     owner: 'readHeader',
@@ -466,14 +517,15 @@ export const ITEMS = {
     render: renderArchivePointer,
   },
   writeTriggers: {
-    label: 'Write triggers: work landed, decision made, insight, weighing, "note this"',
+    label: 'Write triggers: work landed, a split, decision made, a lesson, weighing, "note this"',
     owner: 'block',
     invokeOnly: 'absent',
-    evidence: 'M11, M2, never-ask decision #42, decision-record miss #159',
+    evidence: 'M11, M2, never-ask decision #42, decision-record miss #159; placement #226, #229',
     text: place => [
-      '- Work landed (a commit, a merged PR, CI green): update the entity that owns the work. That is the entity you read, unless the work belongs to another: read that one first. The end of its `read` output shows the command.',
-      '- A decision was made: if the repo keeps its own decisions record, write it there now and give Hafez one line that points at it (`hafez update <slug> --log "decision: <one line>, see decisions.md"`). Otherwise it goes in the save\'s `decisions`.',
-      `- An insight emerged that is useful beyond this repo: create a knowledge note. ${place('knowledgeBoundary')}`,
+      '- Work landed (a commit, a merged PR, CI green): update the entity that owns the work. That is the entity you read; the entity you read has a child that owns it: write there; the work belongs to another: read that one first. The end of its `read` output shows the command.',
+      '- A workstream your own actions or the user already name, too big for one action, gets a Child with that name under the entity you read: create it with `--parent`, move its open actions there (one `update` on the parent: `--remove-action` each, `--log "decision: split <child> out, open actions moved"`), and write there from now on.',
+      '- A decision was made: one `decision` log entry, now, on the entity that owns the work. The repo keeps its own decisions record: write it there and the log entry points at it (`hafez update <slug> --log "decision: <one line>, see decisions.md"`).',
+      `- A lesson that holds without this entity: create a knowledge note; what we chose is a decision entry, not a note. ${place('knowledgeBoundary')}`,
       '- The user says "note this" or "record that": write it.',
       `- You are weighing whether something is worth writing: write it, as knowledge with \`--confidence ${CONFIDENCE_LEVELS[0]}\`.`,
     ].join('\n'),
@@ -536,7 +588,7 @@ export const ITEMS = {
     owner: 'block',
     fallback: 'hafezSkillBody',
     invokeOnly: 'via the skill body',
-    evidence: 'fields: kind/name 18, synthesis 16, subtype 15',
+    evidence: 'fields: kind/name 18, synthesis 16, subtype 15; --parent #230',
     text: CREATE_LINES + '\n\nA plan is `--subtype plan` without `--synthesis`. Cannot tell entity from knowledge: `hafez capture "<name>"`.',
     /** The entity create line for one name: what the `read` miss places. */
     render: createEntityLine,
@@ -653,7 +705,7 @@ export const ITEMS = {
       + '\n\n`search` and `query` reach entities and knowledge notes; `--kind all` adds the session notes, `--kind session` lists them alone, newest first. `hafez read <slug> --archive` prints an entity\'s archived log entries.',
   },
   rareOps: {
-    label: 'Rare ops: promote, link, unlink, status, delete, validate',
+    label: 'Rare ops: promote, link, unlink, status, delete, validate, health',
     owner: 'hafezSkillBody',
     invokeOnly: 'same',
     evidence: 'help decision #49; owner decision #43',
@@ -664,8 +716,20 @@ export const ITEMS = {
       `hafez update <slug> --status ${oneOf(ENTITY_STATUSES)}`,
       'hafez delete <slug>',
       'hafez validate',
+      'hafez health',
     ].join('\n'))
-      + `\n\nA plan's status is \`${PLAN_STATUSES.join('|')}\`. \`delete\` removes a knowledge or session note only; an entity is retired with \`--status done\`.`,
+      + `\n\nA plan's status is \`${PLAN_STATUSES.join('|')}\`. \`delete\` removes a knowledge or session note only; an entity is retired with \`--status done\`. \`health\` lists what placement would change and applies nothing.`,
+  },
+  healthProcedure: {
+    label: 'Health procedure: run with --json, propose by kind, apply nothing unconfirmed',
+    owner: 'hafezSkillBody',
+    invokeOnly: 'same',
+    evidence: '#248; health is agent input, the owner never reads the raw report',
+    text: [
+      'A vault check ("check the vault", "clean up the vault", "what has drifted"): run `hafez health --json` and bring back proposals grouped by kind, never the rows. In a session that read an entity, lead with that entity\'s rows; the rest of the vault as counts.',
+      'One line per kind, with the count: the Workstreams to split (a `create entity … --parent` line each, named as the actions name it); the one-way edges and the unlinked mentions as one `hafez batch` of `link` ops, one commit; the restated decisions and the leakage pairs as a short list for the user to judge, nothing proposed.',
+      'Apply nothing until the user confirms a kind, not even a `link` line that looks safe; then one `batch` per kind.',
+    ].join('\n'),
   },
   batchShape: {
     label: 'Batch shape',

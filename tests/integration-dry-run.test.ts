@@ -134,7 +134,7 @@ describe('batch --dry-run', () => {
   it('validates same-batch references: create-then-link passes dry-run and apply', async () => {
     const input = JSON.stringify([
       { op: 'create', kind: 'entity', name: 'Batch Parent', fields: { type: 'project' } },
-      { op: 'create', kind: 'entity', name: 'Batch Child', fields: { type: 'entity', parent: 'batch-parent' } },
+      { op: 'create', kind: 'entity', name: 'Batch Child', fields: { type: 'entity' } },
       { op: 'link', slug: 'batch-parent', target: 'batch-child', relation: 'related' },
     ])
     const dry = runWithStdin(input, 'batch', '--dry-run')

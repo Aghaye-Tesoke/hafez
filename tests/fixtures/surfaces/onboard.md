@@ -5,7 +5,7 @@ Four renders from `hafez onboard`. Each fenced block is one complete output.
 The Block exactly as in `block.md`, then one line per entity matching the folder. The folder is the working directory, its git root, and, in a linked worktree, the main repository's root; each is matched exactly, and no directory in between is tried. No match: the Block alone.
 
 ````
-<!-- hafez:begin 5fedf39ccb96 -->
+<!-- hafez:begin a09364b9c576 -->
 (the Block)
 <!-- hafez:end -->
 
@@ -16,7 +16,7 @@ hafez read auth-refactor (Move session handling from cookies to short-lived toke
 Several matches, all printed, active first; an entity with no description gets its slug alone:
 
 ````
-<!-- hafez:begin 5fedf39ccb96 -->
+<!-- hafez:begin a09364b9c576 -->
 (the Block)
 <!-- hafez:end -->
 
@@ -34,7 +34,7 @@ You are an agent reading this for your user. Talk them through it; do not paste 
 
 ## Where things stand
 
-Vault: /home/ana/vault (6 entities, 3 knowledge notes)
+Vault: /home/ana/vault (7 entities, 3 knowledge notes)
 Claude Code (this harness): Block absent | skills absent | hook absent | allowlist absent
 Codex (found at ~/.codex): Block absent | skills absent
 
@@ -93,7 +93,7 @@ Step 6 on an empty vault:
 
 An empty vault gives you nothing to load. Ask: "What are you working on right now?" Aim for three to seven pieces of work. For each, draw out one sentence of description, where things stand, and the next step, then write it:
 
-hafez create entity "<name>" --type <project|entity> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"
+hafez create entity "<name>" --type <project|entity> --parent <slug you read, or its parent> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"
 
 Anything vague or someday: `hafez capture "<name>"`. Read a README or notes only if the user points you at them. Do not ask for approval before writing. When done, show them `hafez stats`.
 ````
@@ -138,7 +138,7 @@ Attach ana/vault when you start a session, with push access, and the script regi
 The Block its install line writes is the Block in `block.md` with the repo in its begin marker and one paragraph more, after the first:
 
 ```
-<!-- hafez:begin e2323a1fb962 vault-repo=ana/vault -->
+<!-- hafez:begin 629aa0f8ece8 vault-repo=ana/vault -->
 …
 **Cloud session.** If `hafez init` shows no registered vault: attach `ana/vault` to this session (add_repo, push access), clone it to /home/user/vault, run `hafez init --register /home/user/vault`, then continue. Never create a throwaway vault.
 …

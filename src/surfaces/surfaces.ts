@@ -49,7 +49,7 @@ export const SURFACES: Record<SurfaceId, Surface> = {
   },
   hafezSkillDescription: {
     label: '`hafez` skill description',
-    compose: () => 'Hafez vault: the less common operations and the tool itself. Use when the user asks what is in the vault ("what am I working on?", "what\'s stale?"), wants to promote, link, unlink, delete, change a status or validate, or wants to update or reconfigure Hafez ("upgrade hafez", "set up hafez"). Also the reference to read when no Hafez block is in your instructions.',
+    compose: () => 'Hafez vault: the less common operations and the tool itself. Use when the user asks what is in the vault ("what am I working on?", "what\'s stale?"), wants to promote, link, unlink, delete, change a status or validate, asks to check the vault or clean it up, or wants to update or reconfigure Hafez ("upgrade hafez", "set up hafez"). Also the reference to read when no Hafez block is in your instructions.',
   },
   hafezSkillBody: {
     label: '`hafez` skill body',
@@ -76,6 +76,8 @@ export const SURFACES: Record<SurfaceId, Surface> = {
       '## Less common operations',
       '',
       place('rareOps'),
+      '',
+      place('healthProcedure'),
       '',
       `${place('batchShape')} Machine-readable shape of any op: \`hafez schema <op>\`, with \`--examples\` for a sample.`,
       '',

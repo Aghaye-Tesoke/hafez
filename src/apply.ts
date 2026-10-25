@@ -385,6 +385,58 @@ function withMechanisedLog(kind: 'entity' | 'knowledge', fields: UpdateFields): 
   }
 }
 
+// --- Related edges (ADR 0002) ---
+// A same-kind `related` edge (entity↔entity, knowledge↔knowledge) is one
+// edge with two ends the tool keeps: the arm that writes or drops `b` on
+// `a`'s file calls one of these to mirror it on `b`'s file, in the same
+// commit, captured for the same rollback. A cross-kind edge stays one-way
+// (the index answers the reverse); a self-edge and a target already in (or
+// already without) the mirror are left alone — a file the op would not
+// change is never rewritten, which is also why a legacy one-way edge is
+// never repaired.
+
+/** The mirror file an edge op touched: what the arm appends to its
+ * filesWritten and indexUpserts. */
+export interface EdgeTouch {
+  file: string
+  upsert: { slug: string; kind: VaultKind }
+}
+
+function mirrorEdge(ctx: ApplyContext, a: string, aKind: VaultKind, b: string, mode: 'write' | 'drop'): EdgeTouch | null {
+  if (a === b) return null
+  const bPath = findVaultFile(ctx.vaultPath, b)
+  if (!bPath || kindFromPath(bPath) !== aKind) return null
+  const parsed = parseFilePath(bPath)
+  const fm = parsed.frontmatter as Record<string, any>
+  const related: string[] = fm.related ?? []
+  if (mode === 'write' ? related.includes(a) : !related.includes(a)) return null
+  ctx.captureOriginal(bPath)
+  if (mode === 'write') fm.related = [...related, a]
+  else {
+    fm.related = related.filter(r => r !== a)
+    if (fm.related.length === 0) delete fm.related
+  }
+  const body = documentForFile(parsed).syncRelatedSection(parsed.body, fm)
+  writeFileSync(bPath, serializeFile(fm, body))
+  return { file: vaultRel(ctx.vaultPath, bPath), upsert: { slug: b, kind: aKind } }
+}
+
+/** Write `a` into `b`'s related when the edge is same-kind. */
+function writeBackEdge(ctx: ApplyContext, a: string, aKind: VaultKind, b: string): EdgeTouch | null {
+  return mirrorEdge(ctx, a, aKind, b, 'write')
+}
+
+/** Write `a` into every same-kind target's related. */
+function backEdges(ctx: ApplyContext, a: string, aKind: VaultKind, targets: string[]): EdgeTouch[] {
+  return targets.flatMap(b => writeBackEdge(ctx, a, aKind, b) ?? [])
+}
+
+/** Drop `a` from `b`'s related when the edge is same-kind. Exported for the
+ * delete arm (#243) as well. */
+export function dropBackEdge(ctx: ApplyContext, a: string, aKind: VaultKind, b: string): EdgeTouch | null {
+  return mirrorEdge(ctx, a, aKind, b, 'drop')
+}
+
 // --- The arms ---
 
 function applyUpdate(op: Extract<BatchOperation, { op: 'update' }>, ctx: ApplyContext): AppliedOp {
@@ -397,6 +449,9 @@ function applyUpdate(op: Extract<BatchOperation, { op: 'update' }>, ctx: ApplyCo
   const doc = documentForFile(parsedFile)
   let fm = parsedFile.frontmatter as Record<string, any>
   let body = parsedFile.body
+  // The related list before the fields replace it: the diff against the new
+  // one is what the edge writer and dropper mirror on the targets.
+  const relatedBefore: string[] = fm.related ?? []
   const applied = applyUpdateFields(doc, fm, body, withMechanisedLog(kind, op.fields))
   fm = applied.fm
   body = applied.body
@@ -421,11 +476,22 @@ function applyUpdate(op: Extract<BatchOperation, { op: 'update' }>, ctx: ApplyCo
   body = doc.syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
 
+  const touches: EdgeTouch[] = []
+  if (op.fields.related !== undefined) {
+    const relatedAfter: string[] = fm.related ?? []
+    touches.push(...backEdges(ctx, op.slug, kind, relatedAfter.filter(r => !relatedBefore.includes(r))))
+    for (const r of relatedBefore.filter(r => !relatedAfter.includes(r))) {
+      const t = dropBackEdge(ctx, op.slug, kind, r)
+      if (t) touches.push(t)
+    }
+  }
+
   // Only the files THIS update wrote. Keying off the archive file merely
   // existing swept any external hand-edit sitting in entities/archive/
   // into an unrelated commit.
   const files = [vaultRel(vaultPath, filePath)]
   if (wroteArchive) files.push(vaultRel(vaultPath, archivePath))
+  files.push(...touches.map(t => t.file))
 
   return {
     filesWritten: files,
@@ -433,7 +499,7 @@ function applyUpdate(op: Extract<BatchOperation, { op: 'update' }>, ctx: ApplyCo
     result: { op: 'update', slug: op.slug, status: 'ok' },
     commitMessage: `update: ${op.slug}`,
     indexRemovals: [],
-    indexUpserts: [{ slug: op.slug, kind }],
+    indexUpserts: [{ slug: op.slug, kind }, ...touches.map(t => t.upsert)],
     updateResult: applied.updateResult,
   }
 }
@@ -453,13 +519,14 @@ function applyCreateEntity(op: Extract<BatchOperation, { op: 'create'; kind: 'en
   mkdirSync(join(vaultPath, kindDir('entity')), { recursive: true })
   body = documentFor({ kind: 'entity' }).syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
+  const touches = backEdges(ctx, slug, 'entity', fm.related ?? [])
   return {
-    filesWritten: [vaultRel(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath), ...touches.map(t => t.file)],
     filesDeleted: [],
     result: { op: 'create', slug, status: 'ok', created: true },
     commitMessage: `create: ${op.name}`,
     indexRemovals: [],
-    indexUpserts: [{ slug, kind: 'entity' }],
+    indexUpserts: [{ slug, kind: 'entity' }, ...touches.map(t => t.upsert)],
   }
 }
 
@@ -475,13 +542,14 @@ function applyCreateKnowledge(op: Extract<BatchOperation, { op: 'create'; kind: 
   mkdirSync(join(vaultPath, kindDir('knowledge')), { recursive: true })
   body = documentFor({ kind: 'knowledge' }).syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
+  const touches = backEdges(ctx, slug, 'knowledge', fm.related ?? [])
   return {
-    filesWritten: [vaultRel(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath), ...touches.map(t => t.file)],
     filesDeleted: [],
     result: { op: 'create', slug, status: 'ok', created: true },
     commitMessage: `create: ${op.name}`,
     indexRemovals: [],
-    indexUpserts: [{ slug, kind: 'knowledge' }],
+    indexUpserts: [{ slug, kind: 'knowledge' }, ...touches.map(t => t.upsert)],
   }
 }
 
@@ -501,12 +569,12 @@ function applyCreateSession(op: Extract<BatchOperation, { op: 'create'; kind: 's
   if (existsSync(filePath) || vaultFileExists(vaultPath, slug)) appeared(slug)
   ctx.captureOriginal(filePath)
   const fm: Record<string, any> = { name: op.name, created: today() }
-  const kf = (op.fields ?? {}) as CreateKnowledgeFields
+  const kf = op.fields ?? {}
   if (kf['session-date']) fm['session-date'] = kf['session-date']
   if (kf.related?.length) fm.related = kf.related
   // Session sections come from contracts.SESSION_SECTIONS — the same list
   // Document splits on, so the written body and the structural set agree.
-  let sessionBody = sessionBodyTemplate({ synthesis: kf.synthesis })
+  let sessionBody = sessionBodyTemplate({ synthesis: kf.synthesis, decisions: kf.decisions, entities_touched: kf.entities_touched })
   sessionBody = documentFor({ kind: 'session' }).syncRelatedSection(sessionBody, fm)
   writeFileSync(filePath, serializeFile(fm, sessionBody))
   return {
@@ -553,23 +621,26 @@ function applyLink(op: Extract<BatchOperation, { op: 'link' }>, ctx: ApplyContex
   const fm = parsedFile.frontmatter as Record<string, any>
   let body = parsedFile.body
 
+  const kind = kindFromPath(filePath)
+  let touch: EdgeTouch | null = null
   if (op.relation === 'parent') {
     fm.parent = op.target
   } else {
     const related = fm.related || []
     if (!related.includes(op.target)) related.push(op.target)
     fm.related = related
+    touch = writeBackEdge(ctx, op.slug, kind, op.target)
   }
 
   body = documentForFile(parsedFile).syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
   return {
-    filesWritten: [vaultRel(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath), ...(touch ? [touch.file] : [])],
     filesDeleted: [],
     result: { op: 'link', slug: op.slug, status: 'ok' },
     commitMessage: `link: ${op.slug} → ${op.target} (${op.relation})`,
     indexRemovals: [],
-    indexUpserts: [{ slug: op.slug, kind: kindFromPath(filePath) }],
+    indexUpserts: [{ slug: op.slug, kind }, ...(touch ? [touch.upsert] : [])],
   }
 }
 
@@ -582,22 +653,29 @@ function applyUnlink(op: Extract<BatchOperation, { op: 'unlink' }>, ctx: ApplyCo
   const fm = parsedFile.frontmatter as Record<string, any>
   let body = parsedFile.body
 
+  const kind = kindFromPath(filePath)
+  let touch: EdgeTouch | null = null
   if (op.relation === 'parent' && fm.parent === op.target) {
     delete fm.parent
-  } else if (op.relation === 'related' && fm.related) {
-    fm.related = fm.related.filter((r: string) => r !== op.target)
-    if (fm.related.length === 0) delete fm.related
+  } else if (op.relation === 'related') {
+    if (fm.related) {
+      fm.related = fm.related.filter((r: string) => r !== op.target)
+      if (fm.related.length === 0) delete fm.related
+    }
+    // The target's end goes too, even when this file never carried the edge
+    // (a legacy one-way edge).
+    touch = dropBackEdge(ctx, op.slug, kind, op.target)
   }
 
   body = documentForFile(parsedFile).syncRelatedSection(body, fm)
   writeFileSync(filePath, serializeFile(fm, body))
   return {
-    filesWritten: [vaultRel(vaultPath, filePath)],
+    filesWritten: [vaultRel(vaultPath, filePath), ...(touch ? [touch.file] : [])],
     filesDeleted: [],
     result: { op: 'unlink', slug: op.slug, status: 'ok' },
     commitMessage: `unlink: ${op.slug} ✕ ${op.target} (${op.relation})`,
     indexRemovals: [],
-    indexUpserts: [{ slug: op.slug, kind: kindFromPath(filePath) }],
+    indexUpserts: [{ slug: op.slug, kind }, ...(touch ? [touch.upsert] : [])],
   }
 }
 
@@ -706,14 +784,17 @@ function applyDelete(op: Extract<BatchOperation, { op: 'delete' }>, ctx: ApplyCo
   if (!existsSync(filePath)) vanished(op.slug)
   // The snapshot is the rollback: a commit-stage failure writes it back.
   ctx.captureOriginal(filePath)
+  // The other end of every same-kind edge the note owns goes with it (#243).
+  const own: string[] = kind === 'knowledge' ? (parseFilePath(filePath).frontmatter as Record<string, any>).related ?? [] : []
   unlinkSync(filePath)
+  const touches = own.flatMap(r => dropBackEdge(ctx, op.slug, 'knowledge', r) ?? [])
   return {
-    filesWritten: [],
+    filesWritten: touches.map(t => t.file),
     filesDeleted: [vaultRel(vaultPath, filePath)],
     result: { op: 'delete', slug: op.slug, status: 'ok' },
     commitMessage: `delete: ${op.slug} (${kind})`,
     indexRemovals: [op.slug],
-    indexUpserts: [],
+    indexUpserts: touches.map(t => t.upsert),
     deletedKind: kind,
   }
 }

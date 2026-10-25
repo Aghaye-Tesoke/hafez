@@ -82,7 +82,7 @@ export interface UpgradeDeps {
   npmVersion: () => string
 }
 
-const DEV_CHECKOUT_WORK = 'git pull && npm run build && npm run install:local'
+const DEV_CHECKOUT_WORK = 'git pull && npm ci && npm run build && npm run install:local'
 
 const NPM_PROBE_NOTE =
   'The local npm version could not be determined, so every install flag is included above. ' +

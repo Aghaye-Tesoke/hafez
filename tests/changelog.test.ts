@@ -80,6 +80,19 @@ describe('gitChangelog', () => {
     expect(entries.length).toBe(3)
   })
 
+  it("'' reads all history, and a limit only the newest that many commits, newest first (#278)", async () => {
+    expect((await gitChangelog(TMP, '')).length).toBe(3)
+    // The scaffold commit counts against the limit and adds no row.
+    const entries = await gitChangelog(TMP, '', 3)
+    expect(entries.map(e => [e.slug, e.operation])).toEqual([['test-note', 'created'], ['test-entity', 'updated']])
+  })
+
+  it('each entry carries its commit hash, so the entries of one commit are told from another\'s', async () => {
+    const entries = await gitChangelog(TMP, '', 3) // two notes written in two commits, after the scaffold
+    expect(entries.map(e => e.commit)).toEqual(entries.map(() => expect.stringMatching(/^[0-9a-f]{40}$/)))
+    expect(new Set(entries.map(e => e.commit)).size).toBe(2)
+  })
+
   it('returns empty for future date', async () => {
     const entries = await gitChangelog(TMP, '2099-01-01')
     expect(entries.length).toBe(0)
@@ -172,6 +185,13 @@ describe('changelog surfaces a real promote', () => {
 
     const entries = await os.changelog(new Date(Date.now() - 120000).toISOString())
     expect(entries.some(e => e.slug === slug && e.kind === 'knowledge')).toBe(true)
+  })
+  it("rejects a limit that is not a positive whole number of commits; '' with a limit still reads the newest", async () => {
+    const os = createHafez({ vaultPath: VAULT, git: { push: false } })
+    for (const limit of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(os.changelog('', limit), String(limit)).rejects.toMatchObject({ code: 'VALIDATION_FAILED' })
+    }
+    expect((await os.changelog('', 1)).length).toBeGreaterThan(0)
   })
 })
 

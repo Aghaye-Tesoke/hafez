@@ -40,6 +40,11 @@ export function knowledgeBodyTemplate(subtype?: KnowledgeSubtype, fields?: { syn
 /** Session bodies. Sessions have no TypeContract, but their headings are
  * structural for Document splitting — so the list lives in contracts with
  * every other section set, and this renders it. */
-export function sessionBodyTemplate(fields?: { synthesis?: string }): string {
-  return render([...SESSION_SECTIONS], { Summary: fields?.synthesis })
+export function sessionBodyTemplate(fields?: { synthesis?: string; decisions?: string[]; entities_touched?: string[] }): string {
+  const bullets = (items: string[] | undefined) => items?.map(i => `- ${i}`).join('\n')
+  return render([...SESSION_SECTIONS], {
+    Summary: fields?.synthesis,
+    'Entities Touched': bullets(fields?.entities_touched?.map(slug => `[[${slug}]]`)),
+    Decisions: bullets(fields?.decisions),
+  })
 }

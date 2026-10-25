@@ -18,6 +18,17 @@ export function localDay(d: Date = new Date()): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
+/** Whole days from one YYYY-MM-DD day to another, as calendar days: a
+ * difference that ignores DST. */
+export function daysBetween(from: string, to: string): number {
+  return dayNumber(to) - dayNumber(from)
+}
+
+function dayNumber(day: string): number {
+  const [y, m, d] = day.split('-').map(Number)
+  return Date.UTC(y, m - 1, d) / 86_400_000
+}
+
 /**
  * Bare YYYY-MM-DD → local midnight, for git's approxidate. A date-only
  * `--since` is otherwise filled with the *current* time of day ("since right

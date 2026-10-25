@@ -165,7 +165,7 @@ describe('CLI', () => {
   })
 
   // #91: the miss render, on stderr, exit 1 (the not-found code).
-  const CREATE_TAIL = '--type <project|entity> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"'
+  const CREATE_TAIL = '--type <project|entity> --parent <slug you read, or its parent> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"'
 
   it('read miss with close slugs prints them read-ready, then the create line', () => {
     const { stdout, stderr, exitCode } = run('read', 'test-projects')

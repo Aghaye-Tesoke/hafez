@@ -2,14 +2,16 @@ import Database from 'better-sqlite3'
 import { createHash } from 'crypto'
 import { readFileSync, statSync, existsSync, unlinkSync } from 'fs'
 import { join, basename } from 'path'
-import { parseFilePath, scanVaultDir, kindDir, INDEXED_KINDS, type VaultKind } from './vault.js'
+import { parseFilePath, scanVaultDir, kindDir, INDEXED_KINDS, MUTABLE_KINDS, type VaultKind } from './vault.js'
 import { ensureLocalExclude, type VaultIndexRow } from './knowledge-index.js'
 import { WIKI_LINK_RE, documentForFile } from './document.js'
-import { ENTITY_STATUSES, ENTITY_TYPES, CONFIDENCE_LEVELS, VALID_SUBTYPES, DEFAULT_KNOWLEDGE_SUBTYPE } from './contracts.js'
-import type { SearchResult, SearchKind, VaultStats, EntityStatus, EntityType, QueryResult, KnowledgeQueryResult, SessionQueryResult, UnifiedResult, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, UnifiedQueryOpts, SortField } from './types.js'
+import { ENTITY_STATUSES, ENTITY_TYPES, CONFIDENCE_LEVELS, VALID_SUBTYPES, DEFAULT_KNOWLEDGE_SUBTYPE, GRAPH_LAYERS, GRAPH_NOTE_RELATIONS, SYNTHETIC_LAYERS } from './contracts.js'
+import { GRAPH_ROW_FIELDS } from './graph/fields.js'
+import type { SearchResult, SearchKind, VaultStats, EntityStatus, EntityType, QueryResult, KnowledgeQueryResult, SessionQueryResult, UnifiedResult, EntityQueryOpts, KnowledgeQueryOpts, SessionQueryOpts, UnifiedQueryOpts, SortField, Graph, GraphNode, GraphEdge, GraphOpts } from './types.js'
 import { HafezError } from './types.js'
 import { STOPWORDS } from './stopwords.js'
-import { ENTITY_AGE_DAYS_SQL, ENTITY_STALE_SQL } from './stale.js'
+import { closestSlugs, type SlugCandidate } from './closest.js'
+import { ENTITY_AGE_DAYS_SQL, ENTITY_STALE_SQL, DEFAULT_STALENESS_DAYS, actionAge } from './stale.js'
 import { localDay } from './dates.js'
 
 // Bump this when indexing logic changes to force a full rebuild.
@@ -26,8 +28,9 @@ import { localDay } from './dates.js'
 // v11: next_action and the searchable body store action text with its
 //     added-date stamp stripped.
 // v12: sessions are indexed (#35); session_date column.
+// v13: action_added column, the open actions' added days (the Graph's stale-action count, #271).
 // Existing instances will fully rebuild the index on first access after upgrade.
-export const SCHEMA_VERSION = '12'
+export const SCHEMA_VERSION = '13'
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS items (
@@ -55,7 +58,8 @@ CREATE TABLE IF NOT EXISTS items (
   last_session_date  TEXT,
   last_session_type  TEXT,
   last_session_summary TEXT,
-  session_date       TEXT
+  session_date       TEXT,
+  action_added       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS links (
@@ -120,6 +124,8 @@ interface IndexItem {
   last_session_type: string | null
   last_session_summary: string | null
   session_date: string | null
+  /** An entity's open actions' added days as a JSON array, null for an undated line. */
+  action_added: string | null
 }
 
 export interface IndexQueryResult {
@@ -129,7 +135,11 @@ export interface IndexQueryResult {
 
 export interface HafezIndex {
   rebuild(): void
+  /** Catch the index up with the files, whatever the mode: a stat per note
+   * (read-only: reopen a database another process rewrote). */
   syncIfStale(): void
+  /** What a read runs first, by the index's `sync` mode (`IndexOpts`). */
+  syncForRead(): void
   upsertFromFile(slug: string, kind: VaultKind): void
   removeItem(slug: string): void
   queryItems(opts: QueryOpts): IndexQueryResult
@@ -137,6 +147,8 @@ export interface HafezIndex {
   getStats(): VaultStats
   /** Every indexed document, in the shape index.md is rendered from. */
   indexEntries(): VaultIndexRow[]
+  /** The rows the Graph is shaped from: every item, every link. */
+  graphRows(): GraphRows
   close(): void
   // The public read surface (S5): the index's interface IS the query
   // interface — staleness sync, opts mapping, and row shaping live behind
@@ -147,6 +159,15 @@ export interface HafezIndex {
   queryKnowledge(opts?: KnowledgeQueryOpts): { items: KnowledgeQueryResult[]; total: number }
   querySessions(opts?: SessionQueryOpts): { items: SessionQueryResult[]; total: number }
   queryUnified(opts?: UnifiedQueryOpts): { items: UnifiedResult[]; total: number }
+  queryGraph(opts?: GraphOpts): Graph
+}
+
+export interface GraphRows {
+  items: Array<Pick<IndexItem, 'slug' | 'kind' | 'name' | 'type' | 'status' | 'subtype' | 'confidence' | 'last_touched' | 'description' | 'next_action_count' | 'staleness_days' | 'action_added'> & {
+    /** Entity-stale by the index's stale rule, 1 or 0; null for a note with no last-touched. */
+    stale: number | null
+  }>
+  links: Array<{ source: string; target: string; relation: string }>
 }
 
 /** `kind` unset is the working set, entity + knowledge; `all` is literal. */
@@ -426,6 +447,17 @@ function indexEntriesFn(db: InstanceType<typeof Database>): VaultIndexRow[] {
   }))
 }
 
+function graphRowsFn(db: InstanceType<typeof Database>): GraphRows {
+  return {
+    items: db.prepare(
+      `SELECT slug, kind, name, type, status, subtype, confidence, last_touched, description,
+              next_action_count, staleness_days, action_added, (${ENTITY_STALE_SQL}) AS stale
+       FROM items i ORDER BY slug`
+    ).all({ today: localDay() }) as GraphRows['items'],
+    links: db.prepare('SELECT source, target, relation FROM links ORDER BY source, target, relation').all() as GraphRows['links'],
+  }
+}
+
 function searchFn(db: InstanceType<typeof Database>, query: string, kind?: SearchKind): SearchResult[] {
   const { fts: ftsQuery, terms } = sanitizeFtsQuery(query)
   if (!ftsQuery) return []
@@ -549,11 +581,19 @@ export function __setAfterScanHook(fn: (() => void) | null): void { afterScanHoo
 
 // --- createIndex: overloaded for write and readonly modes ---
 
-export function createIndex(vaultPath: string): HafezIndex
-export function createIndex(vaultPath: string, opts: { readonly: true }): HafezIndex | null
-export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): HafezIndex | null {
+/** `sync`: what `syncForRead`, run first by every read-surface query, does.
+ * 'read' (default): runs `syncIfStale`. 'once': runs it until a sync has
+ * caught the index up, then trusts the index (#269). 'manual': trusts the
+ * index, and the caller syncs it. */
+export type IndexSync = 'read' | 'once' | 'manual'
+export interface IndexOpts { sync?: IndexSync }
+
+export function createIndex(vaultPath: string, opts?: IndexOpts & { readonly?: false }): HafezIndex
+export function createIndex(vaultPath: string, opts: IndexOpts & { readonly: true }): HafezIndex | null
+export function createIndex(vaultPath: string, opts?: IndexOpts & { readonly?: boolean }): HafezIndex | null {
   const dbPath = join(vaultPath, '.hafez.db')
   const isReadOnly = opts?.readonly ?? false
+  const sync = opts?.sync ?? 'read'
 
   if (isReadOnly) {
     if (!existsSync(dbPath)) return null
@@ -598,8 +638,9 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       search: (q, k) => searchFn(db, q, k),
       getStats: () => getStatsFn(db),
       indexEntries: () => indexEntriesFn(db),
+      graphRows: () => graphRowsFn(db),
       close: () => { try { db.close() } catch {} },
-    })
+    }, sync)
   }
 
   // --- Write-capable path ---
@@ -684,12 +725,12 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       (slug, kind, name, type, status, parent, next_action, next_action_count, staleness_days,
        confidence, reinforcement_count, last_reinforced, created, last_touched, body, file_hash, subtype,
        description, resource, brief, session_log_count, last_session_date, last_session_type, last_session_summary,
-       session_date)
+       session_date, action_added)
     VALUES
       (@slug, @kind, @name, @type, @status, @parent, @next_action, @next_action_count, @staleness_days,
        @confidence, @reinforcement_count, @last_reinforced, @created, @last_touched, @body, @file_hash, @subtype,
        @description, @resource, @brief, @session_log_count, @last_session_date, @last_session_type, @last_session_summary,
-       @session_date)
+       @session_date, @action_added)
   `)
   const deleteItemStmt = db.prepare('DELETE FROM items WHERE slug = ?')
   const deleteLinksStmt = db.prepare('DELETE FROM links WHERE source = ?')
@@ -759,6 +800,9 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
       last_session_summary: lastLog?.summary?.slice(0, 300) ?? null,
       // A session note's one day; the created stamp when digest gave none.
       session_date: kind === 'session' ? (fm['session-date'] ?? fm.created) : null,
+      action_added: kind === 'entity'
+        ? JSON.stringify(doc.getActionItems(body).flatMap(a => a.handle === undefined ? [] : [a.added]))
+        : null,
     }
 
     // Replace item and rebuild links. Delete-then-insert keeps the FTS index
@@ -913,25 +957,41 @@ export function createIndex(vaultPath: string, opts?: { readonly?: boolean }): H
     search: (q, k) => searchFn(db, q, k),
     getStats: () => getStatsFn(db),
     indexEntries: () => indexEntriesFn(db),
+    graphRows: () => graphRowsFn(db),
     close: () => db.close(),
-  })
+  }, sync)
 }
 
 // --- The read surface: opts mapping + row shaping over queryItemsFn ---
 
-/** The five read-surface methods exist in exactly one place: attached here
- * over any core index (write-capable or read-only). */
-type IndexCore = Omit<HafezIndex, 'queryEntities' | 'queryChildren' | 'queryRelatedTo' | 'queryKnowledge' | 'querySessions' | 'queryUnified'>
+/** The read-surface methods exist in exactly one place: attached here over
+ * any core index (write-capable or read-only). Each first runs `syncForRead`,
+ * the `sync` mode's rule. */
+type IndexCore = Omit<HafezIndex, 'syncForRead' | 'queryEntities' | 'queryChildren' | 'queryRelatedTo' | 'queryKnowledge' | 'querySessions' | 'queryUnified' | 'queryGraph'>
 
-function withReadSurface(core: IndexCore): HafezIndex {
+function withReadSurface(core: IndexCore, sync: IndexSync): HafezIndex {
+  // Any sync catches the index up, a caller's own included; from then on the
+  // index stays current with this process's writes (the Spine indexes them).
+  let caughtUp = false
+  const syncIfStale = (): void => { core.syncIfStale(); caughtUp = true }
+  const syncForRead = (): void => {
+    if (sync === 'read' || (sync === 'once' && !caughtUp)) syncIfStale()
+  }
+  const synced = <A extends unknown[], R>(fn: (...args: A) => R) => (...args: A): R => {
+    syncForRead()
+    return fn(...args)
+  }
   const index: HafezIndex = {
     ...core,
-    queryEntities: (opts) => queryEntitiesFn(index, opts),
-    queryChildren: (parentSlug) => queryEntitiesFn(index, { parent: parentSlug }),
-    queryRelatedTo: (slug, relation) => queryRelatedToFn(index, slug, relation),
-    queryKnowledge: (opts) => queryKnowledgeFn(index, opts),
-    querySessions: (opts) => querySessionsFn(index, opts),
-    queryUnified: (opts) => queryUnifiedFn(index, opts),
+    syncIfStale,
+    syncForRead,
+    queryEntities: synced((opts) => queryEntitiesFn(index, opts)),
+    queryChildren: synced((parentSlug) => queryEntitiesFn(index, { parent: parentSlug })),
+    queryRelatedTo: synced((slug, relation) => queryRelatedToFn(index, slug, relation)),
+    queryKnowledge: synced((opts) => queryKnowledgeFn(index, opts)),
+    querySessions: synced((opts) => querySessionsFn(index, opts)),
+    queryUnified: synced((opts) => queryUnifiedFn(index, opts)),
+    queryGraph: synced((opts) => queryGraphFn(index, opts)),
   }
   return index
 }
@@ -1085,7 +1145,6 @@ function validateKnowledgeFilterOpts(opts?: { confidence?: string; subtype?: str
 }
 
 function queryEntitiesFn(index: HafezIndex, opts?: EntityQueryOpts): { items: QueryResult[], total: number } {
-  index.syncIfStale()
   validateEntityFilterOpts(opts)
   // Was validateKnowledgeFilterOpts — it checked the *value* of an opt this
   // branch then discarded, so a valid-looking one returned unfiltered.
@@ -1102,13 +1161,11 @@ function queryEntitiesFn(index: HafezIndex, opts?: EntityQueryOpts): { items: Qu
 
 /** Every kind: the sessions that touched an entity are the look back from it. */
 function queryRelatedToFn(index: HafezIndex, slug: string, relation?: string): { items: UnifiedResult[], total: number } {
-  index.syncIfStale()
   const { items, total } = index.queryItems({ kind: 'all', relatedTo: slug, relation })
   return { items: items.map(toUnifiedResult), total }
 }
 
 function queryKnowledgeFn(index: HafezIndex, opts?: KnowledgeQueryOpts): { items: KnowledgeQueryResult[], total: number } {
-  index.syncIfStale()
   validateKnowledgeFilterOpts(opts)
   rejectUnmappableOpts(opts as Record<string, unknown> | undefined, ENTITY_ONLY_OPTS, 'knowledge')
   validateTimeOpts(opts)
@@ -1122,7 +1179,6 @@ function queryKnowledgeFn(index: HafezIndex, opts?: KnowledgeQueryOpts): { items
 }
 
 function querySessionsFn(index: HafezIndex, opts?: SessionQueryOpts): { items: SessionQueryResult[], total: number } {
-  index.syncIfStale()
   rejectUnmappableOpts(opts as Record<string, unknown> | undefined, SESSION_REJECTED_OPTS, 'session')
   validateTimeOpts(opts)
   validateListOpts(opts)
@@ -1137,7 +1193,6 @@ function queryUnifiedFn(
   index: HafezIndex,
   opts?: UnifiedQueryOpts,
 ): { items: UnifiedResult[], total: number } {
-  index.syncIfStale()
   // The public type is a union discriminated on `kind`, so an out-of-scope opt
   // is a compile error. The runtime still has to see every opt to reject it —
   // an untyped caller (JS, JSON over MCP) reaches here regardless — so widen
@@ -1165,4 +1220,111 @@ function queryUnifiedFn(
 
   const result = index.queryItems(qopts)
   return { items: result.items.map(toUnifiedResult), total: result.total }
+}
+
+/** The Graph's node kinds by default: the working set, entities and knowledge. */
+const GRAPH_KINDS = new Set<string>(MUTABLE_KINDS)
+const GRAPH_RELATIONS = new Set<string>(GRAPH_NOTE_RELATIONS)
+
+/** The opts graph() applies; any other is rejected, never dropped. */
+const GRAPH_OPTS: readonly string[] = ['layers']
+/** The layers whose nodes are synthetic: one per distinct value, `<layer>:<value>`. */
+const SYNTHETIC = new Set<string>(SYNTHETIC_LAYERS)
+
+function queryGraphFn(index: HafezIndex, opts?: GraphOpts): Graph {
+  for (const [name, value] of Object.entries(opts ?? {})) {
+    if (value !== undefined && !GRAPH_OPTS.includes(name)) {
+      throw new HafezError('VALIDATION_FAILED', `Invalid opt for a graph query: "${name}"`)
+    }
+  }
+  const given: unknown = opts?.layers ?? []
+  if (!Array.isArray(given) || given.some(l => !(GRAPH_LAYERS as readonly unknown[]).includes(l))) {
+    throw new HafezError('VALIDATION_FAILED', `Invalid graph layers: ${JSON.stringify(given)}. Valid values: ${GRAPH_LAYERS.join(', ')}.`)
+  }
+  const layers = new Set<string>(given)
+  const { items, links } = index.graphRows()
+  const nodes: GraphNode[] = []
+  for (const i of items) {
+    if (!GRAPH_KINDS.has(i.kind) && !(i.kind === 'session' && layers.has('session'))) continue
+    const node: GraphNode = { id: i.slug, kind: i.kind as GraphNode['kind'], name: i.name }
+    // The index's columns are plain strings; what it stores there for a
+    // note is the frontmatter's validated enum value.
+    for (const key of GRAPH_ROW_FIELDS) if (i[key] != null) Object.assign(node, { [key]: i[key] })
+    if (i.kind === 'entity') Object.assign(node, entitySignals(i))
+    nodes.push(node)
+  }
+  markUnlinked(nodes, links)
+  // An edge needs both ends on the graph: a missing note, or a session, tag or
+  // domain outside its layer, is no node. Related is one edge per unordered
+  // pair (ADR 0002); a legacy one-way edge is emitted once, as written.
+  const ids = new Set(nodes.map(n => n.id))
+  // A Session's only edges are the `related` it names: the Entities it touched.
+  const sessions = new Set(nodes.filter(n => n.kind === 'session').map(n => n.id))
+  const pairs = new Set<string>()
+  const edges: GraphEdge[] = []
+  // A tag or domain node exists for each value a node carries; its id cannot
+  // collide with a slug, which never holds `:`.
+  const layerNodes = new Map<string, GraphNode>()
+  for (const l of links) {
+    if (layers.has(l.relation) && SYNTHETIC.has(l.relation)) {
+      if (!ids.has(l.source) || sessions.has(l.source)) continue
+      const id = `${l.relation}:${l.target}`
+      if (!layerNodes.has(id)) layerNodes.set(id, { id, kind: l.relation as GraphNode['kind'], name: l.target })
+      edges.push({ source: l.source, target: id, relation: l.relation as GraphEdge['relation'] })
+      continue
+    }
+    if (!GRAPH_RELATIONS.has(l.relation) || !ids.has(l.source) || !ids.has(l.target)) continue
+    if (sessions.has(l.target) || (sessions.has(l.source) && l.relation !== 'related')) continue
+    if (l.relation === 'related') {
+      const pair = [l.source, l.target].sort().join('\n')
+      if (pairs.has(pair)) continue
+      pairs.add(pair)
+    }
+    edges.push({ source: l.source, target: l.target, relation: l.relation as GraphEdge['relation'] })
+  }
+  nodes.push(...[...layerNodes.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)))
+  return { nodes, edges }
+}
+
+/** What an Entity node carries of its state (#271): every Entity its effective
+ * staleness-days; an active or paused one its open actions and stale-action
+ * count too (#277: the sidebar's Paused rows count them), and an active one
+ * its Stale flag. A done Entity carries no action signal. */
+function entitySignals(i: GraphRows['items'][number]): Pick<GraphNode, 'open_actions' | 'stale' | 'stale_actions' | 'staleness_days'> {
+  const staleness_days = i.staleness_days ?? DEFAULT_STALENESS_DAYS
+  if (i.status !== 'active' && i.status !== 'paused') return { staleness_days }
+  const today = localDay()
+  const added = JSON.parse(i.action_added ?? '[]') as Array<string | null>
+  return {
+    open_actions: i.next_action_count,
+    ...(i.status === 'active' && { stale: i.stale === 1 }),
+    stale_actions: added.filter(day => actionAge(day, staleness_days, today).stale).length,
+    staleness_days,
+  }
+}
+
+/** Mark each Unlinked note (CONTEXT: no Parent, Related or Wiki-link edge to
+ * another Entity or Knowledge note, either way; tags and Sessions do not
+ * count) and give it `best`, the slug its placing line names: the closest
+ * linked note (src/closest.ts, which weighs each linked note's name and
+ * description) to the Unlinked note's name, else to its description; the
+ * same kind when one matches, else any kind; none when nothing matches. */
+function markUnlinked(nodes: GraphNode[], links: GraphRows['links']): void {
+  const notes = new Map(nodes.filter(n => n.kind === 'entity' || n.kind === 'knowledge').map(n => [n.id, n]))
+  const linked = new Set<string>()
+  for (const l of links) {
+    if (!GRAPH_RELATIONS.has(l.relation) || l.source === l.target || !notes.has(l.source) || !notes.has(l.target)) continue
+    linked.add(l.source)
+    linked.add(l.target)
+  }
+  const candidates = [...notes.values()].filter(n => linked.has(n.id))
+    .map(n => ({ kind: n.kind, slug: n.id, name: n.name, description: n.description ?? null }))
+  const closest = (n: GraphNode, among: SlugCandidate[]) =>
+    closestSlugs(n.name, among)[0] ?? (n.description ? closestSlugs(n.description, among)[0] : undefined)
+  for (const n of notes.values()) {
+    if (linked.has(n.id)) continue
+    n.unlinked = true
+    const best = closest(n, candidates.filter(c => c.kind === n.kind)) ?? closest(n, candidates)
+    if (best !== undefined) n.best = best
+  }
 }

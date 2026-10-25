@@ -7,7 +7,7 @@ import { simpleGit, type SimpleGit, type SimpleGitOptions } from 'simple-git'
 import { mergeVaultContent } from './merge.js'
 import { VAULT_FILE_RE, INDEXED_DIR_PATHSPECS, classifyIndexedRelPath, vaultKindFromRelPath } from './vault.js'
 import { normalizeSinceDate } from './dates.js'
-import { HafezError, type GitConfig, type ChangelogEntry, type Journal } from './types.js'
+import { HafezError, type GitConfig, type ChangelogEntry, type ChangeOp, type FileChange, type Journal } from './types.js'
 
 // Hafez runs git in the user's own shell, and git inherited that environment before simple-git
 // guarded it. simple-git 4 guards it two ways, and both are opened in full: `allowEnvironment`
@@ -500,7 +500,7 @@ function gitReadFailed(err: unknown): HafezError {
   return new HafezError('GIT_READ_FAILED', `git read failed: ${lines[0] ?? 'unknown error'}`, lines)
 }
 
-export async function gitChangelog(vaultPath: string, since: string): Promise<ChangelogEntry[]> {
+export async function gitChangelog(vaultPath: string, since: string, limit?: number): Promise<ChangelogEntry[]> {
   const git: SimpleGit = vaultGit(vaultPath)
 
   // Bare dates become local midnight — the same calendar-day boundary the
@@ -510,7 +510,7 @@ export async function gitChangelog(vaultPath: string, since: string): Promise<Ch
   let output: string
   try {
     output = await git.raw([
-      'log', `--since=${normalizedSince}`, '--name-status',
+      'log', ...(since ? [`--since=${normalizedSince}`] : []), ...(limit === undefined ? [] : [`--max-count=${limit}`]), '--name-status',
       '--pretty=format:%H|%aI|%s', '--', ...INDEXED_DIR_PATHSPECS,
     ])
   } catch (err) {
@@ -530,7 +530,7 @@ export async function gitChangelog(vaultPath: string, since: string): Promise<Ch
     const headerMatch = lines[0].match(/^([0-9a-f]+)\|(.+?)\|(.*)$/)
     if (!headerMatch) continue
 
-    const [, , timestamp, commit_message] = headerMatch
+    const [, commit, timestamp, commit_message] = headerMatch
 
     for (let i = 1; i < lines.length; i++) {
       for (const { path: filePath, operation } of parseNameStatusLine(lines[i])) {
@@ -541,7 +541,7 @@ export async function gitChangelog(vaultPath: string, since: string): Promise<Ch
         const classified = classifyIndexedRelPath(filePath)
         if (!classified) continue
 
-        entries.push({ slug: classified.slug, kind: classified.kind, operation, timestamp, commit_message })
+        entries.push({ slug: classified.slug, kind: classified.kind, operation, timestamp, commit_message, commit })
       }
     }
   }
@@ -574,6 +574,43 @@ export async function gitFileTimes(vaultPath: string, mode: 'modified' | 'added'
     if (file && !times.has(file)) times.set(file, current) // first hit = newest
   }
   return times
+}
+
+const CHANGE_OPS: Record<ChangelogOperation, ChangeOp> = { created: 'create', updated: 'update', deleted: 'delete' }
+
+/**
+ * The Journal's changesSince: HEAD as the cursor, and the indexed-dir files
+ * whose content differs between `from` and HEAD. A diff between two points,
+ * not a walk of the commits in between, so the status is the net one: a file
+ * made and removed inside the span is not there. core.quotePath off keeps
+ * non-ASCII paths (legitimate slugs) unquoted.
+ */
+export async function gitChangesSince(vaultPath: string, from?: string): Promise<{ cursor: string; files: FileChange[] }> {
+  const git: SimpleGit = vaultGit(vaultPath)
+  let cursor: string
+  try {
+    cursor = (await git.raw(['log', '-1', '--format=%H'])).trim()
+  } catch (err) {
+    if (isNoHistory(err)) return { cursor: '', files: [] }
+    throw gitReadFailed(err)
+  }
+  if (from === undefined || from === cursor) return { cursor, files: [] }
+
+  const files: FileChange[] = []
+  try {
+    if (from === '') {
+      const listed = await git.raw(['-c', 'core.quotePath=false', 'ls-tree', '-r', '--name-only', cursor, '--', ...INDEXED_DIR_PATHSPECS])
+      for (const path of listed.split('\n').filter(Boolean)) files.push({ path, op: 'create' })
+    } else {
+      const diff = await git.raw(['-c', 'core.quotePath=false', 'diff', '--name-status', from, cursor, '--', ...INDEXED_DIR_PATHSPECS])
+      for (const line of diff.split('\n')) {
+        for (const { path, operation } of parseNameStatusLine(line)) files.push({ path, op: CHANGE_OPS[operation] })
+      }
+    }
+  } catch (err) {
+    throw gitReadFailed(err)
+  }
+  return { cursor, files }
 }
 
 export async function gitCommitAndPush(
@@ -660,7 +697,8 @@ export function createGitJournal(vaultPath: string, config: GitConfig = {}): Jou
       }
     },
     sync: () => gitSync(vaultPath),
-    changelog: (since: string) => gitChangelog(vaultPath, since),
+    changelog: (since: string, limit?: number) => gitChangelog(vaultPath, since, limit),
     fileTimes: (mode: 'modified' | 'added') => gitFileTimes(vaultPath, mode),
+    changesSince: (from?: string) => gitChangesSince(vaultPath, from),
   }
 }

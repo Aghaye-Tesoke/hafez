@@ -1,4 +1,4 @@
-<!-- hafez:begin 5fedf39ccb96 -->
+<!-- hafez:begin a09364b9c576 -->
 ## Hafez
 
 Hafez is this user's vault: what they are working on (entities) and what they have learned (knowledge). You reach it only through the `hafez` command.
@@ -7,14 +7,15 @@ Hafez is this user's vault: what they are working on (entities) and what they ha
 
 **Write as it happens.** Each of these is due the moment it occurs:
 
-- Work landed (a commit, a merged PR, CI green): update the entity that owns the work. That is the entity you read, unless the work belongs to another: read that one first. The end of its `read` output shows the command.
-- A decision was made: if the repo keeps its own decisions record, write it there now and give Hafez one line that points at it (`hafez update <slug> --log "decision: <one line>, see decisions.md"`). Otherwise it goes in the save's `decisions`.
-- An insight emerged that is useful beyond this repo: create a knowledge note. An insight about this repo's code alone goes in the repo's own docs instead.
+- Work landed (a commit, a merged PR, CI green): update the entity that owns the work. That is the entity you read; the entity you read has a child that owns it: write there; the work belongs to another: read that one first. The end of its `read` output shows the command.
+- A workstream your own actions or the user already name, too big for one action, gets a Child with that name under the entity you read: create it with `--parent`, move its open actions there (one `update` on the parent: `--remove-action` each, `--log "decision: split <child> out, open actions moved"`), and write there from now on.
+- A decision was made: one `decision` log entry, now, on the entity that owns the work. The repo keeps its own decisions record: write it there and the log entry points at it (`hafez update <slug> --log "decision: <one line>, see decisions.md"`).
+- A lesson that holds without this entity: create a knowledge note; what we chose is a decision entry, not a note. An insight about this repo's code alone goes in the repo's own docs instead.
 - The user says "note this" or "record that": write it.
 - You are weighing whether something is worth writing: write it, as knowledge with `--confidence observation`.
 
 ```
-hafez create entity "<name>" --type <project|entity> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"
+hafez create entity "<name>" --type <project|entity> --parent <slug you read, or its parent> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"
 hafez create knowledge "<name>" --synthesis "<the insight>" --confidence <observation|pattern|principle> --related <slug>
 ```
 

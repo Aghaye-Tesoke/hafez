@@ -167,6 +167,9 @@ hafez query --kind knowledge --domain security
 # Full-text search across the whole vault
 hafez search "token rotation"
 
+# See it in context: a live graph of the vault in your browser
+hafez graph auth-refactor
+
 # Record progress
 hafez update auth-refactor --log "progress: JWT flow implemented"
 hafez update auth-refactor --complete-action "migration plan"
@@ -194,7 +197,49 @@ Frontmatter at a glance:
 | `resource` (canonical URI) | optional | — |
 | `subtype`, `confidence` | — | optional |
 
-Links (`parent`, `related`) are validated — they must point at slugs that exist. `hafez validate` checks vault integrity.
+Links (`parent`, `related`) are validated — they must point at slugs that exist. A `related` link between two entities, or two knowledge notes, is kept on both files. `hafez validate` checks vault integrity.
+
+## Where your judgement matters
+
+The agent writes to your vault as work lands, without asking. Behind a few of those writes is a judgement no rule in the tool can make, and the Health pass's proposals wait for your yes. Each choice is below as the question, the test, and what happens once it is made, so you can make it, or check the one the agent made.
+
+### 1. Child or related?
+
+**Question:** one piece of work bears on another. Is it part of it, or beside it?
+
+**Test:** would it carry on if the other were finished or dropped? If not, it is a **Child**. If so, the two are **Related**.
+
+**Then:** a Child carries `parent`, the one mark of childhood, and the parent's `read` lists it. Related between two entities, or two knowledge notes, is one edge the tool keeps on both files. A pair is never both: a `related` naming a parent or a child is rejected, and so is a `--parent` naming a related entity. A parent whose own work is coordination only is a **Hub**.
+
+### 2. Split a Workstream or not?
+
+**Question:** an entity's `read` shows a `workstream:` line: its actions share an ALL-CAPS prefix that no Child or related entity carries in its name. Is it a real thread of work, or a habit of phrasing?
+
+**Test:** would you track it, brief it and finish it apart from the parent?
+
+**Then:** split, and the agent does it with ordinary writes: a Child is created under the parent, the open actions move to it, the log entries stay where they are, and one `decision` entry on the parent records the split. Don't, and nothing is written: the line is a fact, not a request, and it goes once those actions are done.
+
+### 3. Decision or lesson?
+
+**Question:** something was settled. Where does it live?
+
+**Test:** is it still true with this entity gone, no slug, path or "we chose" needed? If not, it is a **Decision**; if so, a lesson.
+
+**Then:** a decision is one `decision` entry on the log of the entity that owns the work (or an entry pointing at the repo's own record). A lesson is a knowledge note, related to where it came from. One fact, one place: a knowledge note that only repeats a decision is the Health pass's "restated decision".
+
+### 4. Retire or delete?
+
+**Question:** something in the vault is no longer wanted.
+
+**Test:** is it an entity? Then it is retired. A knowledge or session note can be deleted.
+
+**Then:** retiring sets `--status done`: the entity stays, readable and linked, and leaves the live views unless a Child of it is not yet done. Deleting removes the note in one commit, together with the back-edges it owns (the notes its own `related` names that name it back); any other entity or knowledge note naming it as `parent` or `related` refuses the delete until that link goes. Every write is a git commit, so either can be undone.
+
+### 5. What `hafez health` lists
+
+`hafez health` is the **Health pass**: it reads the vault and lists what placement would change, applying nothing. Run it, or ask the agent to check the vault; a sample of its output is [`health.md`](tests/fixtures/surfaces/health.md).
+
+Its six groups take three kinds of answer. **One-way edges** (a `related` kept on one end only) and **unlinked mentions** (a `[[slug]]` with no edge either way) are mechanical: each comes with the `link` line that adds the edge the vault already implies, so one yes can cover the group. **Workstreams** are question 2, one entity at a time. **Leakage** (a parent's, or a related entity's, log naming an entity since that entity was created: was that its work?), **restated decisions** (question 3) and **recurring names** (a name that keeps coming back in one entity's log and actions) are judged one by one: nothing is proposed for them.
 
 ## CLI overview
 
@@ -212,8 +257,10 @@ Links (`parent`, `related`) are validated — they must point at slugs that exis
 | `hafez batch [--dry-run] [--data '<json>' \| --file payload.json]` | JSON ops (stdin, `--data` or `--file`) → atomic multi-op, single git commit, rollback on failure; dry-run runs the same validation as apply and reports derived slugs |
 | `hafez stats` | Vault summary: counts, stale items, recents |
 | `hafez changelog --since 7.days.ago` | Git-derived change history |
+| `hafez graph [slug] [--port N] [--no-open]` | Interactive, live graph of the vault in the browser (served on 127.0.0.1); a slug opens it focused on that note; `--json [--layers tag,domain,session]` prints `{nodes, edges}` |
 | `hafez sync` | Pull remote, push local commits (semantic merge on conflicts) |
 | `hafez validate` / `hafez index rebuild` | Integrity check / rebuild the read index |
+| `hafez health` | What placement would change: unsplit workstreams, recurring names, leakage, one-way `related` edges and unlinked `[[slug]]` mentions (each with its `hafez link` line), restated decisions; applies nothing |
 | `hafez onboard` | Setup status, then the script your agent follows: Mode, install, permissions, seeding |
 | `hafez onboard --install --mode <always-on\|invoke-only>` / `--remove` | Write (or remove) the two skills and, always-on, the marked Block in the harness's instructions file |
 | `hafez onboard --cloud --vault-repo <owner>/<repo>` | Print the setup script for Claude Code cloud sessions |

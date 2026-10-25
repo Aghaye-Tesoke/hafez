@@ -18,7 +18,7 @@ import { localDay } from './dates.js'
 // One checkbox line of Next Actions, tested line by line. `m` so a CRLF
 // line's trailing \r is not taken as action text.
 const OPEN_ACTION_RE = /^- \[ \] (.+)$/m
-const ACTION_RE = /^- \[([ xX])\] (.+)$/m
+export const ACTION_RE = /^- \[([ xX])\] (.+)$/m
 
 // --- Next-action added-date stamp ---
 // Adding an action stamps its line `(added YYYY-MM-DD)` with the local day
@@ -140,7 +140,7 @@ export function firstNonEmptyLine(s: string | null | undefined): string {
  * Non-global — wrap with `new RegExp(WIKI_LINK_RE.source, 'g')` for iteration. */
 export const WIKI_LINK_RE = /\[\[\s*([^\]|]+?)\s*(?:\|\s*([^\]]+?)\s*)?\]\]/
 
-function escapeRegex(s: string): string {
+export function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 

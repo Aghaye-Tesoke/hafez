@@ -56,6 +56,8 @@ export const COMMANDS: Record<string, CommandSpec> = {
   delete: { phase: 'vault', mutating: true, run: lazy(m => m.cmdDelete) },
   batch: { phase: 'vault', mutating: true, run: lazy(m => m.cmdBatch) },
   validate: { phase: 'vault', run: lazy(m => m.cmdValidate) },
+  health: { phase: 'vault', run: lazy(m => m.cmdHealth) },
+  graph: { phase: 'vault', run: lazy(m => m.cmdGraph) },
   index: {
     phase: 'vault',
     run: async (os, args) => {
@@ -128,6 +130,12 @@ Commands:
   changelog --since <when>   Git-derived change history (e.g. --since 7.days.ago)
   schema [op] [--examples]   Machine-readable JSON schema for batch operations
   validate                   Check vault integrity
+  health                     The Health pass: what placement would change (applies nothing)
+  graph --json               The vault's structure: entities and knowledge, parent/related/wiki-link edges
+    --layers tag,domain,session  Add tag and domain nodes, and sessions
+  graph [slug] [--port N] [--no-open]
+                             Serve the graph on 127.0.0.1 (first free port from 4747) and open the browser;
+                             a slug opens it focused on that note, local graph at depth 2
   index rebuild              Rebuild the SQLite index
   init --register <path>     Register an existing vault
   init                       Show current vault resolution
@@ -308,8 +316,9 @@ export async function main(argv: string[]): Promise<void> {
     // First touch of the core — and so of the native SQLite binding. A
     // failure to load it lands in the catch below and is recognised by
     // isBindingsFailure, exactly as it was when this import was static.
-    const { createHafez } = await import('../index.js')
-    const os = createHafez({ vaultPath, git: { push: false } })
+    const { createInternalHafez } = await import('../internal.js')
+    // One index scan per process (#269): the first read syncs, later reads trust it.
+    const os = createInternalHafez({ vaultPath, git: { push: false }, indexSync: 'once' })
     try {
       const result = await spec.run(os, args, { json, vaultPath })
 

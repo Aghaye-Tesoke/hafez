@@ -3,10 +3,11 @@ name: hafez
 description: >
   Hafez vault: the less common operations and the tool itself. Use when the
   user asks what is in the vault ("what am I working on?", "what's stale?"),
-  wants to promote, link, unlink, delete, change a status or validate, or
-  wants to update or reconfigure Hafez ("upgrade hafez", "set up hafez").
-  Also the reference to read when no Hafez block is in your instructions.
-hash: 24f12671554e
+  wants to promote, link, unlink, delete, change a status or validate, asks
+  to check the vault or clean it up, or wants to update or reconfigure Hafez
+  ("upgrade hafez", "set up hafez"). Also the reference to read when no
+  Hafez block is in your instructions.
+hash: c52f079e667f
 ---
 
 # Hafez
@@ -22,7 +23,7 @@ Open actions on an entity you read are yours: tick what landed, drop what is dea
 ## Create
 
 ```
-hafez create entity "<name>" --type <project|entity> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"
+hafez create entity "<name>" --type <project|entity> --parent <slug you read, or its parent> --description "<one sentence>" --brief "<where things stand>" --add-action "<next step>"
 hafez create knowledge "<name>" --synthesis "<the insight>" --confidence <observation|pattern|principle> --related <slug>
 ```
 
@@ -48,9 +49,14 @@ hafez unlink <slug> <target> --relation <parent|related>
 hafez update <slug> --status <active|paused|done>
 hafez delete <slug>
 hafez validate
+hafez health
 ```
 
-A plan's status is `active|done`. `delete` removes a knowledge or session note only; an entity is retired with `--status done`.
+A plan's status is `active|done`. `delete` removes a knowledge or session note only; an entity is retired with `--status done`. `health` lists what placement would change and applies nothing.
+
+A vault check ("check the vault", "clean up the vault", "what has drifted"): run `hafez health --json` and bring back proposals grouped by kind, never the rows. In a session that read an entity, lead with that entity's rows; the rest of the vault as counts.
+One line per kind, with the count: the Workstreams to split (a `create entity … --parent` line each, named as the actions name it); the one-way edges and the unlinked mentions as one `hafez batch` of `link` ops, one commit; the restated decisions and the leakage pairs as a short list for the user to judge, nothing proposed.
+Apply nothing until the user confirms a kind, not even a `link` line that looks safe; then one `batch` per kind.
 
 Several writes that must land together go in one batch: a bare array, no wrapper. A slug is the name lowercased, apostrophes dropped, each other run of characters that are not letters or digits turned into one `-` and none left at either end, so a later op can name what an earlier one creates.
 

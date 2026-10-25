@@ -9,6 +9,10 @@ import type {
   SESSION_LOG_TYPES,
   VALID_SUBTYPES,
   PLAN_STATUSES,
+  GRAPH_LAYERS,
+  SYNTHETIC_LAYERS,
+  GRAPH_NOTE_RELATIONS,
+  CHANGE_OPS,
 } from './contracts.js'
 
 // --- Enums ---
@@ -26,6 +30,10 @@ export type LinkRelation = 'parent' | 'related'
 export type KnowledgeSubtype = typeof VALID_SUBTYPES[number]
 /** Plans are the one knowledge subtype with a lifecycle (see PLAN_STATUSES). */
 export type PlanStatus = typeof PLAN_STATUSES[number]
+/** The kinds of note the Vault holds, one directory each (the Layout,
+ * vault.ts, re-exports it). Declared here so this file imports no module
+ * with runtime dependencies: the graph page's bundle reads its types. */
+export type VaultKind = 'entity' | 'knowledge' | 'session'
 
 // --- Query Options ---
 
@@ -248,6 +256,15 @@ export interface CreateKnowledgeFields {
   'session-date'?: string  // ISO date for session notes
 }
 
+export interface CreateSessionFields {
+  synthesis?: string        // the Summary section
+  insight?: string          // alias for synthesis; synthesis wins when both are set
+  related?: string[]
+  'session-date'?: string
+  decisions?: string[]      // one `- ` bullet each under Decisions
+  entities_touched?: string[]  // one `- [[slug]]` each under Entities Touched
+}
+
 // --- Operation results ---
 
 export interface QueryResult {
@@ -312,6 +329,114 @@ export interface ValidationReport {
   total_sessions: number
 }
 
+// --- The Health pass (#239) ---
+// One key per check.
+
+/** Check (i): an unsplit prefix family on an entity, from the family module. */
+export interface HealthWorkstream {
+  entity: string
+  prefix: string
+  open_actions: number
+}
+
+/** Check (ii): a name recurring in `units` units of one entity across `days`. */
+export interface HealthRecurringName {
+  entity: string
+  term: string
+  units: number
+  days: string[]
+}
+
+/** Check (iv): `hits` of the parent's log entries dated on or after the
+ * child's `created` (`entries` of them) name the child. */
+export interface HealthLeak {
+  parent: string
+  child: string
+  relation: 'parent' | 'related'
+  hits: number
+  entries: number
+}
+
+/** Check (iii): `from`'s `related` names `to`, a note of the same kind,
+ * whose `related` does not name `from`. Check (v): `from`'s body mentions
+ * `[[to]]`, a note of the same kind, with no `related` edge either way.
+ * Neither lists a parent and its child: parent subsumes related. */
+export interface HealthEdge {
+  from: string
+  to: string
+}
+
+/** Check (vi): the knowledge note `note`, created on `day` and related to
+ * `entity`, shares `share` (0..1) of the summary tokens of a `decision`
+ * entry of that day on the entity. */
+export interface HealthRestatedDecision {
+  day: string
+  entity: string
+  note: string
+  share: number
+  summary: string
+}
+
+export interface HealthReport {
+  workstreams: HealthWorkstream[]
+  recurring_names: HealthRecurringName[]
+  leakage: HealthLeak[]
+  one_way_edges: HealthEdge[]
+  unlinked_mentions: HealthEdge[]
+  restated_decisions: HealthRestatedDecision[]
+}
+
+// --- The Graph (#251) ---
+// The Vault's structure: Entities and Knowledge notes joined by Parent,
+// Related and Wiki-link (`mention`) edges; tags, domains and Sessions are
+// optional layers.
+
+export type GraphLayer = typeof GRAPH_LAYERS[number]
+export type SyntheticLayer = typeof SYNTHETIC_LAYERS[number]
+
+export interface GraphNode {
+  /** The slug; `tag:<t>` / `domain:<d>` for a layer node (a slug never holds `:`). */
+  id: string
+  kind: VaultKind | SyntheticLayer
+  name: string
+  type?: EntityType
+  status?: EntityStatus
+  subtype?: KnowledgeSubtype
+  confidence?: ConfidenceLevel
+  last_touched?: string
+  description?: string
+  /** An active or paused Entity's open Next Actions. */
+  open_actions?: number
+  /** An active Entity untouched past its staleness-days: the index's stale rule. */
+  stale?: boolean
+  /** An active or paused Entity's open actions the Stale rule marks, undated ones included. */
+  stale_actions?: number
+  /** Every Entity's effective staleness-days: its own, else 14. */
+  staleness_days?: number
+  /** An Entity or Knowledge note with no Parent, Related or Wiki-link edge either way. */
+  unlinked?: true
+  /** On an Unlinked note: the closest other linked note by name and description,
+   * the same kind when one matches; absent when none does. */
+  best?: string
+}
+
+export interface GraphEdge {
+  source: string
+  target: string
+  relation: typeof GRAPH_NOTE_RELATIONS[number] | SyntheticLayer
+}
+
+export interface Graph {
+  nodes: GraphNode[]
+  edges: GraphEdge[]
+}
+
+/** Any other opt is rejected, never dropped. */
+export interface GraphOpts {
+  /** Optional layers added to the default graph; they combine. */
+  layers?: GraphLayer[]
+}
+
 export interface SearchResult {
   slug: string
   kind: 'entity' | 'knowledge' | 'session'
@@ -342,6 +467,54 @@ export interface ChangelogEntry {
   operation: 'created' | 'updated' | 'deleted'
   timestamp: string
   commit_message: string
+  /** The commit's hash: what tells the entries of one commit from another's. */
+  commit: string
+}
+
+/** What a write did to a note, as history tells it. */
+export type ChangeOp = typeof CHANGE_OPS[number]
+
+/** A file history changed between two points, as the Journal names it:
+ * vault-relative and '/'-separated, any file (Layout decides which are notes). */
+export interface FileChange {
+  path: string
+  op: ChangeOp
+}
+
+/** A note created, updated or deleted since a cursor (`changesSince`). */
+export interface NoteChange {
+  slug: string
+  kind: VaultKind
+  op: ChangeOp
+}
+
+/** What the graph server's `/events` pushes, one per poll that found
+ * changes (src/graph/live.ts); the page reads it too. */
+export interface CommitEvent {
+  type: 'commit'
+  changes: NoteChange[]
+}
+
+/** One row of the graph server's `/activity` (#278): a note's run of
+ * consecutive writes, newest first. `op`, `kind` and `timestamp` are the
+ * newest write's; `name` is the slug once the note is gone; `agent` is the
+ * agent of the Entity's newest Session Log entry dated the write's local day,
+ * absent where the Vault records none. */
+export interface ActivityRow {
+  slug: string
+  kind: VaultKind
+  op: ChangeOp
+  timestamp: string
+  name: string
+  count: number
+  agent?: string
+}
+
+export interface ChangesSince {
+  /** The history point now: pass it back to get what changed after it.
+   * Empty when the Vault has no history yet. */
+  cursor: string
+  changes: NoteChange[]
 }
 
 // --- Batch ---
@@ -366,7 +539,7 @@ export type BatchOperation =
   | { op: 'update'; slug: string; fields: UpdateFields }
   | { op: 'create'; kind: 'entity'; name: string; fields: CreateEntityFields }
   | { op: 'create'; kind: 'knowledge'; name: string; fields?: CreateKnowledgeFields }
-  | { op: 'create'; kind: 'session'; name: string; fields?: CreateKnowledgeFields }
+  | { op: 'create'; kind: 'session'; name: string; fields?: CreateSessionFields }
   | { op: 'capture'; name: string; notes?: string }
   | { op: 'link'; slug: string; target: string; relation: LinkRelation }
   | { op: 'unlink'; slug: string; target: string; relation: LinkRelation }
@@ -416,8 +589,10 @@ export interface GitConfig {
 
 /**
  * The persistence seam (see CONTEXT.md: Journal) — everything core needs
- * from the history layer behind vault mutations. Git satisfies it in
- * production (src/git.ts); tests may inject an in-memory adapter.
+ * from the history layer: the commit behind every vault mutation, sync, and
+ * the history reads (changelog, file times, the changes since a cursor). Git
+ * satisfies it in production (src/git.ts); tests may inject an in-memory
+ * adapter.
  */
 export interface Journal {
   /** Persist one logical change: stage written+deleted paths (vault-relative,
@@ -428,12 +603,20 @@ export interface Journal {
   commit(written: string[], deleted: string[], message: string): Promise<void>
   /** Bidirectional sync with the remote, if any. */
   sync(): Promise<{ pulled: boolean; pushed: boolean; remote: boolean }>
-  /** History-derived changelog for the indexed dirs since a date. Empty when
-   * the repo has no commits; any other git failure throws `GIT_READ_FAILED`. */
-  changelog(since: string): Promise<ChangelogEntry[]>
+  /** History-derived changelog for the indexed dirs since a date ('' = all
+   * history), newest first; `limit` reads only the newest that many commits.
+   * Empty when the repo has no commits; any other git failure throws `GIT_READ_FAILED`. */
+  changelog(since: string, limit?: number): Promise<ChangelogEntry[]>
   /** Newest history timestamp per vault file (modified = any change, added = creation).
    * Empty when the repo has no commits; any other git failure throws `GIT_READ_FAILED`. */
   fileTimes(mode: 'modified' | 'added'): Promise<Map<string, string>>
+  /** The history point now (`cursor`, '' before the first commit) and the
+   * indexed-dir files whose content differs between `from` and it, each with
+   * its net status across the whole span (a rename is a delete and a
+   * create). `from` unset: the cursor only, no files; `from` '': every file
+   * in history now is a create. An unknown `from` or any other git failure
+   * throws `GIT_READ_FAILED`. */
+  changesSince(from?: string): Promise<{ cursor: string; files: FileChange[] }>
 }
 
 export interface HafezConfig {
@@ -472,10 +655,24 @@ export interface Hafez {
    * archive is reached from its entity on purpose, never found by search. */
   archive(slug: string): Promise<string | null>
   validate(): Promise<ValidationReport>
+  /** The Health pass: what placement would change, from the files on disk
+   * (never the index); applies nothing. */
+  health(): Promise<HealthReport>
   search(query: string, kind?: SearchKind): Promise<SearchResult[]>
+  /** The Vault's structure: Entity and Knowledge nodes, Parent, Related (one
+   * per unordered pair) and Wiki-link edges among them; `layers` adds tag,
+   * domain and Session nodes with their edges. */
+  graph(opts?: GraphOpts): Promise<Graph>
   rebuildIndex(): Promise<void>
   stats(): Promise<VaultStats>
-  changelog(since: string): Promise<ChangelogEntry[]>
+  /** The changes since a date ('' = all history), newest first; `limit`
+   * reads only the newest that many commits, a positive whole number
+   * (anything else is VALIDATION_FAILED). */
+  changelog(since: string, limit?: number): Promise<ChangelogEntry[]>
+  /** The notes created, updated or deleted since `cursor`, from history, and
+   * the cursor to pass next time. No cursor: the current cursor and no
+   * changes, so a follower starts from now. */
+  changesSince(cursor?: string): Promise<ChangesSince>
   /** Release the SQLite index handle. Idempotent; the next call that needs
    * the index reopens it. Call before deleting the vault: Windows cannot
    * remove a directory holding an open file. */

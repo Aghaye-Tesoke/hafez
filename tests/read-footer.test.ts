@@ -265,8 +265,10 @@ describe('drift check 3: the Footer\'s fields equal the Op Spec update shape', (
 const words = (line: string) => [...line.matchAll(/"((?:[^"\\]|\\.)*)"|(\S+)/g)].map(m => m[1] ?? m[2])
 
 /** The Write Line with every placeholder filled the way an agent would. */
-function filled(line: string, fill: { slug: string; handle?: string }): string[] {
-  return words(line).slice(2).map(w => w
+function filled(line: string, fill: { slug: string; handle?: string; related?: string }): string[] {
+  // `--related <slug>` takes its own slug: a parent is never related (#242)
+  const related = fill.related ? line.replace('--related <slug>', `--related ${fill.related}`) : line
+  return words(related).slice(2).map(w => w
     .replace(/<([a-z]+)\|[^>]*>/g, '$1')
     .replace(/<slug>/g, fill.slug)
     .replace(/<handle>/g, fill.handle ?? 'x')
@@ -276,14 +278,16 @@ function filled(line: string, fill: { slug: string; handle?: string }): string[]
 describe('the Write Line, placeholders filled, is accepted by update as shown', () => {
   it('an entity: every flag at once', async () => {
     const other = await os.create('entity', named('Footer Run Other'), { type: 'project' })
+    const related = await os.create('entity', named('Footer Run Related'), { type: 'entity' })
     const slug = await os.create('entity', named('Footer Run'), { type: 'entity', add_actions: ['First line', 'Second line'] })
     const handles = [...(await cmdRead(os, [slug])).matchAll(/^- \[ \] ([0-9a-f]+) {2}/gm)].map(m => m[1])
-    const argv = filled(lastLineOf(await cmdRead(os, [slug]))!, { slug: other, handle: handles[1] })
+    const argv = filled(lastLineOf(await cmdRead(os, [slug]))!, { slug: other, handle: handles[1], related })
     expect(await cmdUpdate(os, argv)).toContain(`Updated ${slug}`)
     const after = await cmdRead(os, [slug, '--depth', 'full'])
     expect(after).toMatch(/- \[x\] First line/)
     expect(after).not.toContain('Second line')
     expect(after).toContain(`parent: ${other}`)
+    expect(after).toContain(`related: ${related}`)
   })
 
   it('an insight and a plan', async () => {

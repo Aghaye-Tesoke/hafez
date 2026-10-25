@@ -25,10 +25,15 @@ describe('CLI startup stays lazy', () => {
   })
 
   it('every heavy module is reached through a dynamic import', () => {
-    for (const heavy of ['../index.js', './commands.js', './commands-schema.js', '../surfaces/surfaces.js', './onboard.js', './resolve-vault.js', './upgrade.js']) {
+    for (const heavy of ['../internal.js', './commands.js', './commands-schema.js', '../surfaces/surfaces.js', './onboard.js', './resolve-vault.js', './upgrade.js']) {
       expect(staticImports, `${heavy} must stay lazy`).not.toContain(heavy)
       expect(source, `${heavy} must be dynamically imported`).toContain(`import('${heavy}')`)
     }
+  })
+
+  // One index scan per process (#269): tests/index-sync-once.test.ts counts the mode's scans.
+  it("opens the core with indexSync 'once'", () => {
+    expect(source).toContain("createInternalHafez({ vaultPath, git: { push: false }, indexSync: 'once' })")
   })
 })
 

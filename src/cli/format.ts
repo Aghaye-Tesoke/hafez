@@ -1,5 +1,6 @@
 // src/cli/format.ts
-import type { QueryResult, KnowledgeQueryResult, SessionQueryResult, ValidationReport, SearchResult, VaultStats, ChangelogEntry } from '../types.js'
+import type { QueryResult, KnowledgeQueryResult, SessionQueryResult, ValidationReport, HealthReport, SearchResult, VaultStats, ChangelogEntry } from '../types.js'
+import { ITEMS } from '../surfaces/items.js'
 
 /** `parent` is the rendered value of the `parent:` line (the slug with the
  * parent's description); absent, the slug alone. `pointers` are the lines
@@ -192,6 +193,29 @@ export function formatChangelog(entries: ChangelogEntry[]): string {
     `| ${e.slug} | ${e.kind} | ${e.operation} | ${e.timestamp.slice(0, 10)} | ${e.commit_message} |`
   )
   return [header, sep, ...rows].join('\n')
+}
+
+/** The Health pass as markdown: one section per check, every section
+ * printed, so an empty report still shows what was checked. */
+export function formatHealth(report: HealthReport): string {
+  const out: string[] = ['## Health']
+  const section = (title: string, items: string[]) => {
+    out.push('', `### ${title} (${items.length})`)
+    for (const item of items) out.push(`- ${item}`)
+  }
+  // The workstream Item's own text (ADR 0001), prefixed with the entity.
+  section('Workstreams', report.workstreams.map(w => `${w.entity} ${ITEMS.workstreamLine.render(w)}`))
+  section('Recurring names', report.recurring_names.map(r =>
+    `${r.entity}: \`${r.term}\` in ${r.units} units across ${r.days.length} days (${r.days[0]} .. ${r.days[r.days.length - 1]})`))
+  section('Leakage', report.leakage.map(l =>
+    `${l.parent} → ${l.child} (${l.relation}): ${l.hits} of ${l.entries} entries (${Math.round(100 * l.hits / l.entries)}%)`))
+  section('One-way edges', report.one_way_edges.map(e =>
+    `${e.from} → ${e.to}: \`hafez link ${e.to} ${e.from} --relation related\``))
+  section('Unlinked mentions', report.unlinked_mentions.map(e =>
+    `${e.from} mentions [[${e.to}]]: \`hafez link ${e.from} ${e.to} --relation related\``))
+  section('Restated decisions', report.restated_decisions.map(r =>
+    `${r.day} ${r.entity} → ${r.note} (${Math.round(100 * r.share)}%): ${r.summary}`))
+  return out.join('\n')
 }
 
 export function formatValidation(report: ValidationReport): string {

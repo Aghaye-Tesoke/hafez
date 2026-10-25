@@ -6,12 +6,20 @@
 import { rmSync } from 'fs'
 import { relative, resolve, isAbsolute } from 'path'
 import { createHafez as createHafezCore } from '../../src/index.js'
+import { createInternalHafez as createInternalHafezCore, type InternalHafez, type InternalHafezConfig } from '../../src/internal.js'
 import type { Hafez, HafezConfig } from '../../src/types.js'
 
 const open = new Map<Hafez, string>()
 
 export function createHafez(config: HafezConfig): Hafez {
   const os = createHafezCore(config)
+  open.set(os, resolve(config.vaultPath))
+  return os
+}
+
+/** The same for the internal factory (src/internal.ts), the graph server's instances. */
+export function createInternalHafez(config: InternalHafezConfig): InternalHafez {
+  const os = createInternalHafezCore(config)
   open.set(os, resolve(config.vaultPath))
   return os
 }

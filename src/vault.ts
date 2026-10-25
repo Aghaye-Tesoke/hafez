@@ -4,7 +4,7 @@ import yaml from 'js-yaml'
 import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join, relative, sep } from 'path'
 import { HafezError } from './types.js'
-import type { ParsedVaultFile, EntityFrontmatter, KnowledgeFrontmatter, SessionFrontmatter } from './types.js'
+import type { ParsedVaultFile, EntityFrontmatter, KnowledgeFrontmatter, SessionFrontmatter, VaultKind } from './types.js'
 
 // Prevent gray-matter from auto-coercing YAML date strings into JS Date objects
 const MATTER_OPTIONS = { engines: { yaml: (s: string) => yaml.load(s, { schema: yaml.JSON_SCHEMA }) as Record<string, any> } }
@@ -26,7 +26,7 @@ export function slugify(name: string): string {
 // module asks these questions here instead of restating directory names.
 // ---------------------------------------------------------------------------
 
-export type VaultKind = 'entity' | 'knowledge' | 'session'
+export type { VaultKind }
 
 const KIND_DIRS = { entity: 'entities', knowledge: 'knowledge', session: 'sessions' } as const
 
@@ -65,6 +65,16 @@ export function classifyIndexedRelPath(relPath: string): { kind: VaultKind; slug
     }
   }
   return null
+}
+
+/** The note a vault-relative ('/'-separated) path is, or null: the files
+ * scanVaultDir lists — a non-dot `.md` directly in a kind dir. Archive logs,
+ * scaffold files and anything outside the kind dirs are not notes. */
+export function noteAtRelPath(relPath: string): { kind: VaultKind; slug: string } | null {
+  const match = relPath.match(/^([^/]+)\/([^/]+)\.md$/)
+  if (!match || match[2].startsWith('.')) return null
+  const kind = INDEXED_KINDS.find(k => KIND_DIRS[k] === match[1])
+  return kind ? { kind, slug: match[2] } : null
 }
 
 /** All .md files directly in dir — non-recursive (archive/ subdirs are

@@ -119,6 +119,9 @@ export const CreateSessionFieldsSchema = z.object({
   insight: nonEmptyText.optional(),
   related: stringList.optional(),
   'session-date': z.string().optional(),
+  // Decisions are prose: a list only, never a comma string split apart.
+  decisions: z.array(nonEmptyText).optional(),
+  entities_touched: stringList.optional(),
 }).strict()
 
 /** What `digest` may put in a session-create op — typechecked against the
@@ -404,6 +407,47 @@ function parentCycleError(slug: string, parent: string, ctx: OpCheckContext): st
   return cycle ? `Parent '${parent}' would make a cycle: ${cycle.join(' → ')}` : null
 }
 
+/** An entity and its own parent or child are never `related` (ADR 0002):
+ * `parent` subsumes it. The errors for the links `slug` would carry after
+ * the op — the parent named in its related, a related whose parent is
+ * `slug`, or a parent whose related names `slug` (a legacy one-way edge) —
+ * against the batch so far. */
+function parentSubsumesErrors(slug: string, links: FileLinks, ctx: OpCheckContext): string[] {
+  const errors: string[] = []
+  for (const r of links.related ?? []) {
+    if (r === links.parent) errors.push(`'${r}' is the parent of '${slug}' — parent subsumes related`)
+    else if (ctx.existsAnywhere(r) && ctx.linksOf(r).parent === slug) errors.push(`'${r}' is a child of '${slug}' — parent subsumes related`)
+  }
+  const p = links.parent
+  if (p && ctx.existsAnywhere(p) && ctx.linksOf(p).related?.includes(slug)) errors.push(`'${p}' names '${slug}' in its related — parent subsumes related`)
+  return errors
+}
+
+/** Record what the edge writer and dropper will do to the targets: a
+ * same-kind `related` edge has two ends, so after `slug`'s related changes
+ * from `before` to `after`, every added same-kind target carries `slug` and
+ * every dropped one loses it. Cross-kind and unknown targets are left as
+ * they are, like the files. */
+function simulateBackEdges(slug: string, before: string[] | undefined, after: string[] | undefined, ctx: OpCheckContext): void {
+  const kind = ctx.resolve(slug)?.kind
+  const was = before ?? []
+  const now = after ?? []
+  for (const r of [...now.filter(r => !was.includes(r)), ...was.filter(r => !now.includes(r))]) {
+    if (r === slug || !kind || !ctx.existsAnywhere(r) || ctx.resolve(r)?.kind !== kind) continue
+    const links = ctx.linksOf(r)
+    const rest = (links.related ?? []).filter(x => x !== slug)
+    const related = now.includes(r) ? [...rest, slug] : rest
+    ctx.simulateLinks(r, { ...links, related: related.length > 0 ? related : undefined })
+  }
+}
+
+/** The link fields after an op, simulated for `slug` and mirrored on the
+ * targets its related gained or lost. */
+function simulateLinkChange(slug: string, before: FileLinks, after: FileLinks, ctx: OpCheckContext): void {
+  ctx.simulateLinks(slug, after)
+  simulateBackEdges(slug, before.related, after.related, ctx)
+}
+
 // --- The table ---
 
 export interface OpSpec {
@@ -480,7 +524,12 @@ const OP_SPEC_ROWS = [
       }
       if (target) {
         const links = linkFieldsOf(op.fields)
-        if (links) ctx.simulateLinks(op.slug, { ...ctx.linksOf(op.slug), ...links })
+        if (links) {
+          const before = ctx.linksOf(op.slug)
+          const after = { ...before, ...links }
+          errors.push(...parentSubsumesErrors(op.slug, after, ctx))
+          simulateLinkChange(op.slug, before, after, ctx)
+        }
       }
       return { slug: op.slug, errors, primaryCode }
     },
@@ -497,7 +546,11 @@ const OP_SPEC_ROWS = [
       const slug = slugify(op.name)
       const primaryCode = claimNew(ctx, errors, slug, { kind: 'entity', type: op.fields.type },
         () => ctx.buildEntityFrontmatter(op.name, op.fields))
-      if (!primaryCode) ctx.simulateLinks(slug, { parent: op.fields.parent, related: op.fields.related })
+      if (!primaryCode) {
+        const links = { parent: op.fields.parent, related: op.fields.related }
+        errors.push(...parentSubsumesErrors(slug, links, ctx))
+        simulateLinkChange(slug, {}, links, ctx)
+      }
       return { slug, errors, created: errors.length === 0, primaryCode }
     },
   },
@@ -514,7 +567,7 @@ const OP_SPEC_ROWS = [
       const primaryCode = claimNew(ctx, errors, slug,
         { kind: 'knowledge', type: 'knowledge', subtype: op.fields?.subtype as KnowledgeSubtype | undefined },
         () => ctx.buildKnowledgeFrontmatter(op.name, (op.fields || {}) as CreateKnowledgeFields))
-      if (!primaryCode) ctx.simulateLinks(slug, { related: op.fields?.related })
+      if (!primaryCode) simulateLinkChange(slug, {}, { related: op.fields?.related }, ctx)
       return { slug, errors, created: errors.length === 0, primaryCode }
     },
   },
@@ -523,7 +576,7 @@ const OP_SPEC_ROWS = [
     op: 'create',
     kind: 'session',
     schema: CreateSessionBranch,
-    description: 'Create a new session note linked to an entity. `insight` is an alias for `synthesis` (ignored when `synthesis` is also given).',
+    description: 'Create a new session note linked to an entity. `synthesis` writes Summary, `decisions` one bullet each under Decisions, `entities_touched` one `[[slug]]` bullet each under Entities Touched. `insight` is an alias for `synthesis` (ignored when `synthesis` is also given).',
     exampleInclude: ['synthesis'],
     check(op: Extract<BatchOperation, { op: 'create'; kind: 'session' }>, ctx) {
       const slug = slugify(op.name)
@@ -551,7 +604,7 @@ const OP_SPEC_ROWS = [
     name: 'link',
     op: 'link',
     schema: LinkBranch,
-    description: 'Add a parent or related link between two entities.',
+    description: 'Add a parent or related link. A same-kind related link (entity↔entity, knowledge↔knowledge) is written on both files; a related naming the entity\'s parent or a child is rejected (parent subsumes related).',
     exampleInclude: [],
     check(op: Extract<BatchOperation, { op: 'link' }>, ctx) {
       const errors: string[] = []
@@ -564,9 +617,11 @@ const OP_SPEC_ROWS = [
       }
       if (!primaryCode) {
         const links = ctx.linksOf(op.slug)
-        ctx.simulateLinks(op.slug, op.relation === 'parent'
+        const after = op.relation === 'parent'
           ? { ...links, parent: op.target }
-          : { ...links, related: [...(links.related ?? []).filter(r => r !== op.target), op.target] })
+          : { ...links, related: [...(links.related ?? []).filter(r => r !== op.target), op.target] }
+        errors.push(...parentSubsumesErrors(op.slug, after, ctx))
+        simulateLinkChange(op.slug, links, after, ctx)
       }
       return { slug: op.slug, errors, primaryCode }
     },
@@ -575,7 +630,7 @@ const OP_SPEC_ROWS = [
     name: 'unlink',
     op: 'unlink',
     schema: UnlinkBranch,
-    description: 'Remove a parent or related link between two entities.',
+    description: 'Remove a parent or related link. A same-kind related link is dropped from both files, a legacy one-way edge from whichever file carries it.',
     exampleInclude: [],
     check(op: Extract<BatchOperation, { op: 'unlink' }>, ctx) {
       const errors: string[] = []
@@ -583,9 +638,12 @@ const OP_SPEC_ROWS = [
       if (!ctx.resolve(op.slug)) { errors.push(notFoundError(op.slug)); primaryCode = 'NOT_FOUND' }
       else {
         const links = ctx.linksOf(op.slug)
-        ctx.simulateLinks(op.slug, op.relation === 'parent'
+        simulateLinkChange(op.slug, links, op.relation === 'parent'
           ? { ...links, parent: links.parent === op.target ? undefined : links.parent }
-          : { ...links, related: links.related?.filter(r => r !== op.target) })
+          : { ...links, related: links.related?.filter(r => r !== op.target) }, ctx)
+        // A legacy one-way edge may live on the target alone: the dropper
+        // takes it there too.
+        if (op.relation === 'related' && !links.related?.includes(op.target)) simulateBackEdges(op.slug, [op.target], [], ctx)
       }
       return { slug: op.slug, errors, primaryCode }
     },
@@ -621,7 +679,7 @@ const OP_SPEC_ROWS = [
     name: 'delete',
     op: 'delete',
     schema: DeleteBranch,
-    description: 'Delete a knowledge or session note. An entity is never deleted — retire it with `hafez update <slug> --status done`. Rejected while another entity or knowledge note links to the note (parent/related): unlink or re-point those first — an earlier op in the same batch counts.',
+    description: 'Delete a knowledge or session note. An entity is never deleted — retire it with `hafez update <slug> --status done`. The back-edges the note owns (a knowledge note in its own related that names it back) are dropped with it, in the same commit. Rejected while any other entity or knowledge note links to the note (parent/related): unlink or re-point those first — an earlier op in the same batch counts.',
     exampleInclude: [],
     addressesSessions: true,
     check(op: Extract<BatchOperation, { op: 'delete' }>, ctx) {
@@ -637,11 +695,17 @@ const OP_SPEC_ROWS = [
         errors.push(notFoundError(op.slug)); primaryCode = 'NOT_FOUND'
       } else {
         // Only knowledge can be linked to: a parent/related slug must name an
-        // entity or knowledge note, never a session.
-        const referrers = target ? ctx.referrers(op.slug) : []
+        // entity or knowledge note, never a session. A same-kind back-edge
+        // the note owns — a note in its own related that names it back — is
+        // the other end of its edge, dropped with it (#243), not a blocker.
+        const own = target ? ctx.linksOf(op.slug).related ?? [] : []
+        const referrers = target
+          ? ctx.referrers(op.slug).filter(r => !(own.includes(r) && ctx.resolve(r)?.kind === target.kind))
+          : []
         if (referrers.length > 0) {
           errors.push(`'${op.slug}' is still linked from ${referrers.join(', ')} (parent/related) — unlink or re-point those first; an earlier op in the same batch counts`)
         } else {
+          if (target) simulateBackEdges(op.slug, own, [], ctx)
           ctx.simulateDelete(op.slug, target ? 'knowledge' : 'session')
         }
       }

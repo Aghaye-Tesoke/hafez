@@ -77,18 +77,22 @@ export function digest(input: DigestInput, entitySlugs: Set<string>, knowledgeSl
   }
 
   // 2. Session note
-  const noteBody = buildSessionNoteBody(input, touched)
   const related = touched
   // Typechecked against the Op Spec's session-create schema so digest output
   // can never silently diverge from what batch validation accepts.
+  // A blank decision is dropped here: the Op Spec takes non-empty text only,
+  // and one blank line must not fail the whole save. The name hash below still
+  // reads the raw input, so the slug a save before this derived is unchanged.
+  const decisions = input.decisions.map(d => d.trim()).filter(Boolean)
   const noteFields: CreateSessionFieldsInput = {
-    synthesis: noteBody,
+    synthesis: input.narrative.trim(),
     'session-date': input.session_date,
-    ...(related.length > 0 ? { related } : {}),
+    ...(decisions.length > 0 ? { decisions } : {}),
+    ...(related.length > 0 ? { related, entities_touched: touched } : {}),
   }
-  // Named by the session date and its note, so a second save of the same
-  // session derives the same slug and batch skips it as a duplicate.
-  const noteName = `Session ${input.session_date} ${createHash('sha256').update(noteBody).digest('hex').slice(0, 8)}`
+  // Named by the session date and its whole content, so a second save of the
+  // same session derives the same slug and batch skips it as a duplicate.
+  const noteName = `Session ${input.session_date} ${createHash('sha256').update(sessionIdentity(input, touched)).digest('hex').slice(0, 8)}`
   ops.push({ op: 'create', kind: 'session', name: noteName, fields: noteFields })
 
   return ops
@@ -104,7 +108,10 @@ function buildSessionLogSummary(input: DigestInput): string {
   return parts.join(' | ')
 }
 
-function buildSessionNoteBody(input: DigestInput, touched: string[]): string {
+/** What the session note's name hashes: narrative, decisions and touched
+ * slugs, in the text the note body held before its sections were split
+ * (#210), so a session saved before then is still skipped when saved again. */
+function sessionIdentity(input: DigestInput, touched: string[]): string {
   const lines: string[] = [input.narrative.trim()]
 
   if (input.decisions.length > 0) {

@@ -2,19 +2,20 @@
 import { readFileSync } from 'fs'
 import { resolve } from 'path'
 import { helpIfAsked, parseArgs, splitList, str, MisuseError, RenderedError, UnknownFlagError, UsageError, type FlagSpec, type FlagValue } from './args.js'
-import type { Hafez, ParsedFile, ReadDepth, UpdateFields, UpdateResult, EntityType, QueryFilter, ConfidenceLevel, KnowledgeSubtype, CreateEntityFields, CreateKnowledgeFields, BatchOperation, KnowledgeQueryOpts, QueryResult, KnowledgeQueryResult, SessionQueryResult, SearchKind, UnifiedResult } from '../types.js'
+import type { Hafez, ReadDepth, UpdateFields, UpdateResult, EntityType, QueryFilter, ConfidenceLevel, KnowledgeSubtype, CreateEntityFields, CreateKnowledgeFields, BatchOperation, KnowledgeQueryOpts, QueryResult, KnowledgeQueryResult, SessionQueryResult, SearchKind, UnifiedResult, GraphLayer } from '../types.js'
 import { HafezError } from '../types.js'
 import { BatchOperationSchema, normalizeAliases, opErrorLine, batchInvalidHeader } from '../batch-ops.js'
 import { formatBatchError } from './batch-errors.js'
 import { parseDigestInput, digest } from '../digest.js'
 import { detectAgent } from '../harness.js'
-import { getActionItems, parseSessionLogHeading } from '../document.js'
 import { resemblances } from '../near-match.js'
-import { actionAge, agedActions, staleHandles, stalenessDaysOf } from '../stale.js'
+import { actionAge, staleHandles, stalenessDaysOf } from '../stale.js'
 import { slugify } from '../vault.js'
-import { ITEMS, footerOp, type FooterInput, type MisuseRetry, type NearMatchNote } from '../surfaces/items.js'
+import { GRAPH_LAYERS } from '../contracts.js'
+import { ITEMS, type MisuseRetry, type NearMatchNote } from '../surfaces/items.js'
+import { footerFor, pointersFor, readJsonOf } from '../read-json.js'
 import { placeIn } from '../surfaces/surfaces.js'
-import { formatEntityHeader, formatKnowledgeHeader, formatSessionHeader, formatQueryTable, formatKnowledgeTable, formatSessionTable, formatSearchResults, formatValidation, formatStats, formatChangelog } from './format.js'
+import { formatEntityHeader, formatKnowledgeHeader, formatSessionHeader, formatQueryTable, formatKnowledgeTable, formatSessionTable, formatSearchResults, formatValidation, formatHealth, formatStats, formatChangelog } from './format.js'
 
 export interface CommandOpts {
   json?: boolean
@@ -35,13 +36,7 @@ export async function cmdRead(os: Hafez, args: string[], opts: CommandOpts = {})
   const slug = positionals[0]
   if (!slug) throw new UsageError(READ_USAGE)
   const depth = (str(flags.depth) ?? 'summary') as ReadDepth
-  const result = await os.read(slug, depth).catch(err => {
-    if (!(err instanceof HafezError) || err.code !== 'NOT_FOUND') throw err
-    const closest = err.details ?? []
-    throw opts.json
-      ? new RenderedError('NOT_FOUND', jsonOut({ slug, closest }), 'stdout')
-      : new RenderedError('NOT_FOUND', ITEMS.slugMissRecovery.render({ slug, closest }), 'stderr')
-  })
+  const result = await os.read(slug, depth).catch(err => { throw readMiss(err, slug, opts) })
   if (flags.archive) {
     // The archive is an entity's: reached from it on purpose (#34).
     if (result.kind !== 'entity') throw new UsageError(`--archive reads an entity's archived log entries; '${slug}' is a ${result.kind === 'session' ? 'session note' : 'knowledge note'}\n${READ_USAGE}`)
@@ -49,24 +44,21 @@ export async function cmdRead(os: Hafez, args: string[], opts: CommandOpts = {})
     if (opts.json) return jsonOut({ slug, archive })
     return archive ?? `no archive for ${slug}`
   }
+  if (opts.json) return jsonOut(await readJsonOf(os, slug, depth, result))
   // A session note is read, never written: no Footer (#35).
-  if (result.kind === 'session') {
-    if (opts.json) return jsonOut(result)
-    return formatSessionHeader(result.frontmatter, result.body)
-  }
-  const footer = await footerFor(os, slug, result, depth)
-  const pointers = result.kind === 'entity' ? await pointersFor(os, slug) : null
-  if (opts.json) {
-    const writes = footerOp(footer)
-    // A frontmatter-depth read carries no body, so it has no actions to list.
-    if (result.kind !== 'entity' || depth === 'frontmatter') return jsonOut({ ...result, ...pointers, writes })
-    return jsonOut({ ...result, actions: agedActions(result.body, result.frontmatter), ...pointers, writes })
-  }
+  if (result.kind === 'session') return formatSessionHeader(result.frontmatter, result.body)
+  // The Footer and the pointers are the same at every depth: they read the
+  // whole file, not the body this depth shows.
+  const whole = depth === 'full' ? result : await os.read(slug, 'full') as typeof result
+  const footer = footerFor(slug, whole)
+  const pointers = whole.kind === 'entity' ? await pointersFor(os, slug, whole.body) : null
   const fm = result.frontmatter as Record<string, any>
   const days = stalenessDaysOf(fm)
   const staleMark = (added: string | null) => ITEMS.staleMarker.render(actionAge(added, days))
   const text = result.kind === 'entity'
     ? formatEntityHeader(fm, ITEMS.handles.render(result.body, staleMark), await parentLine(os, fm.parent), [
+      ITEMS.childrenBlock.render({ slug, children: pointers!.children }),
+      ...pointers!.workstreams.map(w => ITEMS.workstreamLine.render(w)),
       ITEMS.sessionsLine.render({ slug, ...pointers!.sessions }),
       ITEMS.archivePointer.render({ slug, entries: pointers!.archive_entries }),
     ].filter(Boolean))
@@ -75,15 +67,14 @@ export async function cmdRead(os: Hafez, args: string[], opts: CommandOpts = {})
   return `${text.replace(/\n+$/, '')}\n${ITEMS.writeLine.render(footer)}`
 }
 
-/** What hangs off an entity elsewhere: the sessions that touched it (the
- * look back, #35) and its archived log entries (#34). Counted at read time,
- * nothing written. */
-async function pointersFor(os: Hafez, slug: string): Promise<{ sessions: { count: number; latest: string | null }; archive_entries: number }> {
-  const sessions = (await os.related_to(slug)).items.filter((i): i is UnifiedResult & { kind: 'session' } => i.kind === 'session')
-  const latest = sessions.reduce<string | null>((max, s) => (max === null || s.session_date > max ? s.session_date : max), null)
-  const archive = await os.archive(slug)
-  const entries = archive ? archive.split('\n').filter(line => parseSessionLogHeading(line)).length : 0
-  return { sessions: { count: sessions.length, latest }, archive_entries: entries }
+/** A `read` miss as the CLI renders it: the closest slugs on stderr (`--json`:
+ * `{slug, closest}` on stdout), exit 1. Any other error passes through. */
+function readMiss(err: unknown, slug: string, opts: CommandOpts): unknown {
+  if (!(err instanceof HafezError) || err.code !== 'NOT_FOUND') return err
+  const closest = err.details ?? []
+  return opts.json
+    ? new RenderedError('NOT_FOUND', jsonOut({ slug, closest }), 'stdout')
+    : new RenderedError('NOT_FOUND', ITEMS.slugMissRecovery.render({ slug, closest }), 'stderr')
 }
 
 /** The `parent:` line's value: the slug with the parent's description. The
@@ -107,18 +98,6 @@ async function staleAfterWrite(os: Hafez, slug: string): Promise<string[]> {
   } catch {
     return []
   }
-}
-
-/** The Footer for a file `read` returned at `depth`. The Footer is the same
- * at every depth, so its Handle comes from the whole file, not from the body
- * this depth shows. A session note has none: it is never written to. */
-async function footerFor(os: Hafez, slug: string, result: Exclude<ParsedFile, { kind: 'session' }>, depth: ReadDepth): Promise<FooterInput> {
-  return { slug, agent: detectAgent(), ...(result.kind === 'entity'
-    ? {
-      target: { kind: 'entity', type: result.frontmatter.type },
-      handle: getActionItems(depth === 'full' ? result.body : (await os.read(slug, 'full')).body).find(a => a.handle)?.handle,
-    }
-    : { target: { kind: 'knowledge', subtype: result.frontmatter.subtype } }) }
 }
 
 const QUERY_USAGE = `Usage: hafez query [--kind entity|knowledge|session|all] [--filter ...] [--type t] [--parent slug] [--related-to slug] [--domain d] [--confidence c] [--subtype s] [--tag t] [--since d] [--before d] [--created-since d] [--created-before d] [--sort-by f] [--sort-order asc|desc] [--limit n] [--offset n]
@@ -542,7 +521,7 @@ async function updateFailure(os: Hafez, slug: string | undefined, err: unknown, 
     if (file.kind === 'session') {
       return new RenderedError('VALIDATION_FAILED', `'${slug}' is a session note: written once and read, never updated. What matters from it belongs on the entity it touched.`, 'stderr')
     }
-    retry = { footer: await footerFor(os, slug, file, 'full') }
+    retry = { footer: footerFor(slug, file) }
   } catch (readErr) {
     if (!(readErr instanceof HafezError) || readErr.code !== 'NOT_FOUND') return err
     retry = { miss: { slug, closest: readErr.details ?? [] } }
@@ -623,6 +602,73 @@ export async function cmdValidate(os: Hafez, args: string[], opts: CommandOpts =
   const report = await os.validate()
   if (opts.json) return jsonOut(report)
   return formatValidation(report)
+}
+
+export async function cmdHealth(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
+  helpIfAsked(args, 'Usage: hafez health  (what placement would change; applies nothing)')
+  const report = await os.health()
+  if (opts.json) return jsonOut(report)
+  return formatHealth(report)
+}
+
+const GRAPH_USAGE = "Usage: hafez graph [slug] [--port N] [--no-open]  (serve the vault's graph on 127.0.0.1 and open it in the browser; a slug opens it focused on that note)\n       hafez graph --json [--layers tag,domain,session]  (the vault's structure as {nodes, edges})"
+const GRAPH_FLAGS: FlagSpec = { layers: 'string', port: 'string', 'no-open': 'boolean' }
+
+/** The local-graph depth `hafez graph <slug>` opens at (#256). */
+const GRAPH_FOCUS_DEPTH = 2
+
+export async function cmdGraph(os: Hafez, args: string[], opts: CommandOpts = {}): Promise<string> {
+  const { flags, positionals } = parseArgs(args, GRAPH_FLAGS, GRAPH_USAGE)
+  if (positionals.length > 1) throw new UsageError(GRAPH_USAGE)
+  const slug = positionals[0]
+  if (!opts.json) {
+    if (flags.layers !== undefined) throw new UsageError('--layers requires --json', GRAPH_USAGE)
+    // A miss fails as `read` does, before any server starts.
+    if (slug !== undefined) await os.read(slug, 'frontmatter').catch(err => { throw readMiss(err, slug, opts) })
+    return serveGraph(opts.vaultPath!, flags, slug)
+  }
+  if (slug !== undefined) throw new UsageError('a slug opens the page focused on it; --json prints the whole Graph', GRAPH_USAGE)
+  if (flags.port !== undefined || flags['no-open']) throw new UsageError('--port and --no-open serve the page; --json prints the Graph and exits', GRAPH_USAGE)
+  const layers = splitList(flags.layers)
+  const unknown = layers?.find(l => !(GRAPH_LAYERS as readonly string[]).includes(l))
+  if (unknown !== undefined) throw new UsageError(`Unknown layer: ${unknown}. Valid layers: ${GRAPH_LAYERS.join(', ')}`, GRAPH_USAGE)
+  return jsonOut(await os.graph(layers ? { layers: layers as GraphLayer[] } : undefined))
+}
+
+const STOP_SIGNALS = ['SIGINT', 'SIGTERM'] as const
+
+/** `hafez graph` without --json: serve the page until Ctrl-C or SIGTERM, then close the
+ * server and the index. The server gets its own instance whose reads trust the
+ * index: it syncs the index when its poll sees a commit (#271). */
+async function serveGraph(vaultPath: string, flags: Record<string, FlagValue>, focus: string | undefined): Promise<string> {
+  const portFlag = str(flags.port)
+  if (portFlag !== undefined && !(/^\d+$/.test(portFlag) && Number(portFlag) <= 65535)) {
+    throw new UsageError(`--port takes a port number (0-65535), got "${portFlag}"`, GRAPH_USAGE)
+  }
+  const port = portFlag === undefined ? undefined : Number(portFlag)
+  const { startGraphServer, DEFAULT_PORT } = await import('../graph/server.js')
+  const { createInternalHafez } = await import('../internal.js')
+  const os = createInternalHafez({ vaultPath, git: { push: false }, indexSync: 'manual' })
+  const server = await startGraphServer({ os, port }).catch(err => {
+    os.close()
+    if ((err as NodeJS.ErrnoException).code !== 'EADDRINUSE' || port === undefined) throw err
+    throw new UsageError(`port ${port} is in use: pick another with --port, or leave it off for the first free port from ${DEFAULT_PORT}`)
+  })
+  // The page reads its view from the URL: a focus opens local-graph mode around it.
+  const url = focus === undefined ? server.url : `${server.url}/?focus=${encodeURIComponent(focus)}&depth=${GRAPH_FOCUS_DEPTH}`
+  process.stdout.write(`Serving the graph at ${url}  (Ctrl-C to stop)\n`)
+  if (!flags['no-open']) (await import('../graph/open.js')).openBrowser(url)
+  // SIGTERM (a supervisor's kill) stops it as Ctrl-C does, so the index is
+  // closed either way (#280). A second signal during the close is not caught.
+  await new Promise<void>(resolve => {
+    const stop = () => {
+      for (const signal of STOP_SIGNALS) process.off(signal, stop)
+      resolve()
+    }
+    for (const signal of STOP_SIGNALS) process.on(signal, stop)
+  })
+  await server.close()
+  return 'Graph server stopped.'
 }
 
 export async function cmdIndexRebuild(os: Hafez): Promise<string> {

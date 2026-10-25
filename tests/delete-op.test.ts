@@ -11,7 +11,7 @@ import { HafezError, type Hafez, type Journal } from '../src/types.js'
 import { serializeFile } from '../src/vault.js'
 import { cmdDelete, cmdBatch } from '../src/cli/commands.js'
 import { getOpSchema } from '../src/cli/schema-introspect.js'
-import { readEntity } from './helpers/vault-files.js'
+import { readEntity, readKnowledge } from './helpers/vault-files.js'
 import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
@@ -43,6 +43,14 @@ async function rejection(p: Promise<unknown>): Promise<HafezError> {
   try { await p } catch (e) { caught = e }
   expect(caught, 'expected a rejection').toBeInstanceOf(HafezError)
   return caught as HafezError
+}
+
+/** A one-way edge on disk: `from` names `to`, `to` does not name `from`
+ * (a link would write both ends, #242). */
+function writeOneWay(from: string, to: string): void {
+  const path = knowledgeFile(from)
+  const { frontmatter, body } = readKnowledge(path)
+  writeFileSync(path, serializeFile({ ...frontmatter, related: [to] }, body))
 }
 
 function fullText(err: HafezError): string {
@@ -108,7 +116,9 @@ describe('a linked-to note is rejected, not deleted', () => {
   it.each([
     ['an entity related', async () => { await os.link('holder', 'twin-a', 'related') }, 'holder'],
     ['an entity parent', async () => { await os.create('entity', 'Child', { type: 'entity', parent: 'twin-a' }) }, 'child'],
-    ['a knowledge related', async () => { await os.link('twin-b', 'twin-a', 'related') }, 'twin-b'],
+    // A one-way edge written on disk: a link writes both ends (#242), and
+    // the back-edges the note owns are dropped with it (#243).
+    ['a knowledge related the note does not own', async () => { writeOneWay('twin-b', 'twin-a') }, 'twin-b'],
   ])('when %s names it, naming the referrer', async (_label, seed, referrer) => {
     await seed()
     const err = await rejection(os.delete('twin-a'))
@@ -185,7 +195,7 @@ describe('in a batch, links are judged after the earlier ops', () => {
   })
 
   it('an earlier delete of the referrer clears it', async () => {
-    await os.link('twin-b', 'twin-a', 'related')
+    writeOneWay('twin-b', 'twin-a')
     await os.batch([
       { op: 'delete', slug: 'twin-b' },
       { op: 'delete', slug: 'twin-a' },
@@ -212,6 +222,70 @@ describe('in a batch, links are judged after the earlier ops', () => {
     expect(results.map(r => r.status)).toEqual(['ok', 'ok'])
     expect(readFileSync(knowledgeFile('twin-a'), 'utf-8')).toContain('rewritten')
     expect((await os.query_knowledge()).items.map(k => k.slug)).toContain('twin-a')
+  })
+})
+
+describe('symmetric Related: delete drops the back-edges the note owns (#243)', () => {
+  const related = (slug: string) => readKnowledge(knowledgeFile(slug)).frontmatter.related
+
+  it('both related notes lose the entry, one commit, the file gone', async () => {
+    await os.create('knowledge', 'Twin C', { synthesis: 'third copy' })
+    await os.link('twin-a', 'twin-b', 'related')
+    await os.link('twin-a', 'twin-c', 'related')
+    expect(related('twin-b')).toEqual(['twin-a'])
+    const commitsBefore = journal.commits.length
+
+    await os.delete('twin-a')
+
+    expect(existsSync(knowledgeFile('twin-a'))).toBe(false)
+    expect(related('twin-b')).toBeUndefined()
+    expect(related('twin-c')).toBeUndefined()
+    expect(readFileSync(knowledgeFile('twin-b'), 'utf-8')).not.toContain('twin-a')
+    expect(journal.commits.length).toBe(commitsBefore + 1)
+    expect(journal.commits.at(-1)).toEqual({
+      written: ['knowledge/twin-b.md', 'knowledge/twin-c.md'],
+      deleted: ['knowledge/twin-a.md'],
+      message: 'delete: twin-a (knowledge)',
+    })
+    expect((await os.validate()).broken_slugs).toEqual([])
+    expect((await os.related_to('twin-a')).items).toEqual([])
+  })
+
+  it('an inbound link the note does not own still rejects, naming only that referrer', async () => {
+    await os.link('twin-a', 'twin-b', 'related')
+    await os.link('holder', 'twin-a', 'related')
+    const err = await rejection(os.delete('twin-a'))
+    expect(err.code).toBe('VALIDATION_FAILED')
+    expect(err.message).toContain('still linked from holder (parent/related)')
+    expect(existsSync(knowledgeFile('twin-a'))).toBe(true)
+    expect(related('twin-b')).toEqual(['twin-a'])
+  })
+
+  it('dry-run passes and touches nothing', async () => {
+    await os.link('twin-a', 'twin-b', 'related')
+    expect((await os.validateBatch([{ op: 'delete', slug: 'twin-a' }])).valid).toBe(true)
+    expect(related('twin-b')).toEqual(['twin-a'])
+  })
+
+  it('in a batch, an earlier delete of one twin frees the other', async () => {
+    await os.link('twin-a', 'twin-b', 'related')
+    expect((await os.validateBatch([{ op: 'delete', slug: 'twin-b' }, { op: 'delete', slug: 'twin-a' }])).valid).toBe(true)
+    await os.batch([{ op: 'delete', slug: 'twin-b' }, { op: 'delete', slug: 'twin-a' }])
+    expect(existsSync(knowledgeFile('twin-a'))).toBe(false)
+    expect(existsSync(knowledgeFile('twin-b'))).toBe(false)
+    expect((await os.validate()).broken_slugs).toEqual([])
+  })
+
+  it('a commit-stage failure leaves every file untouched', async () => {
+    await os.link('twin-a', 'twin-b', 'related')
+    const before = ['twin-a', 'twin-b'].map(s => readFileSync(knowledgeFile(s), 'utf-8'))
+    const failing: Journal = {
+      ...createMemoryJournal(),
+      async commit() { throw new HafezError('GIT_COMMIT_FAILED', 'index.lock') },
+    }
+    const failingOs = createHafez({ vaultPath: VAULT, persistence: failing })
+    await expect(failingOs.delete('twin-a')).rejects.toMatchObject({ code: 'GIT_COMMIT_FAILED' })
+    expect(['twin-a', 'twin-b'].map(s => readFileSync(knowledgeFile(s), 'utf-8'))).toEqual(before)
   })
 })
 

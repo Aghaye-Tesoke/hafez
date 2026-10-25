@@ -185,3 +185,24 @@ describe('the parent description render', () => {
     expect(ITEMS.parentDescription.render({ slug: 'platform', description: null })).toBe('platform')
   })
 })
+
+describe('the workstream fact line render', () => {
+  it('states the open count and the family, a fact and not a command', () => {
+    expect(ITEMS.workstreamLine.render({ prefix: 'QUEUE', open_actions: 7 })).toBe('workstream: 7 open actions with `QUEUE`; no child named it')
+    expect(ITEMS.workstreamLine.render({ prefix: 'CHECK', open_actions: 1 })).toBe('workstream: 1 open action with `CHECK`; no child named it')
+  })
+})
+
+describe('the health procedure (#248)', () => {
+  it('is in the rendered hafez skill: run with --json, propose by kind, apply nothing unconfirmed', () => {
+    const skill = renderHafezSkill()
+    const text = ITEMS.healthProcedure.text
+    expect(skill).toContain(text)
+    expect(text).toContain('hafez health --json')
+    expect(text).toContain('hafez batch')
+    expect(text).toMatch(/Apply nothing until the user/)
+  })
+  it('the skill description names the vault check', () => {
+    expect(renderHafezSkill().split('\n---\n')[0]).toContain('check the vault')
+  })
+})

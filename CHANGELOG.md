@@ -1,5 +1,73 @@
 # Changelog
 
+## 2.3.0 — 2026-10-25
+
+A live graph of the vault in the browser, a health check that says what to
+re-place, and `related` links that keep both ends.
+
+### Highlights
+
+- **`hafez graph` opens a live graph of the vault.** Serves a page on
+  127.0.0.1 (first free port from 4747; `--port N`, `--no-open`): entities
+  and knowledge joined by parent, related and wiki-link edges, sized by
+  open actions, glowing by recency, ringed when stale. A Live work /
+  Everything scope, a Knowledge toggle, `/` search over every note, a local
+  graph (depth 1 or 2) around the selection, and a note panel with the
+  Brief, aged actions, the Agent history and children. Left sidebar: Live
+  work, Unlinked notes with the `hafez link` line that places them,
+  Activity, and tag/domain Highlight chips. Any writer's commit pulses the
+  notes it touched within about 2 s; Follow moves the camera to them.
+  `hafez graph <slug>` opens focused on a note; scope, focus and depth live
+  in the URL. `hafez graph --json [--layers tag,domain,session]` prints the
+  structure instead. Library: `graph()`.
+- **`hafez health` lists what placement would change.** Read-only, exit 0,
+  `--json` for agents: unsplit workstreams, names recurring across an
+  entity's log, a parent's log leaking a child's work, one-way `related`
+  edges and unlinked `[[slug]]` mentions (each with the `hafez link` line
+  that closes it), and knowledge notes that restate a decision. It applies
+  nothing; the `hafez` skill carries the procedure (propose by kind, apply
+  only what you confirm). Library: `health()`.
+- **`related` is symmetric.** A same-kind `related` link (entity↔entity,
+  knowledge↔knowledge) now writes both ends in one commit, through `link`,
+  `unlink`, `create` and `update`; deleting a knowledge note drops the
+  back-edges it owns. Cross-kind links stay one-way, and an existing one-way
+  link is left as it is (`hafez health` lists them).
+- **A parent's `read` lists its children.** The header carries the child
+  count with their open actions and a `hafez read` line for the five most
+  recently touched, plus a workstream line for each unsplit family of
+  actions; `--json` gains `children`, `children_total` and `workstreams`.
+- **`changesSince(cursor)`** in the library: the notes created, updated or
+  deleted since a history cursor, from any writer. `changelog()` takes a
+  `limit` and each entry carries its commit hash.
+- **README: "Where your judgement matters".** The calls that stay yours:
+  child or related, split a workstream or not, decision or lesson, retire
+  or delete, and reading `hafez health`.
+
+### Fixed
+
+- **Saved sessions fill their own sections.** `hafez-save` put the
+  decisions and touched entities inside Summary, leaving Decisions and
+  Entities Touched empty. They now land one bullet per decision and one
+  `[[slug]]` per entity. A session saved before still counts as saved.
+- **`hafez upgrade`'s dev-checkout step runs `npm ci`** between the pull
+  and the build, so a changed `package-lock.json` no longer breaks the
+  build.
+
+### Changed
+
+- **Parent subsumes related.** A `related` that names the entity's parent
+  or one of its children, or an `update --parent` naming a related entity,
+  is rejected with `VALIDATION_FAILED`.
+- **The Block gains placement rules.** A workstream too big for one action
+  becomes a Child with its actions moved; `create` takes
+  `--parent <slug you read, or its parent>`; work a child owns is written
+  there. `hafez upgrade` reports the installed Block as stale;
+  `hafez onboard --install` refreshes it.
+- **One index sync per CLI command.** An entity `read` on a WSL-mounted
+  vault went from about 2.2 s to 1.3 s. The library still syncs before
+  every read.
+- **Index schema v13.** Run `hafez index rebuild` after upgrading.
+
 ## 2.2.0 — 2026-10-18
 
 Session notes are readable and queryable, the archived log is one flag away

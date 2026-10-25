@@ -8,3 +8,4 @@ reference/transcripts/
 # SQLite WAL/SHM sidecars — transient runtime artifacts
 *.db-shm
 *.db-wal
+__pycache__/
