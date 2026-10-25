@@ -10,6 +10,9 @@ export const GRAPH_ROW_FIELDS = ['type', 'status', 'subtype', 'confidence', 'las
  * and an Unlinked note's mark and placing slug. */
 export const GRAPH_SIGNAL_FIELDS = ['open_actions', 'stale', 'stale_actions', 'staleness_days', 'unlinked', 'best'] as const
 
+/** The optional Graph node fields the server adds to a project's heat (galaxy spec). */
+export const GRAPH_HEAT_FIELDS = ['last_active', 'heat', 'heat_source'] as const
+
 /** Every optional Graph node field: what the page's merge drops from a node a
  * refresh no longer gives it. */
-export const GRAPH_NODE_FIELDS = [...GRAPH_ROW_FIELDS, ...GRAPH_SIGNAL_FIELDS] as const
+export const GRAPH_NODE_FIELDS = [...GRAPH_ROW_FIELDS, ...GRAPH_SIGNAL_FIELDS, ...GRAPH_HEAT_FIELDS] as const

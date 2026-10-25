@@ -418,6 +418,12 @@ export interface GraphNode {
   /** On an Unlinked note: the closest other linked note by name and description,
    * the same kind when one matches; absent when none does. */
   best?: string
+  /** A project's most recent active day, ISO: the last day with active minutes, else the vault's last_touched (galaxy spec, heat). */
+  last_active?: string
+  /** A project's heat in [0, 1]: recent active time, decayed by age (galaxy spec, heat). */
+  heat?: number
+  /** Where a project's heat came from: its working folder's hours, or vault touches when no folder maps to it (galaxy spec, heat). */
+  heat_source?: 'hours' | 'touches'
 }
 
 export interface GraphEdge {
