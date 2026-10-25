@@ -46,7 +46,8 @@ export function readSidecar(path: string): Sidecar {
 export function writeSidecar(path: string, sidecar: Sidecar): void {
   mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.tmp`
-  writeFileSync(tmp, JSON.stringify(sidecar, null, 2))
+  // Owner-only: the cache holds transcript paths. Advisory on Windows.
+  writeFileSync(tmp, JSON.stringify(sidecar, null, 2), { mode: 0o600 })
   renameSync(tmp, path)
 }
 

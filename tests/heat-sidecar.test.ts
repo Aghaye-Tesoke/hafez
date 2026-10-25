@@ -1,6 +1,6 @@
 // tests/heat-sidecar.test.ts
 import { describe, expect, it, afterAll } from 'vitest'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, statSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { defaultSidecarPath, emptySidecar, readSidecar, writeSidecar, type Sidecar } from '../src/graph/heat/sidecar.js'
@@ -27,6 +27,14 @@ describe('hours sidecar', () => {
     const path = join(ROOT, 'round', 'hours.json')
     writeSidecar(path, sample)
     expect(readSidecar(path)).toEqual(sample)
+  })
+
+  it('writes the file owner-only', () => {
+    const path = join(ROOT, 'mode', 'hours.json')
+    writeSidecar(path, sample)
+    // Mode bits are advisory on Windows, so only POSIX can assert them.
+    if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600)
+    else expect(existsSync(path)).toBe(true)
   })
 
   it('reads a missing file as an empty sidecar', () => {
