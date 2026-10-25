@@ -64,6 +64,7 @@ const COPY_RESET_MS = 1500
 let view: View | null = null
 /** Where the Mark finished control is, for one node: it survives a live reload's re-render, a new selection resets it. */
 let lastNote: Note | null = null
+let lastProblem: string | undefined
 let finishing: { id: string; step: FinishStep; typed: string; problem?: string } | null = null
 /** Where focus was when the panel opened: it goes back there on close. */
 let returnTo: HTMLElement | null = null
@@ -140,6 +141,7 @@ function render(node: DrawNode, note: Note | null, problem?: string): void {
   // Rebuilding drops the focused element: focus stays in the panel.
   const hadFocus = panel.contains(document.activeElement)
   lastNote = note
+  lastProblem = problem
   const fm = note?.frontmatter ?? {}
   const text = (key: string, fallback?: string) => (typeof fm[key] === 'string' ? fm[key] as string : fallback)
   const today = localDay()
@@ -228,7 +230,7 @@ function finishSection(node: DrawNode): void {
     flow.step = step
     flow.problem = problem
     // Another selection since the click resets the flow: a late answer changes nothing.
-    if (finishing === flow && state.selected?.id === flow.id) render(state.selected, lastNote)
+    if (finishing === flow && state.selected?.id === flow.id) render(state.selected, lastNote, lastProblem)
   }
   const button = (label: string, onClick: () => void, cls = 'btn') => {
     const b = el('button', { class: cls, type: 'button' }, label)
@@ -236,6 +238,9 @@ function finishSection(node: DrawNode): void {
     return b
   }
   const sec = section('Finish', 'finish')
+  // render's panel.focus() has run by the time a microtask does: focus goes into the control, so Escape reaches it.
+  const focusIn = (target: HTMLElement) => queueMicrotask(() => target.focus({ preventScroll: true }))
+  sec.tabIndex = -1
   const cancel = () => { flow.typed = ''; go('idle') }
   const escape = (event: KeyboardEvent) => {
     if (event.key !== 'Escape') return
@@ -247,13 +252,20 @@ function finishSection(node: DrawNode): void {
 
   if (flow.step === 'idle') sec.append(button('Mark finished', () => go('confirm')))
   else if (flow.step === 'confirm') {
+    const next = button('Continue', () => go('type'))
     const [first, second] = finishWarning(node).split('\n')
     sec.append(el('p', { class: 'warn' }, first), el('p', {}, second),
-      el('div', { class: 'row' }, button('Continue', () => go('type')), button('Cancel', cancel)))
-  } else if (flow.step === 'sending') sec.append(el('p', { class: 'muted' }, 'Finishing…'))
+      el('div', { class: 'row' }, next, button('Cancel', cancel)))
+    focusIn(next)
+  } else if (flow.step === 'sending') {
+    sec.append(el('p', { class: 'muted' }, 'Finishing…'))
+    focusIn(sec)
+  }
   else if (flow.step === 'failed') {
+    const again = button('Try again', () => go('type'))
     sec.append(el('p', { class: 'warn' }, `Could not finish: ${flow.problem}`),
-      el('div', { class: 'row' }, button('Try again', () => go('type')), button('Cancel', cancel)))
+      el('div', { class: 'row' }, again, button('Cancel', cancel)))
+    focusIn(again)
   } else {
     const input = el('input', { class: 'slug', type: 'text', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Type the slug to confirm' })
     input.value = flow.typed
@@ -273,7 +285,7 @@ function finishSection(node: DrawNode): void {
     sync()
     sec.append(el('label', { class: 'label' }, 'Type the slug to confirm', input),
       el('div', { class: 'row' }, send, button('Cancel', cancel)))
-    queueMicrotask(() => input.focus({ preventScroll: true }))
+    focusIn(input)
   }
 }
 
