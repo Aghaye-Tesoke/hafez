@@ -3,6 +3,7 @@
 // flight (F toggles, WASD + drag to look, Escape returns to orbit). The two
 // position functions are pure; mountCamera is the thin 3d-force-graph wiring.
 // Under reduced motion every move is instant.
+import { Vector3 } from 'three'
 import { FlyControls } from 'three/examples/jsm/controls/FlyControls.js'
 import type { ForceGraph3DInstance } from '3d-force-graph'
 import { reducedMotion } from '../motion.js'
@@ -73,7 +74,11 @@ export function mountCamera(graph: ForceGraph3DInstance, canvas: HTMLElement): C
 
   const setFly = (on: boolean): void => {
     if (on === flying) return
-    const controls = graph.controls() as { enabled: boolean; update?: () => void }
+    const controls = graph.controls() as {
+      enabled: boolean
+      update?: () => void
+      target?: { set?: (x: number, y: number, z: number) => void }
+    }
     flying = on
     if (on) {
       controls.enabled = false
@@ -90,6 +95,15 @@ export function mountCamera(graph: ForceGraph3DInstance, canvas: HTMLElement): C
       fly?.dispose()
       fly = null
       controls.enabled = true
+      // Re-pivot ahead of the camera so update() keeps where the user flew to.
+      const cam = graph.camera()
+      const t = controls.target
+      if (t && typeof t.set === 'function') {
+        const old = t as unknown as Vec3
+        const d = Math.hypot(cam.position.x - old.x, cam.position.y - old.y, cam.position.z - old.z) || 200
+        const f = cam.getWorldDirection(new Vector3())
+        t.set(cam.position.x + f.x * d, cam.position.y + f.y * d, cam.position.z + f.z * d)
+      }
       controls.update?.()
     }
   }
@@ -104,6 +118,7 @@ export function mountCamera(graph: ForceGraph3DInstance, canvas: HTMLElement): C
       setFly(false)
       if (lastBounds) overview(lastBounds, 800)
     } else if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey && !typing(e.target)) {
+      if (e.repeat) return
       e.preventDefault()
       setFly(!flying)
     }
