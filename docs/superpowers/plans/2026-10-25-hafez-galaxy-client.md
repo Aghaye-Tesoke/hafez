@@ -34,6 +34,25 @@
 
 ---
 
+### Task 0: The panel converges after a finish without the live channel
+
+Carried from part 1's final review (parked finding). Today `sendFinish` answers 200 without rebuilding the server's cached Graph, so the panel's `view.reload()` on `res.ok` refetches a stale `/graph` and "Finishing…" clears only when the live poll's frame arrives.
+
+**Files:**
+- Modify: `src/graph/server.ts` (`sendFinish`, `rebuild`), `src/graph/live.ts` (`Live` gains `rebuildNow(): Promise<void>` that queues `rebuild()` on the serial chain and resolves when it has run, no frame)
+- Modify: `src/graph/heat/sidecar.ts` (`writeSidecar`: `chmodSync(tmp, 0o600)` after the write, since `mode` applies only on create)
+- Modify: `tests/graph-server.test.ts` (rename the collector-failure test to what it now proves, add a `scanHeat`-throws case using a transcript root that is a regular file or a spied `scanHeat`), `tests/heat-sidecar.test.ts`
+
+**Interfaces:**
+- Produces: `Live.rebuildNow(): Promise<void>`; `sendFinish` awaits it after a successful `os.update` and before `send(res, 200, …)`.
+
+- [ ] **Step 1: Write the failing test** in `tests/graph-server.test.ts`: after `POST /note/<fresh project>/finish` returns 200, an immediate `GET /graph` (no waiting, no SSE) shows that node with `status: 'done'`. Run it, expect FAIL (status still active).
+- [ ] **Step 2: Implement `Live.rebuildNow()` and call it from `sendFinish`.** The poll's later frame still goes out as today. Run the test, expect PASS.
+- [ ] **Step 3: `chmodSync(tmp, 0o600)` in `writeSidecar`** with a POSIX-only test that a pre-existing 0o644 `.tmp` ends as a 0o600 final file. Rename the collector-failure test and add the scan-throws case.
+- [ ] **Step 4: `npm test`, expect PASS. Commit** `fix(graph): a finish rebuilds the Graph before answering; sidecar tmp mode; collector-failure tests`.
+
+---
+
 ### Task 1: Dependencies and the bundle budget
 
 **Files:**
