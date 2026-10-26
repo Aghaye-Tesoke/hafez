@@ -106,3 +106,20 @@ export const CANVAS = {
   /** Outside a hover or a highlight: the edges in this colour. */
   dimEdge: alpha(WHITE, 0.015),
 } as const
+
+/** The galaxy's palette (part 2): a black sky, the five temperature anchors
+ * (white-blue at day 0 cooling to deep red at day 28), and the bodies. */
+export const GALAXY = {
+  space: '#000000',
+  /** Days 0, 7, 14, 21, 28: white-blue, pale yellow-white, yellow, orange, deep red. */
+  anchors: ['#cfe3ff', '#fff4d6', '#ffd23f', '#ff8c1a', '#a1141a'],
+  nebula: '#9db8e8',
+  /** A cold star with open actions pulses this. */
+  alarm: COLOR.amber,
+  planet: { ringed: '#d9b97a', banded: '#c98f6b', bandedAlt: '#8fa9c9', rocky: '#a88f7c' },
+  moon: '#9aa0a8',
+  belt: '#5a5f66',
+  /** The outline of a star whose heat is estimated from touches. */
+  estimated: alpha(COLOR.text2, 0.5),
+  core: alpha('#f5f8ff', 0.12),
+} as const
