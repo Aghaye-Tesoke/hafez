@@ -113,13 +113,17 @@ export const GALAXY = {
   space: '#000000',
   /** Days 0, 7, 14, 21, 28: white-blue, pale yellow-white, yellow, orange, deep red. */
   anchors: ['#cfe3ff', '#fff4d6', '#ffd23f', '#ff8c1a', '#a1141a'],
-  nebula: '#9db8e8',
+  /** A finished star's remnant, its clouds from inner to outer: teal, blue, violet, pink, a warm highlight. */
+  nebula: ['#8cd7eb', '#78aae6', '#be6ed2', '#dca0eb', '#ffd9a3'],
+  /** The bright point left at a nebula's centre. */
+  remnant: WHITE,
   /** A cold star with open actions pulses this. */
   alarm: COLOR.amber,
   planet: { ringed: '#d9b97a', banded: '#c98f6b', bandedAlt: '#8fa9c9', rocky: '#a88f7c' },
   moon: '#9aa0a8',
   belt: '#5a5f66',
-  /** The outline of a star whose heat is estimated from touches. */
-  estimated: alpha(COLOR.text2, 0.5),
+  /** The outline of a star whose heat is estimated from touches: opaque, as
+   * three.js colours take no alpha; the outline's material sets its opacity. */
+  estimated: COLOR.text2,
   core: alpha('#f5f8ff', 0.12),
 } as const

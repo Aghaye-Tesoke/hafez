@@ -23,6 +23,19 @@ export interface BodyStyle {
 }
 
 const isStarLike = (body: Body): boolean => body === 'star' || body === 'core'
+/** A halo is never more opaque than this, however hot its star. */
+const GLOW_OPACITY_MAX = 0.45
+/** A core's wide halo: faint, so the galaxy's middle stays translucent. */
+const CORE_HALO = { opacity: 0.08, scale: 10 }
+/** The nebula's clouds, inner to outer: size in radii and opacity. Additive and
+ * faint, so overlapping hues glow softly under bloom instead of flaring white. */
+const NEBULA_CLOUDS = [
+  { size: 4.4, opacity: 0.36 },
+  { size: 6.4, opacity: 0.3 },
+  { size: 8.4, opacity: 0.24 },
+  { size: 10.4, opacity: 0.18 },
+  { size: 12.4, opacity: 0.12 },
+]
 const isPlanet = (body: Body): boolean => body.startsWith('planet-')
 
 function bodyColor(node: GraphNode, body: Body, today: string): string {
@@ -31,7 +44,7 @@ function bodyColor(node: GraphNode, body: Body, today: string): string {
     case 'core':
       return temperatureColor(daysSince(node.last_active, today))
     case 'nebula':
-      return GALAXY.nebula
+      return GALAXY.nebula[0]
     case 'planet-ringed':
       return GALAXY.planet.ringed
     case 'planet-banded':
@@ -175,15 +188,20 @@ export function makeBody(style: BodyStyle): THREE.Group {
   const { body, radius } = style
 
   if (body === 'nebula') {
+    // Seeded by the name: a reload draws the same remnant.
     const next = stream(hash(style.label))
     const cloud = new THREE.Group()
     cloud.name = 'cloud'
-    for (let i = 0; i < 12; i++) {
-      const s = sprite('', GALAXY.nebula, 0.12 + next() * 0.13, radius * (2 + next() * 2))
-      s.position.set((next() * 2 - 1) * 3 * radius, (next() * 2 - 1) * 3 * radius, (next() * 2 - 1) * 3 * radius)
+    NEBULA_CLOUDS.forEach(({ size, opacity }, i) => {
+      const s = sprite('', GALAXY.nebula[i], opacity, radius * size)
+      // Each cloud a little stretched, turned and off centre, so together they read as gas.
+      s.scale.set(radius * size * (1 + next() * 0.5), radius * size, 1)
+      s.material.rotation = next() * Math.PI
+      s.position.set((next() * 2 - 1) * radius * 1.4 * i, (next() * 2 - 1) * radius * 1.0 * i, (next() * 2 - 1) * radius * 0.6 * i)
       cloud.add(s)
-    }
+    })
     group.add(cloud)
+    group.add(sprite('remnant', GALAXY.remnant, 0.9, radius * 1.2))
   } else {
     const banded = body === 'planet-banded' ? bandMap() : undefined
     const sphere = new THREE.Mesh(
@@ -195,9 +213,9 @@ export function makeBody(style: BodyStyle): THREE.Group {
   }
 
   if (isStarLike(body)) {
-    group.add(sprite('glow', style.color, style.glow.intensity, style.glow.reach * radius * 2))
+    group.add(sprite('glow', style.color, Math.min(style.glow.intensity, GLOW_OPACITY_MAX), style.glow.reach * radius * 2))
   }
-  if (body === 'core') group.add(sprite('core', style.color, 0.18, radius * 14))
+  if (body === 'core') group.add(sprite('core', style.color, CORE_HALO.opacity, radius * CORE_HALO.scale))
   if (body === 'planet-ringed') {
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(radius * 1.6, radius * 2.4, 48),
@@ -232,13 +250,13 @@ export function updateBody(group: THREE.Group, style: BodyStyle): void {
   const halo = group.getObjectByName('glow') as THREE.Sprite | undefined
   if (halo) {
     halo.material.color.copy(color)
-    halo.material.opacity = style.glow.intensity
+    halo.material.opacity = Math.min(style.glow.intensity, GLOW_OPACITY_MAX)
     halo.scale.setScalar(style.glow.reach * style.radius * 2)
   }
   const core = group.getObjectByName('core') as THREE.Sprite | undefined
   if (core) {
     core.material.color.copy(color)
-    core.scale.setScalar(style.radius * 14)
+    core.scale.setScalar(style.radius * CORE_HALO.scale)
   }
 
   // Added children are built at the build radius, then scaled with the rest.

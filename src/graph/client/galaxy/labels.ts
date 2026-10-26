@@ -4,8 +4,9 @@
 // close. Hover and selection always name the body. Pure: no DOM, no three.js.
 import type { Body } from './bodies.js'
 
-/** Camera distances in scene units. */
-export const LABEL = { always: 900, near: 120 } as const
+/** Camera distances in scene units: `always` reaches the overview of the
+ * whole sky (belt included, orbits.ts), `near` a star flown to with its planets. */
+export const LABEL = { always: 3000, near: 300 } as const
 
 export function labelShows(body: Body, distance: number, hovered: boolean, selected: boolean): boolean {
   if (hovered || selected) return true
@@ -15,7 +16,9 @@ export function labelShows(body: Body, distance: number, hovered: boolean, selec
 
 /** Sprite text height in scene units. */
 export function labelSize(body: Body): number {
-  if (body === 'core') return 6
-  if (body === 'star' || body === 'nebula') return 4
+  // Cores and stars are named at overview distance: 1.5x so the names read there.
+  if (body === 'core') return 9
+  if (body === 'star') return 6
+  if (body === 'nebula') return 4
   return 2.5
 }

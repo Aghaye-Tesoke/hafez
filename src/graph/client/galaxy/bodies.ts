@@ -33,13 +33,16 @@ export function childrenOf(edges: GraphEdge[]): Map<string, string[]> {
 export const isNebulaCore = (node: GraphNode): boolean =>
   node.kind === 'entity' && node.type === 'project' && node.status === 'done'
 
-/** The body a node is. Unlinked wins, then having children (a done project
- * with children stays a core: its satellites keep it), then the rest. */
+/** The body a node is. A project is always a core, star or nebula, linked or
+ * not: an unlinked project is a rogue star, never a belt body. For the rest,
+ * unlinked wins (the belt), then having children (a done project with children
+ * stays a core: its satellites keep it), then the kind. */
 export function bodyOf(node: GraphNode, hasChildren: boolean): Body {
-  if (node.unlinked) return 'belt'
+  const project = node.kind === 'entity' && node.type === 'project'
+  if (node.unlinked && !project) return 'belt'
   if (hasChildren) return 'core'
   if (node.kind === 'entity') {
-    if (node.type === 'project') return node.status === 'done' ? 'nebula' : 'star'
+    if (project) return node.status === 'done' ? 'nebula' : 'star'
     return 'moon'
   }
   if (node.confidence === 'principle') return 'planet-ringed'
@@ -50,9 +53,9 @@ export function bodyOf(node: GraphNode, hasChildren: boolean): Body {
 const HOST_RELATIONS = ['parent', 'related', 'mention'] as const
 
 /** The id a node orbits: its first parent edge, else first related, else
- * first mention, in edge order. Undefined for the belt, for a root (a core,
- * star or nebula with no parent: the force layout places it) and for a planet
- * or moon with no edge at all. */
+ * first mention, in edge order. Undefined for anything unlinked (a belt body,
+ * or a rogue star), for a root (a core, star or nebula with no parent: the
+ * force layout places it) and for a planet or moon with no edge at all. */
 export function hostOf(node: GraphNode, edges: GraphEdge[]): string | undefined {
   if (node.unlinked) return undefined
   const own = edges.filter((edge) => edge.source === node.id)

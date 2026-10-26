@@ -27,8 +27,11 @@ function svg(...shapes: Shape[]): SVGSVGElement {
 const disc = (fill: string, r: number, extra: Shape = {}): Shape => ({ tag: 'circle', cx: 11, cy: 9, r, fill, ...extra })
 /** A star: its disc in a faint halo of its own colour. */
 const star = (fill: string, r = 3.5): Shape[] => [disc(fill, r * 2.2, { opacity: 0.18 }), disc(fill, r)]
-/** A soft cloud: three faint, overlapping discs. */
-const cloud = (fill: string): Shape[] => [disc(fill, 8, { opacity: 0.12 }), disc(fill, 5.5, { opacity: 0.2, cx: 9 }), disc(fill, 4, { opacity: 0.28, cx: 13, cy: 8 })]
+/** A nebula: soft overlapping clouds in the remnant's hues, outer first, and its bright point. */
+const cloud = (hues: readonly string[]): Shape[] => [
+  disc(hues[3], 8, { opacity: 0.18 }), disc(hues[2], 6, { opacity: 0.25, cx: 13, cy: 8 }),
+  disc(hues[1], 5, { opacity: 0.3, cx: 9, cy: 10 }), disc(hues[0], 3.5, { opacity: 0.4, cx: 11, cy: 8 }), disc(GALAXY.remnant, 1, { opacity: 0.9 }),
+]
 
 /** The sky in one row: the clock's four temperatures (days 0, 7, 14, 28), then the rest. */
 const SWATCHES: Array<{ label: string; swatch: () => SVGSVGElement }> = [

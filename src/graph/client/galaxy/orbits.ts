@@ -22,11 +22,16 @@ export interface Orbit {
   tilt: number
 }
 
+/** Radii in scene units. The innermost planet clears a heat-1 star's halo:
+ * at least 4x the largest star radius (signals.ts size: 10.2) plus the glow
+ * reach (2.2 radii at heat 1, temperature.ts); moons sit just outside that
+ * halo, inside the planets; sibling stars round a core leave room for a
+ * star's planets; the belt rings everything. */
 export const ORBIT = {
-  star: { base: 28, step: 9 },
-  planet: { base: 7, step: 3 },
-  moon: { base: 4, step: 1.5 },
-  belt: { radius: 320, tilt: 0.35, speed: 0.004 },
+  star: { base: 110, step: 40 },
+  planet: { base: 44, step: 14 },
+  moon: { base: 26, step: 5 },
+  belt: { radius: 900, tilt: 0.35, speed: 0.004 },
   speed: { star: 0.02, planet: 0.06, moon: 0.1 },
 } as const
 
@@ -59,10 +64,12 @@ export function orbitsOf(nodes: GraphNode[], edges: GraphEdge[]): Map<string, Or
   const hosts = new Map<string, string>()
   const classes = new Map<string, OrbitClass>()
   for (const node of nodes) {
-    if (node.unlinked) continue
+    const body = bodyOf(node, children.has(node.id))
+    // The belt has its own ring (beltOf); an unlinked project is a root.
+    if (body === 'belt') continue
     const host = hostOf(node, edges)
     if (host === undefined) continue
-    const cls = classOf(bodyOf(node, children.has(node.id)))
+    const cls = classOf(body)
     hosts.set(node.id, host)
     classes.set(node.id, cls)
     const key = `${host}\u0000${cls}`

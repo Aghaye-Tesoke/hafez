@@ -2,6 +2,7 @@
 // Camera logic for the galaxy: fly to a body, frame the whole vault, and free
 // flight (F toggles, WASD + drag to look, Escape returns to orbit). The two
 // position functions are pure; mountCamera is the thin 3d-force-graph wiring.
+// Escape belongs to the camera only in free flight; otherwise the page owns it.
 // Under reduced motion every move is instant.
 import { Vector3 } from 'three'
 import { FlyControls } from 'three/examples/jsm/controls/FlyControls.js'
@@ -19,6 +20,8 @@ export interface Camera {
   overview(bounds: Bounds, ms: number): void
   distanceTo(p: Vec3): number
   setFly(on: boolean): void
+  /** Whether free flight is on. */
+  isFlying(): boolean
   /** Remove the window listeners and leave fly mode. */
   dispose(): void
 }
@@ -115,6 +118,8 @@ export function mountCamera(graph: ForceGraph3DInstance, canvas: HTMLElement): C
 
   const onKey = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') {
+      // Out of flight, Escape is the page's (it closes the panel, then frames the overview).
+      if (!flying) return
       setFly(false)
       if (lastBounds) overview(lastBounds, 800)
     } else if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey && !typing(e.target)) {
@@ -135,6 +140,7 @@ export function mountCamera(graph: ForceGraph3DInstance, canvas: HTMLElement): C
       return Math.hypot(c.x - p.x, c.y - p.y, c.z - p.z)
     },
     setFly,
+    isFlying: () => flying,
     dispose() {
       window.removeEventListener('keydown', onKey)
       setFly(false)

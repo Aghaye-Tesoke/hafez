@@ -9,9 +9,16 @@ const knowledge = (id: string, fields: Partial<GraphNode> = {}): GraphNode =>
 const edge = (source: string, target: string, relation: GraphEdge['relation']): GraphEdge => ({ source, target, relation })
 
 describe('bodyOf', () => {
-  it('unlinked is belt even for a project, even with children', () => {
-    expect(bodyOf(entity('a', { unlinked: true }), false)).toBe('belt')
-    expect(bodyOf(entity('a', { unlinked: true }), true)).toBe('belt')
+  it('unlinked knowledge and non-project entities are belt bodies', () => {
+    expect(bodyOf(knowledge('k', { unlinked: true }), false)).toBe('belt')
+    expect(bodyOf(entity('a', { type: 'capture', unlinked: true }), false)).toBe('belt')
+    expect(bodyOf(entity('a', { type: 'entity', unlinked: true }), true)).toBe('belt')
+  })
+  it('an unlinked project is a rogue star (or nebula, or core), never a belt body', () => {
+    expect(bodyOf(entity('a', { unlinked: true }), false)).toBe('star')
+    expect(bodyOf(entity('a', { unlinked: true, status: 'done' }), false)).toBe('nebula')
+    expect(bodyOf(entity('a', { unlinked: true }), true)).toBe('core')
+    expect(hostOf(entity('a', { unlinked: true }), [])).toBeUndefined()
   })
   it('project with children is core, also when done', () => {
     expect(bodyOf(entity('a'), true)).toBe('core')

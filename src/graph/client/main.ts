@@ -30,7 +30,7 @@ import { escStep } from './view.js'
 import { readView, writeView } from './url.js'
 import { mountNotice } from './notice.js'
 import { reducedMotion } from './motion.js'
-import { CANVAS, FONT, GALAXY } from './tokens.js'
+import { alpha, CANVAS, FONT, GALAXY } from './tokens.js'
 import { isNebulaCore } from './galaxy/bodies.js'
 import { beltOf, orbitsOf, resolvePositions, type Orbit, type Vec3 } from './galaxy/orbits.js'
 import { labelShows, labelSize } from './galaxy/labels.js'
@@ -41,14 +41,23 @@ import { mountCamera, type Bounds } from './galaxy/camera.js'
 /** The simulation: the roots' charge, the ticks run before the first frame,
  * and how many ticks the bodies already placed stay pinned after a view
  * change while the simulation settles the ones it brought in. */
-const FORCES = { charge: -120, warmupTicks: 200, settleTicks: 300 }
+const FORCES = { charge: -800, warmupTicks: 200, settleTicks: 300 }
 /** The one bloom pass: strength, radius, threshold. */
-const BLOOM = { strength: 0.9, radius: 0.6, threshold: 0.2 }
+// The threshold keeps mid-grey labels and planets out of it; only hot discs bloom.
+const BLOOM = { strength: 0.35, radius: 0.5, threshold: 0.75 }
 /** Camera moves, in ms (galaxy/camera.ts makes them instant under reduced motion). */
 const FLY_MS = 900
 const OVERVIEW_MS = 800
 /** Two clicks on one body this close together, in ms, are a double click. */
 const DOUBLE_CLICK_MS = 400
+/** Behind every label, so it reads over glow. */
+const LABEL_BACKDROP = alpha(GALAXY.space, 0.55)
+/** Labels keep one size on screen at any distance: px per unit of labelSize,
+ * with a floor so the smallest names still read; the backdrop's padding and
+ * corner, in label heights. */
+const LABEL_PX = { perUnit: 2.4, min: 11, padding: 1 / 3 }
+/** The overview looks down on the sky from this elevation, so orbits read as rings, not lines. */
+const OVERVIEW_ELEVATION = 0.6
 /** Every link draws at this opacity, in its relation's hue. */
 const LINK_OPACITY = 0.08
 
@@ -124,20 +133,40 @@ const orbitTime = (now: number): number => reducedMotion() ? 0 : now / 1000
 function bodyObject(n: DrawNode): Group {
   if (!n.group) {
     n.group = makeBody(n.bodyStyle)
-    const label = new SpriteText(n.name, labelSize(n.body), CANVAS.label)
+    const label = new SpriteText(n.name, 1, CANVAS.label)
     label.fontFace = FONT.display
+    // A dark backdrop, so a name reads over a halo or a nebula.
+    label.backgroundColor = LABEL_BACKDROP
     label.name = 'label'
     label.visible = false
     label.material.depthWrite = false
+    // One size on screen at any distance; hung from its top edge, under the body.
+    label.material.sizeAttenuation = false
+    label.center.set(0.5, 1)
+    sizeLabel(n, label)
+    // Hidden or not, a label is never picked: clicks and hover reach the bodies only.
+    label.raycast = () => {}
     n.group.add(label)
     placeLabel(n)
   }
   return n.group
 }
 
-/** The label sits under its body, clear of it. */
+/** The label hangs just under its body, clear of it. */
 function placeLabel(n: DrawNode): void {
-  n.group?.getObjectByName('label')?.position.set(0, -(n.bodyStyle.radius * 1.6 + labelSize(n.body)), 0)
+  n.group?.getObjectByName('label')?.position.set(0, -n.bodyStyle.radius * 1.15, 0)
+}
+
+/** A label's height in the units an unattenuated sprite takes (a share of the
+ * view's height), for its body's size on screen; padding and corner follow. */
+function sizeLabel(n: DrawNode, label: SpriteText): void {
+  const fov = ((graph.camera() as { fov?: number }).fov ?? 40) * Math.PI / 180
+  const px = Math.max(LABEL_PX.min, labelSize(n.body) * LABEL_PX.perUnit)
+  const height = px * 2 * Math.tan(fov / 2) / Math.max(1, shell.canvas.clientHeight)
+  if (Math.abs(label.textHeight - height) < 1e-9) return
+  label.textHeight = height
+  label.padding = height * LABEL_PX.padding
+  label.borderRadius = height * LABEL_PX.padding
 }
 
 /** What a label says: a hovered planet or moon names what it belongs to. */
@@ -155,7 +184,7 @@ function visible3d(): { nodes: DrawNode[]; links: DrawLink[] } {
   const ids = new Set(nodes.map(n => n.id))
   const links = state.links.filter(l => ids.has(endId(l.source)) && ids.has(endId(l.target)))
   const edges = links.map(l => ({ source: endId(l.source), target: endId(l.target), relation: l.relation }))
-  orbits = new Map([...orbitsOf(nodes, edges), ...beltOf(nodes.filter(n => n.unlinked).map(n => n.id))])
+  orbits = new Map([...orbitsOf(nodes, edges), ...beltOf(nodes.filter(n => n.body === 'belt').map(n => n.id))])
   return { nodes, links }
 }
 
@@ -190,6 +219,8 @@ function onTick(): void {
   }
   if (overviewPending) {
     overviewPending = false
+    const { center } = bounds()
+    graph.cameraPosition({ x: center.x, y: center.y + OVERVIEW_ELEVATION, z: center.z + 1 }, center, 0)
     camera.overview(bounds(), 0)
   }
   if (flyPending?.x !== undefined) {
@@ -219,7 +250,16 @@ function flyTo(n: DrawNode): void {
     flyPending = n
     return
   }
-  camera.flyTo(position(n), n.bodyStyle.radius, FLY_MS)
+  camera.flyTo(position(n), frameRadius(n), FLY_MS)
+}
+
+/** How much to frame when flying to a body: the body, or the bodies orbiting
+ * it out to the farthest (0.75 of an orbit's radius puts it in view at the
+ * camera's fly-to distance). */
+function frameRadius(n: DrawNode): number {
+  let reach = n.bodyStyle.radius
+  for (const o of orbits.values()) if (o.host === n.id) reach = Math.max(reach, o.radius * 0.75)
+  return reach
 }
 
 /** A click selects; a second click on the same body soon after flies to it. */
@@ -336,10 +376,10 @@ bindPanel(shell.note, {
 
 /** Esc steps back one level: the selection closes and the camera returns to
  * the overview; at the overview it frames it again. The search box, the
- * legend and the finish flow keep their own Esc; the camera's own Esc leaves
- * free flight. */
+ * legend and the finish flow keep their own Esc; in free flight Esc is the
+ * camera's alone (it leaves flight and frames the overview, the panel stays). */
 document.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || event.defaultPrevented) return
+  if (event.key !== 'Escape' || event.defaultPrevented || camera.isFlying()) return
   if (escStep({ selected: state.selected !== null }) === 'selection') closePanel()
   overview()
 })
@@ -353,18 +393,23 @@ bindActivity(shell.sections.activity, { flyTo, select: focusNode })
 mountLegend(shell.tools.legend, shell.legend)
 shell.tools.fit.addEventListener('click', overview)
 
-/** Free flight is on while the orbit controls are off (galaxy/camera.ts). */
-const flying = (): boolean => (graph.controls() as { enabled?: boolean }).enabled === false
-const markFly = (): void => shell.tools.fly.setAttribute('aria-pressed', String(flying()))
+const markFly = (): void => shell.tools.fly.setAttribute('aria-pressed', String(camera.isFlying()))
 shell.tools.fly.addEventListener('click', () => {
-  camera.setFly(!flying())
+  camera.setFly(!camera.isFlying())
   markFly()
 })
 // After the camera's own F and Esc: it listens first.
 window.addEventListener('keydown', markFly)
 
 // The canvas follows its grid cell: the window, and either sidebar's drag or collapse.
-new ResizeObserver(() => graph.width(shell.canvas.clientWidth).height(shell.canvas.clientHeight)).observe(shell.canvas)
+new ResizeObserver(() => {
+  graph.width(shell.canvas.clientWidth).height(shell.canvas.clientHeight)
+  // Labels keep their size on screen: a taller canvas needs smaller sprite heights.
+  for (const n of state.nodes) {
+    const label = n.group?.getObjectByName('label') as SpriteText | undefined
+    if (label) sizeLabel(n, label)
+  }
+}).observe(shell.canvas)
 // Labels are drawn in Outfit: draw each once more when it has loaded.
 void document.fonts.ready.then(() => {
   for (const n of state.nodes) {

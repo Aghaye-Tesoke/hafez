@@ -7,7 +7,7 @@ const ALWAYS = new Set<Body>(['core', 'star', 'nebula'])
 
 const cases: [Body, number, boolean, boolean, boolean][] = []
 for (const body of BODIES) {
-  for (const distance of [50, 500, 2000]) {
+  for (const distance of [50, 500, 4000]) {
     for (const hovered of [false, true]) {
       for (const selected of [false, true]) {
         const limit = ALWAYS.has(body) ? LABEL.always : LABEL.near
@@ -23,17 +23,17 @@ describe('labelShows', () => {
   })
 
   it('uses the stated thresholds', () => {
-    expect(LABEL).toEqual({ always: 900, near: 120 })
-    expect(labelShows('star', 900, false, false)).toBe(true)
-    expect(labelShows('moon', 120, false, false)).toBe(true)
-    expect(labelShows('moon', 121, false, false)).toBe(false)
+    expect(LABEL).toEqual({ always: 3000, near: 300 })
+    expect(labelShows('star', 3000, false, false)).toBe(true)
+    expect(labelShows('moon', 300, false, false)).toBe(true)
+    expect(labelShows('moon', 301, false, false)).toBe(false)
   })
 })
 
 describe('labelSize', () => {
   it.each([
-    ['core', 6],
-    ['star', 4],
+    ['core', 9],
+    ['star', 6],
     ['nebula', 4],
     ['planet-ringed', 2.5],
     ['planet-banded', 2.5],

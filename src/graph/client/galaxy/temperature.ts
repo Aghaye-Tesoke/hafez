@@ -37,10 +37,13 @@ export function temperatureColor(days: number): string {
 /** Cold enough to be a red dwarf. */
 export const isRedDwarf = (days: number): boolean => days >= COOL_DAYS
 
-/** Glow from `heat` (0..1): how bright the star is and how far its halo reaches. */
+/** Glow from `heat` (0..1): how bright the star's halo is (its opacity) and
+ * how far it reaches, in star radii. Restrained: at heat 1 the halo is half
+ * opaque and reaches 2.2 radii, so a hot star reads as a crisp disc in a soft
+ * halo, never a white blob over its planets. */
 export function glow(heat: number | undefined): { intensity: number; reach: number } {
   const h = Math.min(1, Math.max(0, heat ?? 0))
-  return { intensity: 0.15 + 0.85 * h, reach: 1.5 + 2.5 * h }
+  return { intensity: 0.1 + 0.4 * h, reach: 1.4 + 0.8 * h }
 }
 
 /** A star's radius: the existing node size. */

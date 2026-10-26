@@ -14,7 +14,7 @@ describe('bodyStyle', () => {
     const s = bodyStyle(node, 'star', today)
     expect(s.radius).toBe(starRadius(node))
     expect(s.color).toBe(temperatureColor(0))
-    expect(s.glow.intensity).toBeCloseTo(1)
+    expect(s.glow.intensity).toBeCloseTo(0.5)
     expect(s.alarm).toBe(false)
     expect(s.estimated).toBe(false)
     expect(s.label).toBe('P')
@@ -28,7 +28,7 @@ describe('bodyStyle', () => {
   })
   it('a nebula uses the nebula colour and no glow', () => {
     const s = bodyStyle(project({ status: 'done' }), 'nebula', today)
-    expect(s.color).toBe(GALAXY.nebula)
+    expect(s.color).toBe(GALAXY.nebula[0])
     expect(s.glow).toEqual({ intensity: 0, reach: 0 })
     expect(s.estimated).toBe(false)
   })

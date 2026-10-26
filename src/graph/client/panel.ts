@@ -12,7 +12,7 @@
 // nodes. What the panel says of a note's state is note-view.ts's.
 import { endId, state, type DrawLink, type DrawNode } from './state.js'
 import { renderMarkdown, type RenderOpts } from './markdown.js'
-import { COOL_DAYS, daysSince } from './galaxy/temperature.js'
+import { ANCHORS, daysSince } from './galaxy/temperature.js'
 import { el } from './shell.js'
 import { localDay } from '../../dates.js'
 import { canFinish, finishUrl, finishWarning, typedMatches, type FinishStep } from './finish.js'
@@ -254,7 +254,9 @@ function finishSection(node: DrawNode): void {
 
   if (flow.step === 'idle') {
     sec.append(button('Mark finished', () => go('confirm')),
-      el('p', { class: 'muted caption' }, 'Finishing turns this star into a nebula.'))
+      el('p', { class: 'muted caption' }, node.body === 'core'
+        ? 'Finishing marks this galaxy done; its core stays.'
+        : 'Finishing turns this star into a nebula.'))
   }
   else if (flow.step === 'confirm') {
     const next = button('Continue', () => go('type'))
@@ -330,12 +332,13 @@ function stateText(node: DrawNode, days: number): string {
   return 'Cold'
 }
 
-/** The temperature a star shows, named. */
+/** The temperature a star shows, named, one name per anchor of the cooling
+ * clock (temperature.ts): below anchor i+1's day the star is past anchor i. */
+const TEMPERATURE_WORDS = ['White-blue · this week', 'Pale yellow · 2 weeks', 'Yellow · 3 weeks', 'Orange · almost 4 weeks', 'Red dwarf · 4 weeks or more']
+
 function temperatureText(days: number): string {
-  if (days < 7) return 'White-blue · this week'
-  if (days < 14) return 'Yellow · 2 weeks'
-  if (days < COOL_DAYS) return 'Orange · 3 weeks'
-  return 'Red dwarf · 4 weeks or more'
+  const i = ANCHORS.findIndex((a, k) => k > 0 && days < a.day)
+  return TEMPERATURE_WORDS[i < 0 ? ANCHORS.length - 1 : i - 1]
 }
 
 /** The kind line, then for a star or core its state and Temperature row, for a nebula `Finished`. */

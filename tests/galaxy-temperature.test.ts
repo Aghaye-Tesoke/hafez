@@ -40,9 +40,10 @@ describe('daysSince and isRedDwarf', () => {
 
 describe('glow', () => {
   it('maps heat to intensity and reach', () => {
-    expect(glow(undefined)).toEqual({ intensity: 0.15, reach: 1.5 })
-    expect(glow(1)).toEqual({ intensity: 1, reach: 4 })
-    expect(glow(5)).toEqual({ intensity: 1, reach: 4 })
+    expect(glow(undefined)).toEqual({ intensity: 0.1, reach: 1.4 })
+    expect(glow(1).intensity).toBeCloseTo(0.5, 10)
+    expect(glow(1).reach).toBeCloseTo(2.2, 10)
+    expect(glow(5)).toEqual(glow(1))
   })
 })
 
