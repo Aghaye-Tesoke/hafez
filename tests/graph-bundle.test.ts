@@ -24,7 +24,10 @@ function valueImports(file: string): string[] {
 
 describe('the page bundle', () => {
   it('imports values from outside client/ only from the shared pure modules', () => {
-    const outside = readdirSync(CLIENT).filter(f => f.endsWith('.ts'))
+    // Every module under client/, galaxy/ included.
+    const files = (readdirSync(CLIENT, { recursive: true }) as string[]).map(f => f.replace(/\\/g, '/')).filter(f => f.endsWith('.ts'))
+    expect(files).toContain('galaxy/meshes.ts')
+    const outside = files
       .flatMap(f => valueImports(join(CLIENT, f)).filter(path => !path.startsWith('graph/client/')).map(path => `${f} → ${path}`))
     for (const line of outside) expect(SHARED, line).toContain(line.split(' → ')[1])
   })

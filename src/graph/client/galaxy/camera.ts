@@ -1,6 +1,7 @@
 // src/graph/client/galaxy/camera.ts
 // Camera logic for the galaxy: fly to a body, frame the whole vault, and free
-// flight (F toggles, WASD + drag to look, Escape returns to orbit). The two
+// flight (F toggles, WASD + drag to look, Escape returns to orbit; keys
+// typed into a field never fly). The two
 // position functions are pure; mountCamera is the thin 3d-force-graph wiring.
 // Escape belongs to the camera only in free flight; otherwise the page owns it.
 // Under reduced motion every move is instant.
@@ -48,9 +49,12 @@ const along = (from: Vec3, to: Vec3, dist: number): Vec3 => {
 export const flyPosition = (from: Vec3, target: Vec3, radius: number): Vec3 =>
   along(from, target, 3.5 * radius + 20)
 
-/** Where the camera goes to frame `bounds`: 2.2·radius + 40 out from the centre. */
+/** How far from the centre the camera frames `bounds`: 2.2·radius + 40. */
+export const overviewDistance = (bounds: Bounds): number => bounds.radius * 2.2 + 40
+
+/** Where the camera goes to frame `bounds`: overviewDistance out from the centre. */
 export const overviewPosition = (from: Vec3, bounds: Bounds): Vec3 =>
-  along(from, bounds.center, bounds.radius * 2.2 + 40)
+  along(from, bounds.center, overviewDistance(bounds))
 
 const typing = (t: EventTarget | null): boolean => {
   const el = t as HTMLElement | null
@@ -70,7 +74,8 @@ export function mountCamera(graph: ForceGraph3DInstance, canvas: HTMLElement): C
 
   const tick = (now: number): void => {
     if (!flying || !fly) return
-    fly.update((now - last) / 1000)
+    // FlyControls listens on the window: keys typed into a field must not move the camera.
+    if (!typing(document.activeElement)) fly.update((now - last) / 1000)
     last = now
     frame = requestAnimationFrame(tick)
   }

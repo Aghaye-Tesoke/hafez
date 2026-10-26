@@ -1,8 +1,9 @@
 // src/graph/client/merge.ts
 // Merge by id (#258): a refetched Graph is drawn on the node objects already
-// held, because force-graph keeps a node's position and velocity on the
-// object itself and show() pins drawn nodes by object. Reusing them is what
-// keeps a data refresh from moving the layout.
+// held, because 3d-force-graph keeps a node's position, velocity and pins on
+// the object itself, and its three.js group rides on it too (main.ts show()
+// pins the placed roots by object). Reusing them is what keeps a data refresh
+// from moving the layout or rebuilding the bodies.
 import { GRAPH_NODE_FIELDS } from '../fields.js'
 import type { DrawNode } from './state.js'
 

@@ -103,7 +103,7 @@ export const CANVAS = {
     /** Any edge with a done end: it fades with its node. */
     done: alpha(WHITE, 0.035),
   },
-  /** Outside a hover or a highlight: the edges in this colour. */
+  /** A faded edge. */
   dimEdge: alpha(WHITE, 0.015),
 } as const
 

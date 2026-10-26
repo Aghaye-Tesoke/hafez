@@ -3,12 +3,15 @@
 // alarm"). `bodyStyle` is the pure part: a node and its body kind in, the
 // look out (radius, colour, glow, alarm, estimated). `makeBody` builds the
 // group from a style; `updateBody` retunes it in place so positions and the
-// scene reference stay. Unlit: spheres are MeshBasicMaterial, so a colour
-// reads exactly as its token. The shared textures are made once, lazily, and
-// only when a DOM exists; without one the sprites render untextured.
+// scene reference stay. A done core is drawn as a nebula (the clouds, the
+// remnant and the debris round a dim sphere) and still hosts its satellites.
+// Only a body's solid part is picked: the halos, clouds and debris let clicks
+// through to whatever is behind them. Unlit: spheres are MeshBasicMaterial,
+// so a colour reads exactly as its token. The shared textures are made once,
+// lazily, and only when a DOM exists; without one the sprites render untextured.
 import * as THREE from 'three'
 import type { GraphNode } from '../../../types.js'
-import type { Body } from './bodies.js'
+import { isNebulaCore, type Body } from './bodies.js'
 import { daysSince, glow, isAlarm, isEstimated, starRadius, temperatureColor } from './temperature.js'
 import { GALAXY } from '../tokens.js'
 
@@ -20,6 +23,8 @@ export interface BodyStyle {
   alarm: boolean
   estimated: boolean
   label: string
+  /** Drawn as a nebula remnant: a nebula, or a done core (which keeps hosting its satellites). */
+  nebula: boolean
 }
 
 const isStarLike = (body: Body): boolean => body === 'star' || body === 'core'
@@ -45,9 +50,14 @@ const NEBULA_CLOUDS = [
  * so wide on screen, alternating teal and pink, on fixed angles 0.3 to 1.1 radii out. */
 const NEBULA_HEART = { size: 0.16, opacity: 0.9 }
 const NEBULA_DEBRIS = { count: 8, from: 0.3, to: 1.1, speck: 0.0018, opacity: 0.6 }
+/** A done core's sphere: its colour at this share, dim under the clouds. */
+const DONE_CORE_DIM = 0.35
+/** A raycast that never hits: for the see-through parts of a body. */
+const notPicked = (): void => {}
 const isPlanet = (body: Body): boolean => body.startsWith('planet-')
 
 function bodyColor(node: GraphNode, body: Body, today: string): string {
+  if (body === 'core' && isNebulaCore(node)) return GALAXY.nebula[0]
   switch (body) {
     case 'star':
     case 'core':
@@ -70,14 +80,17 @@ function bodyColor(node: GraphNode, body: Body, today: string): string {
 /** The look of one body today. Pure. */
 export function bodyStyle(node: GraphNode, body: Body, today: string): BodyStyle {
   const radius = isPlanet(body) ? 2.6 : body === 'moon' ? 1.6 : body === 'belt' ? 1.2 : starRadius(node)
+  const nebula = body === 'nebula' || (body === 'core' && isNebulaCore(node))
+  const star = isStarLike(body) && !nebula
   return {
     body,
     radius,
     color: bodyColor(node, body, today),
-    glow: isStarLike(body) ? glow(node.heat) : { intensity: 0, reach: 0 },
-    alarm: isAlarm(node, today),
-    estimated: isEstimated(node) && isStarLike(body),
+    glow: star ? glow(node.heat) : { intensity: 0, reach: 0 },
+    alarm: !nebula && isAlarm(node, today),
+    estimated: isEstimated(node) && star,
     label: node.name,
+    nebula,
   }
 }
 
@@ -126,7 +139,8 @@ function bandMap(): THREE.Texture | undefined {
   return bandTexture ?? undefined
 }
 
-function sprite(name: string, color: string, opacity: number, scale: number): THREE.Sprite {
+/** A soft additive disc; never picked unless `picked`. */
+function sprite(name: string, color: string, opacity: number, scale: number, picked = false): THREE.Sprite {
   const s = new THREE.Sprite(
     new THREE.SpriteMaterial({
       map: glowMap(),
@@ -139,6 +153,7 @@ function sprite(name: string, color: string, opacity: number, scale: number): TH
   )
   s.name = name
   s.scale.setScalar(scale)
+  if (!picked) s.raycast = notPicked
   return s
 }
 
@@ -178,9 +193,10 @@ export function makeBody(style: BodyStyle): THREE.Group {
   const group = new THREE.Group()
   group.userData.body = style.body
   group.userData.radius = style.radius
+  group.userData.nebula = style.nebula
   const { body, radius } = style
 
-  if (body === 'nebula') {
+  if (style.nebula) {
     const R = radius * NEBULA_SPAN
     const at = (angle: number, distance: number, s: THREE.Object3D) => {
       const a = (angle * Math.PI) / 180
@@ -205,25 +221,28 @@ export function makeBody(style: BodyStyle): THREE.Group {
         sizeAttenuation: false,
       }))
       speck.scale.setScalar(NEBULA_DEBRIS.speck)
+      speck.raycast = notPicked
       at(i * (360 / NEBULA_DEBRIS.count) + 15, NEBULA_DEBRIS.from + ((NEBULA_DEBRIS.to - NEBULA_DEBRIS.from) * i) / (NEBULA_DEBRIS.count - 1), speck)
       cloud.add(speck)
     }
     group.add(cloud)
-    group.add(sprite('remnant', GALAXY.remnant, NEBULA_HEART.opacity, 2 * NEBULA_HEART.size * R))
-  } else {
+    // The remnant is a nebula's one picked part: a click on its bright heart selects it.
+    group.add(sprite('remnant', GALAXY.remnant, NEBULA_HEART.opacity, 2 * NEBULA_HEART.size * R, true))
+  }
+  if (body !== 'nebula') {
     const banded = body === 'planet-banded' ? bandMap() : undefined
     const sphere = new THREE.Mesh(
       new THREE.SphereGeometry(radius, 24, 16),
-      new THREE.MeshBasicMaterial(banded ? { map: banded } : { color: new THREE.Color(style.color) }),
+      new THREE.MeshBasicMaterial(banded ? { map: banded } : { color: sphereColor(style) }),
     )
     sphere.name = 'sphere'
     group.add(sphere)
   }
 
-  if (isStarLike(body)) {
+  if (isStarLike(body) && !style.nebula) {
     group.add(sprite('glow', style.color, Math.min(style.glow.intensity, GLOW_OPACITY_MAX), style.glow.reach * radius * 2))
   }
-  if (body === 'core') group.add(sprite('core', style.color, CORE_HALO.opacity, radius * CORE_HALO.scale))
+  if (body === 'core' && !style.nebula) group.add(sprite('core', style.color, CORE_HALO.opacity, radius * CORE_HALO.scale))
   if (body === 'planet-ringed') {
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(radius * 1.6, radius * 2.4, 48),
@@ -237,6 +256,10 @@ export function makeBody(style: BodyStyle): THREE.Group {
   if (style.estimated) group.add(estimatedOutline(radius))
   return group
 }
+
+/** A sphere's colour: its style's, dimmed for a done core. */
+const sphereColor = (style: BodyStyle): THREE.Color =>
+  new THREE.Color(style.color).multiplyScalar(style.nebula ? DONE_CORE_DIM : 1)
 
 const materialOf = (o: THREE.Object3D | undefined): THREE.Material | undefined =>
   (o as THREE.Mesh | undefined)?.material as THREE.Material | undefined
@@ -254,7 +277,7 @@ export function updateBody(group: THREE.Group, style: BodyStyle): void {
   const body = group.userData.body as Body
   const color = new THREE.Color(style.color)
   const sphere = group.getObjectByName('sphere')
-  if (sphere && body !== 'planet-banded') (materialOf(sphere) as THREE.MeshBasicMaterial).color.copy(color)
+  if (sphere && body !== 'planet-banded') (materialOf(sphere) as THREE.MeshBasicMaterial).color.copy(sphereColor(style))
   const halo = group.getObjectByName('glow') as THREE.Sprite | undefined
   if (halo) {
     halo.material.color.copy(color)

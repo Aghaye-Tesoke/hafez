@@ -254,9 +254,7 @@ function finishSection(node: DrawNode): void {
 
   if (flow.step === 'idle') {
     sec.append(button('Mark finished', () => go('confirm')),
-      el('p', { class: 'muted caption' }, node.body === 'core'
-        ? 'Finishing marks this galaxy done; its core stays.'
-        : 'Finishing turns this star into a nebula.'))
+      el('p', { class: 'muted caption' }, 'Finishing turns this star into a nebula.'))
   }
   else if (flow.step === 'confirm') {
     const next = button('Continue', () => go('type'))
@@ -341,11 +339,12 @@ function temperatureText(days: number): string {
   return TEMPERATURE_WORDS[i < 0 ? ANCHORS.length - 1 : i - 1]
 }
 
-/** The kind line, then for a star or core its state and Temperature row, for a nebula `Finished`. */
+/** The kind line, then for a star or core its state and Temperature row, for
+ * a nebula (a done core among them: it shows no clock) `Finished`. */
 function skyLines(node: DrawNode, today: string, byId: Map<string, DrawNode>): HTMLElement[] {
   const lines: HTMLElement[] = [el('p', { class: 'kind label' }, kindText(node, byId))]
-  if (node.body === 'nebula') lines.push(el('p', { class: 'state' }, 'Finished'))
-  if (node.body !== 'star' && node.body !== 'core') return lines
+  if (node.bodyStyle.nebula) lines.push(el('p', { class: 'state' }, 'Finished'))
+  if (node.bodyStyle.nebula || (node.body !== 'star' && node.body !== 'core')) return lines
   const days = daysSince(node.last_active, today)
   lines.push(el('p', { class: 'state' }, stateText(node, days)),
     el('p', { class: 'temp' }, el('span', { class: 'label' }, 'Temperature'),

@@ -106,6 +106,21 @@ describe('belt and resolvePositions', () => {
     const pos = resolvePositions(all, roots, 10)
     expect(dist(pos.get('m1')!, pos.get('s1')!)).toBeCloseTo(26, 6)
   })
+  it('places both notes of a two-note host cycle without throwing', () => {
+    const cycle = new Map<string, Orbit>([
+      ['a', { host: 'b', radius: 10, phase: 0, speed: 0.1, tilt: 0 }],
+      ['b', { host: 'a', radius: 12, phase: 1, speed: 0.1, tilt: 0 }],
+    ])
+    const pos = resolvePositions(cycle, new Map(), 3)
+    for (const id of ['a', 'b']) {
+      const p = pos.get(id)!
+      expect(p, id).toBeDefined()
+      for (const v of [p.x, p.y, p.z]) expect(Number.isFinite(v)).toBe(true)
+    }
+    // The walk breaks the cycle at the origin: one note orbits it, the other orbits that one.
+    expect(dist(pos.get('b')!, { x: 0, y: 0, z: 0 })).toBeLessThanOrEqual(12 + 1e-6)
+    expect(dist(pos.get('a')!, pos.get('b')!)).toBeLessThanOrEqual(10 + 1e-6)
+  })
   it('puts an unknown host at the origin without throwing', () => {
     const orphan = new Map<string, Orbit>([['x', { host: 'ghost', radius: 5, phase: 1, speed: 0.1, tilt: 0.1 }]])
     const pos = resolvePositions(orphan, roots, 7)

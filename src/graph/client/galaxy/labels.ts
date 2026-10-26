@@ -4,8 +4,9 @@
 // close. Hover and selection always name the body. Pure: no DOM, no three.js.
 import type { Body } from './bodies.js'
 
-/** Camera distances in scene units: `always` reaches the overview of the
- * whole sky (belt included, orbits.ts), `near` a star flown to with its planets. */
+/** Camera distances in scene units: `always` reaches the overview of a
+ * small sky (a bigger sky's overview passes its own reach to labelShows),
+ * `near` a star flown to with its planets. */
 export const LABEL = { always: 3000, near: 300 } as const
 
 /** A star orbiting a core is named within this many `near`s: inside its
@@ -13,12 +14,13 @@ export const LABEL = { always: 3000, near: 300 } as const
 export const HOSTED_STAR_REACH = 4
 
 /** `hosted`: the body orbits another (a star in a galaxy). Cores, rogue stars
- * and nebulae are named from afar; a hosted star only from inside its galaxy. */
-export function labelShows(body: Body, distance: number, hovered: boolean, selected: boolean, hosted: boolean): boolean {
+ * and nebulae are named from afar, out to `always`; a hosted star only from
+ * inside its galaxy. */
+export function labelShows(body: Body, distance: number, hovered: boolean, selected: boolean, hosted: boolean, always: number = LABEL.always): boolean {
   if (hovered || selected) return true
   if (body === 'star' && hosted) return distance <= LABEL.near * HOSTED_STAR_REACH
   const far = body === 'core' || body === 'star' || body === 'nebula'
-  return distance <= (far ? LABEL.always : LABEL.near)
+  return distance <= (far ? always : LABEL.near)
 }
 
 /** Sprite text height in scene units. */

@@ -1,6 +1,7 @@
 // src/graph/client/motion.ts
 // prefers-reduced-motion (K5), the page's one query of it: while it matches,
-// every camera move is instant (main.ts) and a pulse's ring stays put (live.ts).
+// every camera move is instant (galaxy/camera.ts), the alarm ring holds still
+// and orbits stop turning (main.ts), and no supernova bursts.
 const query = matchMedia('(prefers-reduced-motion: reduce)')
 
 export const reducedMotion = (): boolean => query.matches

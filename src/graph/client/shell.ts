@@ -111,7 +111,7 @@ export function mountShell(): Shell {
   const sections = Object.fromEntries(SECTIONS.map(([id, title]) => [id, section(id, title)])) as Record<SectionId, Section>
   const left = el('nav', { id: 'left', class: 'side', 'aria-label': 'Vault' }, ...SECTIONS.map(([id]) => sections[id].root))
   const canvas = el('main', { id: 'canvas', 'aria-label': 'Galaxy' })
-  const hint = el('p', { id: 'hint' }, 'Scroll to fly · drag to look around · click a star for details')
+  const hint = el('p', { id: 'hint' }, 'Scroll to zoom · drag to look around · click a star for details')
   const note = el('div', { id: 'note' })
   const right = el('aside', { id: 'right', class: 'side', 'aria-label': 'Note' }, note)
 

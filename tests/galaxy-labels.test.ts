@@ -44,6 +44,16 @@ describe('labelShows for a hosted star', () => {
   })
 })
 
+describe('labelShows with a wider overview reach', () => {
+  it('names far bodies out to the reach it is given; near bodies keep LABEL.near', () => {
+    expect(labelShows('core', 5000, false, false, false)).toBe(false)
+    expect(labelShows('core', 5000, false, false, false, 6000)).toBe(true)
+    expect(labelShows('nebula', 6001, false, false, false, 6000)).toBe(false)
+    expect(labelShows('moon', 301, false, false, false, 6000)).toBe(false)
+    expect(labelShows('star', LABEL.near * HOSTED_STAR_REACH + 1, false, false, true, 6000)).toBe(false)
+  })
+})
+
 describe('labelSize', () => {
   it.each([
     ['core', 9],

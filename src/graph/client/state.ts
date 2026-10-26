@@ -5,15 +5,14 @@
 import type { Group } from 'three'
 import type { GraphEdge, GraphNode } from '../../types.js'
 import { localDay } from '../../dates.js'
-import { edgeStyle, nodeStyle, type EdgeStyle, type NodeStyle } from './style.js'
+import { edgeStyle, type EdgeStyle } from './style.js'
 import { isDone, liveScope } from './signals.js'
 import { reuse } from './merge.js'
 import { bodyOf, childrenOf, hostOf, type Body } from './galaxy/bodies.js'
 import { bodyStyle, type BodyStyle } from './galaxy/meshes.js'
 
-/** A Graph node as drawn: the simulation adds the position, apply adds the styles. */
+/** A Graph node as drawn: the simulation adds the position, apply adds the body. */
 export interface DrawNode extends GraphNode {
-  style: NodeStyle
   /** What the node is in the sky (galaxy/bodies.ts), and its look today. */
   body: Body
   bodyStyle: BodyStyle
@@ -62,7 +61,7 @@ export function applyGraph(graph: { nodes: GraphNode[]; edges: GraphEdge[] }): v
   state.nodes = graph.nodes.map(n => {
     const body = bodyOf(n, children.has(n.id))
     const host = isNoteKind(n) ? hostOf(n, graph.edges) : undefined
-    const next: DrawNode = { ...n, style: nodeStyle(n, today, children.has(n.id)), body, bodyStyle: bodyStyle(n, body, today) }
+    const next: DrawNode = { ...n, body, bodyStyle: bodyStyle(n, body, today) }
     if (host !== undefined) next.host = host
     // A node that no longer orbits anything loses the host it had.
     else delete held.get(n.id)?.host

@@ -36,7 +36,8 @@ export const isNebulaCore = (node: GraphNode): boolean =>
 /** The body a node is. A project is always a core, star or nebula, linked or
  * not: an unlinked project is a rogue star, never a belt body. For the rest,
  * unlinked wins (the belt), then having children (a done project with children
- * stays a core: its satellites keep it), then the kind. */
+ * stays a core: its satellites keep it, though it is drawn as a nebula,
+ * meshes.ts), then the kind. */
 export function bodyOf(node: GraphNode, hasChildren: boolean): Body {
   const project = node.kind === 'entity' && node.type === 'project'
   if (node.unlinked && !project) return 'belt'

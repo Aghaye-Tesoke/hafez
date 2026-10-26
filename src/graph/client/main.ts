@@ -3,7 +3,8 @@
 // composition root of the galaxy. The stylesheet and the shell, one
 // 3d-force-graph instance in the shell's canvas with its callbacks and forces
 // set once, one bloom pass, the camera (galaxy/camera.ts), then the Graph
-// loaded from the server. The modules hold the rules; this file wires them:
+// loaded from the server (or, where the browser cannot draw WebGL, only a
+// message saying so). The modules hold the rules; this file wires them:
 // - what is drawn: visible3d(), the notes the scope shows and the links
 //   between them, with every orbit worked out over them (galaxy/orbits.ts);
 // - where: the force simulation places the roots only (a charge, and the
@@ -23,9 +24,9 @@ import { bindActivity } from './activity.js'
 import { stylesheet } from './stylesheet.js'
 import { mountShell } from './shell.js'
 import { mountLegend } from './legend.js'
-import { fetchGraph, mountStates } from './states.js'
+import { fetchGraph, mountStates, type Loaded } from './states.js'
 import { clearMiss, offerClosest } from './miss.js'
-import { mountSections } from './sections.js'
+import { mountSections, type Sections } from './sections.js'
 import { escStep } from './view.js'
 import { readView, writeView } from './url.js'
 import { mountNotice } from './notice.js'
@@ -33,10 +34,10 @@ import { reducedMotion } from './motion.js'
 import { alpha, CANVAS, FONT, GALAXY } from './tokens.js'
 import { isNebulaCore } from './galaxy/bodies.js'
 import { beltOf, ORBIT, orbitsOf, resolvePositions, type Orbit, type Vec3 } from './galaxy/orbits.js'
-import { labelShows, labelSize } from './galaxy/labels.js'
+import { LABEL, labelShows, labelSize } from './galaxy/labels.js'
 import { burstProgress, burstsFor, storageSeen } from './galaxy/supernova.js'
 import { burstMesh, disposeBody, makeBody, NEBULA_SPAN, tickAlarm, tickBurst, updateBody, type BodyStyle } from './galaxy/meshes.js'
-import { mountCamera, type Bounds } from './galaxy/camera.js'
+import { mountCamera, overviewDistance, type Bounds, type Camera } from './galaxy/camera.js'
 
 /** The simulation: the roots' charge, the ticks run before the first frame,
  * and how many ticks the bodies already placed stay pinned after a view
@@ -65,6 +66,10 @@ const BELT_MARGIN = 1.3
 const OVERVIEW_ELEVATION = 0.6
 /** Every link draws at this opacity, in its relation's hue. */
 const LINK_OPACITY = 0.08
+/** Far bodies stay named out to this share beyond the overview's distance. */
+const OVERVIEW_LABEL_REACH = 1.2
+/** What the canvas says where the galaxy cannot be drawn at all. */
+const NO_WEBGL = 'This browser cannot draw WebGL, so the galaxy cannot be shown.'
 
 document.head.append(Object.assign(document.createElement('style'), { textContent: stylesheet() }))
 const shell = mountShell()
@@ -88,47 +93,59 @@ let beltRadius: number = ORBIT.beltMin
 let beltPending = false
 /** The render loop's one scratch vector: no allocation per body per frame. */
 const scratch = new Vector3()
+/** How far off cores, rogue stars and nebulae stay named: the overview's
+ * distance and a margin, never under LABEL.always. */
+let labelReach: number = LABEL.always
+/** Each load's ticket: a Graph fetched for an older load is never applied over a newer one. */
+let loads = 0
 
 /** The library types its constructor's node and link types on the default export's interface. */
 const Galaxy3D = ForceGraph3D as unknown as new (host: HTMLElement) => ForceGraph3DInstance<DrawNode, DrawLink>
 
-// `.backgroundColor(` first: the evidence harness finds the instance by it.
-const graph = new Galaxy3D(shell.canvas)
-  .backgroundColor(GALAXY.space)
-  .width(shell.canvas.clientWidth)
-  .height(shell.canvas.clientHeight)
-  .showNavInfo(false)
-  // Labels are sprites in the sky: no tooltip repeats them.
-  .nodeLabel(() => '')
-  .nodeThreeObject(bodyObject)
-  .nodeThreeObjectExtend(false)
-  .linkOpacity(LINK_OPACITY)
-  .linkColor(l => opaque(l.style.color))
-  .linkVisibility(l => l.relation !== 'parent')
-  .enableNodeDrag(false)
-  .onNodeClick(onClick)
-  .onNodeHover(node => { state.hovered = node })
-  .onEngineTick(onTick)
-  .warmupTicks(FORCES.warmupTicks)
-  // The engine never stops: hosted bodies move along their orbits every
-  // tick, and their links follow them.
-  .cooldownTime(Infinity)
-  .d3AlphaMin(0)
+type Galaxy = ForceGraph3DInstance<DrawNode, DrawLink>
+/** Set once by start(): the graph, the camera, and what draws over the canvas. */
+let graph!: Galaxy
+let camera!: Camera
+let showState!: (loaded: Loaded) => void
+let say!: (text: string) => void
+let sections!: Sections
 
-// Forces act on roots only: a hosted body neither repels nor pulls.
-graph.d3Force('charge')!.strength((n: DrawNode) => orbits.has(n.id) ? 0 : FORCES.charge)
-const linkForce = graph.d3Force('link')!
-const linkStrength = linkForce.strength() as (l: DrawLink, i: number, links: DrawLink[]) => number
-linkForce.strength((l: DrawLink, i: number, links: DrawLink[]) =>
-  l.relation === 'parent' || orbits.has(endId(l.source)) || orbits.has(endId(l.target)) ? 0 : linkStrength(l, i, links))
+/** The 3D graph in the shell's canvas, its callbacks, forces and bloom set
+ * once. Throws where the browser cannot make a WebGL context. */
+function mountGraph(): Galaxy {
+  // `.backgroundColor(` first: the evidence harness finds the instance by it.
+  const graph = new Galaxy3D(shell.canvas)
+    .backgroundColor(GALAXY.space)
+    .width(shell.canvas.clientWidth)
+    .height(shell.canvas.clientHeight)
+    .showNavInfo(false)
+    // Labels are sprites in the sky: no tooltip repeats them.
+    .nodeLabel(() => '')
+    .nodeThreeObject(bodyObject)
+    .nodeThreeObjectExtend(false)
+    .linkOpacity(LINK_OPACITY)
+    .linkColor(l => opaque(l.style.color))
+    .linkVisibility(l => l.relation !== 'parent')
+    .enableNodeDrag(false)
+    .onNodeClick(onClick)
+    .onNodeHover(node => { state.hovered = node })
+    .onEngineTick(onTick)
+    .warmupTicks(FORCES.warmupTicks)
+    // The engine never stops: hosted bodies move along their orbits every
+    // tick, and their links follow them.
+    .cooldownTime(Infinity)
+    .d3AlphaMin(0)
 
-graph.postProcessingComposer().addPass(new UnrealBloomPass(new Vector2(shell.canvas.clientWidth, shell.canvas.clientHeight), BLOOM.strength, BLOOM.radius, BLOOM.threshold))
+  // Forces act on roots only: a hosted body neither repels nor pulls.
+  graph.d3Force('charge')!.strength((n: DrawNode) => orbits.has(n.id) ? 0 : FORCES.charge)
+  const linkForce = graph.d3Force('link')!
+  const linkStrength = linkForce.strength() as (l: DrawLink, i: number, links: DrawLink[]) => number
+  linkForce.strength((l: DrawLink, i: number, links: DrawLink[]) =>
+    l.relation === 'parent' || orbits.has(endId(l.source)) || orbits.has(endId(l.target)) ? 0 : linkStrength(l, i, links))
 
-// The graph empties its host when it mounts: everything over the canvas comes after.
-const camera = mountCamera(graph as unknown as ForceGraph3DInstance, shell.canvas)
-const showState = mountStates(shell.canvas, () => void load())
-const say = mountNotice(shell.canvas)
-shell.canvas.append(shell.hint)
+  graph.postProcessingComposer().addPass(new UnrealBloomPass(new Vector2(shell.canvas.clientWidth, shell.canvas.clientHeight), BLOOM.strength, BLOOM.radius, BLOOM.threshold))
+  return graph
+}
 
 /** An edge colour at full alpha: LINK_OPACITY is the one opacity a link has. */
 function opaque(color: string): string {
@@ -180,12 +197,14 @@ function sizeLabel(n: DrawNode, label: SpriteText): void {
   const fov = ((graph.camera() as { fov?: number }).fov ?? 40) * Math.PI / 180
   const px = Math.max(LABEL_PX.min, labelSize(n.body) * LABEL_PX.perUnit)
   const height = px * 2 * Math.tan(fov / 2) / Math.max(1, shell.canvas.clientHeight)
+  // Only a sprite that regenerated has its native scale: an unchanged one
+  // holds the scale the render loop set, already divided by its body's factor.
   if (Math.abs(label.textHeight - height) >= 1e-9) {
     label.textHeight = height
     label.padding = height * LABEL_PX.padding
     label.borderRadius = height * LABEL_PX.padding
-  }
-  redrawn(label)
+    redrawn(label)
+  } else if (label.userData.width === undefined) redrawn(label)
 }
 
 /** A label just redrew its canvas and set its own scale: keep it as the scale
@@ -267,7 +286,7 @@ function onTick(): void {
     overviewPending = false
     const { center } = bounds()
     graph.cameraPosition({ x: center.x, y: center.y + OVERVIEW_ELEVATION, z: center.z + 1 }, center, 0)
-    camera.overview(bounds(), 0)
+    frameOverview(0)
   }
   if (flyPending?.x !== undefined) {
     const n = flyPending
@@ -288,7 +307,14 @@ function bounds(): Bounds {
 }
 
 function overview(): void {
-  camera.overview(bounds(), OVERVIEW_MS)
+  frameOverview(OVERVIEW_MS)
+}
+
+/** Frame the sky, and keep far bodies named out to where the overview stands. */
+function frameOverview(ms: number): void {
+  const b = bounds()
+  camera.overview(b, ms)
+  labelReach = Math.max(LABEL.always, overviewDistance(b) * OVERVIEW_LABEL_REACH)
 }
 
 /** Fly to a body, or, while the simulation has not placed it yet, as soon as it has. */
@@ -304,7 +330,7 @@ function flyTo(n: DrawNode): void {
  * it out to the farthest (0.75 of an orbit's radius puts it in view at the
  * camera's fly-to distance). */
 function frameRadius(n: DrawNode): number {
-  let reach = n.body === 'nebula' ? n.bodyStyle.radius * NEBULA_SPAN : n.bodyStyle.radius
+  let reach = n.bodyStyle.nebula ? n.bodyStyle.radius * NEBULA_SPAN : n.bodyStyle.radius
   for (const o of orbits.values()) if (o.host === n.id) reach = Math.max(reach, o.radius * 0.75)
   return reach
 }
@@ -330,14 +356,15 @@ function frame(now: number): void {
     // Under reduced motion the alarm ring holds still at its built opacity.
     if (n.bodyStyle.alarm && !reduced) tickAlarm(group, now / 1000)
     const distance = camera.distanceTo(scratch.set(n.x ?? 0, n.y ?? 0, n.z ?? 0))
-    const starLike = n.body === 'star' || n.body === 'core'
+    // A done core is drawn as a nebula: its clouds are never scaled up.
+    const starLike = (n.body === 'star' || n.body === 'core') && !n.bodyStyle.nebula
     const k = starLike ? Math.max(1, MIN_BODY_PX * distance * perPx / n.bodyStyle.radius) : 1
     if (group.scale.x !== k) group.scale.setScalar(k)
     const label = group.getObjectByName('label') as SpriteText | undefined
     if (!label) continue
     const hovered = state.hovered === n
     const selected = state.selected === n
-    label.visible = labelShows(n.body, distance, hovered, selected, orbits.has(n.id))
+    label.visible = labelShows(n.body, distance, hovered, selected, orbits.has(n.id), labelReach)
     if (!label.visible) continue
     const text = labelText(n, hovered)
     if (label.text !== text) {
@@ -367,7 +394,6 @@ function frame(now: number): void {
   tickFlares(now)
   requestAnimationFrame(frame)
 }
-requestAnimationFrame(frame)
 
 /** localStorage, or null where reading it throws (blocked site data). */
 function safeLocalStorage(): Storage | null {
@@ -421,74 +447,16 @@ function revealSaying(node: DrawNode): void {
   else if (widened === 'scope') say(`Everything turned on to show ${node.name}: Live work hides done work.`)
 }
 
-bindPanel(shell.note, {
-  ease: flyTo,
-  // The render loop draws every frame: a selection needs no extra one.
-  redraw: () => {},
-  drawn: () => drawn,
-  // The selection is the URL's focus.
-  selected: node => {
-    if (node) clearMiss()
-    sections.markSelected(node?.id ?? null)
-    writeView({ focus: node?.id ?? null })
-  },
-  focus: focusNode,
-  reload,
-})
-
-/** Esc steps back one level: the selection closes and the camera returns to
- * the overview; at the overview it frames it again. The search box, the
- * legend and the finish flow keep their own Esc; in free flight Esc is the
- * camera's alone (it leaves flight and frames the overview, the panel stays). */
-document.addEventListener('keydown', event => {
-  if (event.key !== 'Escape' || event.defaultPrevented || camera.isFlying()) return
-  if (escStep({ selected: state.selected !== null }) === 'selection') closePanel()
-  overview()
-})
-
-mountScope(shell.scope, shell.tools.knowledge, show)
-// Live work and Unlinked: a row selects and flies as search does.
-const sections = mountSections(shell.sections, focusNode)
-// Search reaches every note, hidden ones included: picking one reveals it.
-mountSearch(shell.search, { notes: () => state.nodes.filter(isNote), shows: scopeShows, pick: focusNode })
-bindActivity(shell.sections.activity, { flyTo, select: focusNode })
-mountLegend(shell.tools.legend, shell.legend)
-shell.tools.fit.addEventListener('click', overview)
-
-const markFly = (): void => shell.tools.fly.setAttribute('aria-pressed', String(camera.isFlying()))
-shell.tools.fly.addEventListener('click', () => {
-  camera.setFly(!camera.isFlying())
-  markFly()
-})
-// After the camera's own F and Esc: it listens first.
-window.addEventListener('keydown', markFly)
-
-// The canvas follows its grid cell: the window, and either sidebar's drag or collapse.
-new ResizeObserver(() => {
-  graph.width(shell.canvas.clientWidth).height(shell.canvas.clientHeight)
-  // Labels keep their size on screen: a taller canvas needs smaller sprite heights.
-  for (const n of state.nodes) {
-    const label = n.group?.getObjectByName('label') as SpriteText | undefined
-    if (label) sizeLabel(n, label)
-  }
-}).observe(shell.canvas)
-// Labels are drawn in Outfit: draw each once more when it has loaded.
-void document.fonts.ready.then(() => {
-  for (const n of state.nodes) {
-    const label = n.group?.getObjectByName('label') as SpriteText | undefined
-    if (!label) continue
-    label.fontFace = FONT.display
-    redrawn(label)
-  }
-})
-
 /** The URL's focus, selected once the first load has drawn the sky. */
 let initialFocus = readView().focus
 let loadedOnce = false
 
 /** Fetch the Graph and draw it; false, with the failure on the canvas, when it did not load. */
 async function load(): Promise<boolean> {
+  const ticket = ++loads
   const loaded = await fetchGraph()
+  // A newer load is under way: its Graph, not this older one, is drawn.
+  if (ticket !== loads) return false
   showState(loaded)
   if (!('graph' in loaded)) return false
   const before = new Map(state.nodes.map(n => [n.id, n.bodyStyle]))
@@ -515,13 +483,13 @@ async function load(): Promise<boolean> {
 }
 
 /** Each body retuned to its style today; one that became another kind of
- * body (a star finished into a nebula) is built again. */
+ * body (a star finished into a nebula, a core finished into a done core) is built again. */
 function restyle(): void {
   let rebuilt = false
   for (const n of state.nodes) {
     const group = n.group
     if (!group) continue
-    if (group.userData.body === n.body) {
+    if (group.userData.body === n.body && group.userData.nebula === n.bodyStyle.nebula) {
       updateBody(group, n.bodyStyle)
       placeLabel(n)
     } else {
@@ -534,12 +502,12 @@ function restyle(): void {
   if (rebuilt) graph.nodeThreeObject(n => bodyObject(n))
 }
 
-/** The header's counts: projects, galaxies (cores) and finished (nebulae). */
+/** The header's counts: projects, galaxies (live cores) and finished (nebulae, done cores among them). */
 function counts(): void {
   const notes = state.nodes.filter(isNote)
   const projects = notes.filter(n => n.kind === 'entity' && n.type === 'project').length
-  const galaxies = notes.filter(n => n.body === 'core').length
-  const finished = notes.filter(n => n.body === 'nebula').length
+  const galaxies = notes.filter(n => n.body === 'core' && !n.bodyStyle.nebula).length
+  const finished = notes.filter(n => n.bodyStyle.nebula).length
   shell.counts.textContent = `${projects} projects · ${galaxies} galaxies · ${finished} finished`
 }
 
@@ -557,7 +525,6 @@ function supernovae(before: Map<string, BodyStyle>): void {
     bursts.set(id, { group, start: now })
   }
 }
-void load()
 
 /** A commit's reload: the new Graph merged in and drawn, and an open panel
  * following the new data (closed if its note is gone or hidden). The camera
@@ -567,4 +534,83 @@ async function reload(): Promise<void> {
   if (state.selected && !selectNode(state.selected.id, false)) closePanel()
 }
 
-followCommits(() => drawn.nodes, reload)
+/** Mount the galaxy; where WebGL cannot be drawn, only say so on the canvas. */
+function start(): void {
+  try {
+    graph = mountGraph()
+  } catch {
+    mountStates(shell.canvas, () => location.reload())({ problem: NO_WEBGL })
+    return
+  }
+  // The graph empties its host when it mounts: everything over the canvas comes after.
+  camera = mountCamera(graph as unknown as ForceGraph3DInstance, shell.canvas)
+  showState = mountStates(shell.canvas, () => void load())
+  say = mountNotice(shell.canvas)
+  shell.canvas.append(shell.hint)
+  requestAnimationFrame(frame)
+
+  bindPanel(shell.note, {
+    ease: flyTo,
+    // The render loop draws every frame: a selection needs no extra one.
+    redraw: () => {},
+    drawn: () => drawn,
+    // The selection is the URL's focus.
+    selected: node => {
+      if (node) clearMiss()
+      sections.markSelected(node?.id ?? null)
+      writeView({ focus: node?.id ?? null })
+    },
+    focus: focusNode,
+    reload,
+  })
+
+  /** Esc steps back one level: the selection closes and the camera returns to
+   * the overview; at the overview it frames it again. The search box, the
+   * legend and the finish flow keep their own Esc; in free flight Esc is the
+   * camera's alone (it leaves flight and frames the overview, the panel stays). */
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || event.defaultPrevented || camera.isFlying()) return
+    if (escStep({ selected: state.selected !== null }) === 'selection') closePanel()
+    overview()
+  })
+
+  mountScope(shell.scope, shell.tools.knowledge, show)
+  // Live work and Unlinked: a row selects and flies as search does.
+  sections = mountSections(shell.sections, focusNode)
+  // Search reaches every note, hidden ones included: picking one reveals it.
+  mountSearch(shell.search, { notes: () => state.nodes.filter(isNote), shows: scopeShows, pick: focusNode })
+  bindActivity(shell.sections.activity, { flyTo, select: focusNode })
+  mountLegend(shell.tools.legend, shell.legend)
+  shell.tools.fit.addEventListener('click', overview)
+
+  const markFly = (): void => shell.tools.fly.setAttribute('aria-pressed', String(camera.isFlying()))
+  shell.tools.fly.addEventListener('click', () => {
+    camera.setFly(!camera.isFlying())
+    markFly()
+  })
+  // After the camera's own F and Esc: it listens first.
+  window.addEventListener('keydown', markFly)
+
+  // The canvas follows its grid cell: the window, and either sidebar's drag or collapse.
+  new ResizeObserver(() => {
+    graph.width(shell.canvas.clientWidth).height(shell.canvas.clientHeight)
+    // Labels keep their size on screen: a taller canvas needs smaller sprite heights.
+    for (const n of state.nodes) {
+      const label = n.group?.getObjectByName('label') as SpriteText | undefined
+      if (label) sizeLabel(n, label)
+    }
+  }).observe(shell.canvas)
+  // Labels are drawn in Outfit: draw each once more when it has loaded.
+  void document.fonts.ready.then(() => {
+    for (const n of state.nodes) {
+      const label = n.group?.getObjectByName('label') as SpriteText | undefined
+      if (!label) continue
+      label.fontFace = FONT.display
+      redrawn(label)
+    }
+  })
+
+  void load()
+  followCommits(() => drawn.nodes, reload)
+}
+start()
