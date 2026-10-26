@@ -24,6 +24,11 @@ export interface Live {
    * Graph is the one already cached. Queued with the polls, so it never
    * overlaps their rebuilds. A rebuild failure rejects and sends nothing. */
   rebuildAndBroadcast(): Promise<void>
+  /** Rebuild the cached Graph and send nothing: the caller has just written the
+   * Vault itself (a finish) and wants its next `/graph` to show it, while the
+   * poll's own frame for that commit still goes out later. Queued with the
+   * polls. A rebuild failure rejects; once stopped it does nothing. */
+  rebuildNow(): Promise<void>
   /** Stop polling and wait out a poll in flight, so nothing touches the Hafez
    * instance afterwards (its index is closed next). */
   stop(): Promise<void>
@@ -116,6 +121,10 @@ export async function startLive(os: Hafez, pollMs: number, rebuild: () => Promis
       if (!await rebuild()) return
       const frame = commitFrame({ cursor: cursor ?? '', changes: [] })
       for (const res of clients) res.write(frame)
+    }),
+    rebuildNow: () => serial(async () => {
+      if (stopped) return
+      await rebuild()
     }),
     async stop() {
       stopped = true

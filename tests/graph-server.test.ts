@@ -412,6 +412,14 @@ describe('POST /note/:slug/finish', () => {
     expect((await os.changelog('', 50)).length).toBe(commits)
   })
 
+  it('a finish rebuilds the Graph before answering: the next GET /graph already shows the project done', async () => {
+    await os.create('entity', 'Converges', { type: 'project' })
+    const reply = await finish('converges', { Origin: origin() })
+    expect(reply.status).toBe(200)
+    const nodes = JSON.parse((await get(`${server.url}/graph`)).body).nodes as Array<Record<string, unknown>>
+    expect(nodes.find(n => n.id === 'converges')!.status).toBe('done')
+  })
+
   it('only /note/<one non-empty segment>/finish is the finish path', async () => {
     const note = await get(`${server.url}/note/finish`)
     expect(note.status).toBe(404)
@@ -738,12 +746,28 @@ describe('heat (#galaxy)', () => {
     }
   })
 
-  it('a collector failure does not crash the server: collect() resolves and the Graph still serves', async () => {
+  it('a sidecar that cannot be written does not crash the server: collect() resolves and the Graph still serves', async () => {
     const blocked = join(TMP, 'blocked')
     writeFileSync(blocked, 'a file, not a directory')
     const live = await start({ transcriptRoot: root, sidecarPath: join(blocked, 'hours.json') })
     await expect(live.collect()).resolves.toBeUndefined()
     expect((await get(`${live.url}/graph`)).status).toBe(200)
+  })
+
+  it('a scan that throws does not crash the server: collect() resolves, nothing is printed and the Graph still serves', async () => {
+    const collector = await import('../src/graph/heat/collect.js')
+    const scan = vi.spyOn(collector, 'scanHeat').mockRejectedValue(new Error('scan boom'))
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      const live = await start({ transcriptRoot: root, sidecarPath: join(TMP, 'hours-scan-throws.json') })
+      await expect(live.collect()).resolves.toBeUndefined()
+      expect(scan).toHaveBeenCalled()
+      expect(err).not.toHaveBeenCalled()
+      expect((await get(`${live.url}/graph`)).status).toBe(200)
+    } finally {
+      scan.mockRestore()
+      err.mockRestore()
+    }
   })
 
   it('a sidecar that cannot be written still feeds the Graph and reports once on stderr', async () => {

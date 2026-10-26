@@ -6,7 +6,7 @@
 // unreadable, torn or foreign-version file reads as empty, so a bad sidecar
 // costs one re-scan and never breaks `hafez graph`. Writes go to a .tmp file and
 // are renamed over the target, so a crash mid-write leaves the old file intact.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { getConfigDir } from '../../cli/resolve-vault.js'
 import type { DayMinutes } from './heat.js'
@@ -48,6 +48,7 @@ export function writeSidecar(path: string, sidecar: Sidecar): void {
   const tmp = `${path}.tmp`
   // Owner-only: the cache holds transcript paths. Advisory on Windows.
   writeFileSync(tmp, JSON.stringify(sidecar, null, 2), { mode: 0o600 })
+  chmodSync(tmp, 0o600) // mode applies only on create: a leftover .tmp keeps its old one
   renameSync(tmp, path)
 }
 

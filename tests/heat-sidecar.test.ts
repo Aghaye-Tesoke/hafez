@@ -1,6 +1,6 @@
 // tests/heat-sidecar.test.ts
 import { describe, expect, it, afterAll } from 'vitest'
-import { existsSync, mkdirSync, statSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, statSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { defaultSidecarPath, emptySidecar, readSidecar, writeSidecar, type Sidecar } from '../src/graph/heat/sidecar.js'
@@ -64,5 +64,14 @@ describe('hours sidecar', () => {
     writeSidecar(path, sample)
     expect(existsSync(path)).toBe(true)
     expect(existsSync(`${path}.tmp`)).toBe(false)
+  })
+
+  it.skipIf(process.platform === 'win32')('a leftover .tmp with a looser mode does not loosen the final file', () => {
+    const path = join(ROOT, 'mode', 'hours.json')
+    mkdirSync(join(ROOT, 'mode'), { recursive: true })
+    writeFileSync(`${path}.tmp`, 'old', { mode: 0o644 })
+    chmodSync(`${path}.tmp`, 0o644)
+    writeSidecar(path, sample)
+    expect(statSync(path).mode & 0o777).toBe(0o600)
   })
 })

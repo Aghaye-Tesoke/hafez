@@ -17,7 +17,7 @@ import type { InternalHafez } from '../internal.js'
 import { GRAPH_LAYERS } from '../contracts.js'
 import { readJsonOf } from '../read-json.js'
 import { parseSessionLog } from '../document.js'
-import { DEFAULT_POLL_MS, startLive } from './live.js'
+import { DEFAULT_POLL_MS, startLive, type Live } from './live.js'
 import { FONT_FILES } from './fonts.js'
 import { activity } from './activity.js'
 import { withHeat } from './heat/apply.js'
@@ -145,7 +145,7 @@ export async function startGraphServer({ os, port, pollMs = DEFAULT_POLL_MS, hea
       // The finish path answers POST alone: Allow names the one method it takes.
       if (req.method !== 'POST') return send(res, 405, { type: 'text/plain', body: 'Method Not Allowed' }, { Allow: 'POST' })
       if (!allowedOrigins.has(req.headers.origin ?? '')) return send(res, 403, { type: 'text/plain', body: 'Forbidden' })
-      return void sendFinish(os, res, path.slice(NOTE_PREFIX.length, -FINISH_SUFFIX.length))
+      return void sendFinish(os, live, res, path.slice(NOTE_PREFIX.length, -FINISH_SUFFIX.length))
     }
     if (req.method !== 'GET') return send(res, 405, { type: 'text/plain', body: 'Method Not Allowed' }, { Allow: 'GET' })
     if (path === '/events') return live.subscribe(req, res)
@@ -285,10 +285,11 @@ function isFinishPath(path: string): boolean {
 /** `POST /note/:slug/finish`: the project's status becomes done. Only a
  * project can finish: any other note is 409 and nothing is written. Finishing a
  * done project succeeds again and writes nothing (no commit, no log entry). A
- * miss is 404 with the closest slugs, as for `/note`; the live poll sees the
- * commit, so no rebuild here. The Session Log entry names the agent
- * `hafez-graph`. */
-async function sendFinish(os: Hafez, res: ServerResponse, encoded: string): Promise<void> {
+ * miss is 404 with the closest slugs, as for `/note`. A finish that wrote
+ * rebuilds the cached Graph before it answers, so the page's refetch sees the
+ * project done; the live poll's frame for the commit still follows. The
+ * Session Log entry names the agent `hafez-graph`. */
+async function sendFinish(os: Hafez, live: Live, res: ServerResponse, encoded: string): Promise<void> {
   let slug = encoded
   try {
     slug = decodeURIComponent(encoded)
@@ -296,7 +297,11 @@ async function sendFinish(os: Hafez, res: ServerResponse, encoded: string): Prom
     if (note.kind !== 'entity' || note.frontmatter.type !== 'project') {
       return send(res, 409, { type: 'application/json', body: JSON.stringify({ slug, error: 'not a project' }) })
     }
-    if (note.frontmatter.status !== 'done') await os.update(slug, { status: 'done', agent: 'hafez-graph' })
+    if (note.frontmatter.status !== 'done') {
+      await os.update(slug, { status: 'done', agent: 'hafez-graph' })
+      // The write landed; a failed rebuild is the poll's to catch up on, not a failed finish.
+      await live.rebuildNow().catch(() => undefined)
+    }
     send(res, 200, { type: 'application/json', body: JSON.stringify({ slug, status: 'done' }) })
   } catch (err) {
     sendMiss(res, slug, err)
