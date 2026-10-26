@@ -3,7 +3,7 @@
 // only the pure, dependency-free modules listed here. Anything else would pull
 // node-side code (the index, git, the fs) into the browser bundle.
 import { describe, expect, it } from 'vitest'
-import { readdirSync, readFileSync } from 'fs'
+import { readdirSync, readFileSync, statSync } from 'fs'
 import { dirname, join, relative, resolve } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -32,4 +32,6 @@ describe('the page bundle', () => {
   it('the shared modules import nothing themselves', () => {
     for (const path of SHARED) expect(valueImports(join(SRC, path)), path).toEqual([])
   })
+
+  it('stays under 1.5 MB minified', () => expect(statSync(resolve(SRC, '..', 'dist', 'graph', 'client.js')).size).toBeLessThan(1.5 * 1024 * 1024))
 })
