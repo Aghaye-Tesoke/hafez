@@ -26,12 +26,14 @@ export interface Orbit {
  * at least 4x the largest star radius (signals.ts size: 10.2) plus the glow
  * reach (2.2 radii at heat 1, temperature.ts); moons sit just outside that
  * halo, inside the planets; sibling stars round a core leave room for a
- * star's planets; the belt rings everything. */
+ * star's planets. The belt rings the roots: the page sizes it to the sky it
+ * draws (beltOf's radius), never smaller than beltMin. */
 export const ORBIT = {
   star: { base: 110, step: 40 },
   planet: { base: 44, step: 14 },
   moon: { base: 26, step: 5 },
-  belt: { radius: 900, tilt: 0.35, speed: 0.004 },
+  beltMin: 350,
+  belt: { tilt: 0.35, speed: 0.004 },
   speed: { star: 0.02, planet: 0.06, moon: 0.1 },
 } as const
 
@@ -93,13 +95,13 @@ export function orbitsOf(nodes: GraphNode[], edges: GraphEdge[]): Map<string, Or
   return orbits
 }
 
-/** The belt: every id on one tilted ring around the origin, evenly spaced. */
-export function beltOf(ids: string[]): Map<string, Orbit> {
+/** The belt: every id on one tilted ring of `radius` around the origin, evenly spaced. */
+export function beltOf(ids: string[], radius: number = ORBIT.beltMin): Map<string, Orbit> {
   const orbits = new Map<string, Orbit>()
   ids.forEach((id, i) => {
     orbits.set(id, {
       host: 'belt',
-      radius: ORBIT.belt.radius,
+      radius,
       phase: (2 * Math.PI * i) / ids.length,
       speed: ORBIT.belt.speed,
       tilt: ORBIT.belt.tilt,

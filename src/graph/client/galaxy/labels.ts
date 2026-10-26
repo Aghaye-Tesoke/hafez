@@ -8,8 +8,15 @@ import type { Body } from './bodies.js'
  * whole sky (belt included, orbits.ts), `near` a star flown to with its planets. */
 export const LABEL = { always: 3000, near: 300 } as const
 
-export function labelShows(body: Body, distance: number, hovered: boolean, selected: boolean): boolean {
+/** A star orbiting a core is named within this many `near`s: inside its
+ * galaxy, not across the sky, so a galaxy's names do not crowd the overview. */
+export const HOSTED_STAR_REACH = 4
+
+/** `hosted`: the body orbits another (a star in a galaxy). Cores, rogue stars
+ * and nebulae are named from afar; a hosted star only from inside its galaxy. */
+export function labelShows(body: Body, distance: number, hovered: boolean, selected: boolean, hosted: boolean): boolean {
   if (hovered || selected) return true
+  if (body === 'star' && hosted) return distance <= LABEL.near * HOSTED_STAR_REACH
   const far = body === 'core' || body === 'star' || body === 'nebula'
   return distance <= (far ? LABEL.always : LABEL.near)
 }

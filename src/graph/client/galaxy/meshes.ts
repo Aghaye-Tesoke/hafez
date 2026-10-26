@@ -27,15 +27,24 @@ const isStarLike = (body: Body): boolean => body === 'star' || body === 'core'
 const GLOW_OPACITY_MAX = 0.45
 /** A core's wide halo: faint, so the galaxy's middle stays translucent. */
 const CORE_HALO = { opacity: 0.08, scale: 10 }
-/** The nebula's clouds, inner to outer: size in radii and opacity. Additive and
- * faint, so overlapping hues glow softly under bloom instead of flaring white. */
+/** A nebula spans this many of its body radii: the remnant of a star, wider than the star was. */
+export const NEBULA_SPAN = 6
+/** The nebula's five clouds, one hue each from GALAXY.nebula in order (teal,
+ * blue, violet, pink, warm): size and offset in nebula radii, the direction
+ * of the offset in degrees, fixed so teal sits on one side and violet-pink on
+ * the other. Additive, translucent and apart, so the hues stay distinct
+ * instead of averaging into one tint. */
 const NEBULA_CLOUDS = [
-  { size: 4.4, opacity: 0.36 },
-  { size: 6.4, opacity: 0.3 },
-  { size: 8.4, opacity: 0.24 },
-  { size: 10.4, opacity: 0.18 },
-  { size: 12.4, opacity: 0.12 },
+  { size: 0.55, offset: 0.45, angle: 200, opacity: 0.5 },
+  { size: 0.8, offset: 0.35, angle: 250, opacity: 0.3 },
+  { size: 1.0, offset: 0.5, angle: 20, opacity: 0.5 },
+  { size: 0.9, offset: 0.6, angle: 70, opacity: 0.3 },
+  { size: 0.7, offset: 0.55, angle: 130, opacity: 0.3 },
 ]
+/** The bright heart, in nebula radii, and the debris: eight specks a pixel or
+ * so wide on screen, alternating teal and pink, on fixed angles 0.3 to 1.1 radii out. */
+const NEBULA_HEART = { size: 0.16, opacity: 0.9 }
+const NEBULA_DEBRIS = { count: 8, from: 0.3, to: 1.1, speck: 0.0018, opacity: 0.6 }
 const isPlanet = (body: Body): boolean => body.startsWith('planet-')
 
 function bodyColor(node: GraphNode, body: Body, today: string): string {
@@ -133,22 +142,6 @@ function sprite(name: string, color: string, opacity: number, scale: number): TH
   return s
 }
 
-/** A deterministic 32-bit hash (FNV-1a) of a string; the nebula's seed. */
-function hash(text: string): number {
-  let h = 2166136261
-  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 16777619)
-  return h >>> 0
-}
-
-/** A seeded stream of numbers in [0, 1). */
-function stream(seed: number): () => number {
-  let s = seed || 1
-  return () => {
-    s = (Math.imul(s, 1664525) + 1013904223) >>> 0
-    return s / 4294967296
-  }
-}
-
 function alarmRing(radius: number): THREE.Mesh {
   const ring = new THREE.Mesh(
     new THREE.TorusGeometry(radius * 2.2, 0.08, 8, 64),
@@ -188,20 +181,35 @@ export function makeBody(style: BodyStyle): THREE.Group {
   const { body, radius } = style
 
   if (body === 'nebula') {
-    // Seeded by the name: a reload draws the same remnant.
-    const next = stream(hash(style.label))
+    const R = radius * NEBULA_SPAN
+    const at = (angle: number, distance: number, s: THREE.Object3D) => {
+      const a = (angle * Math.PI) / 180
+      s.position.set(Math.cos(a) * distance * R, Math.sin(a) * distance * R, Math.sin(a * 2) * distance * R * 0.3)
+    }
     const cloud = new THREE.Group()
     cloud.name = 'cloud'
-    NEBULA_CLOUDS.forEach(({ size, opacity }, i) => {
-      const s = sprite('', GALAXY.nebula[i], opacity, radius * size)
-      // Each cloud a little stretched, turned and off centre, so together they read as gas.
-      s.scale.set(radius * size * (1 + next() * 0.5), radius * size, 1)
-      s.material.rotation = next() * Math.PI
-      s.position.set((next() * 2 - 1) * radius * 1.4 * i, (next() * 2 - 1) * radius * 1.0 * i, (next() * 2 - 1) * radius * 0.6 * i)
+    NEBULA_CLOUDS.forEach(({ size, offset, angle, opacity }, i) => {
+      // The sprite's soft disc fades out well inside its square: twice the size reads as `size`.
+      const s = sprite('', GALAXY.nebula[i], opacity, 2 * size * R)
+      at(angle, offset, s)
       cloud.add(s)
     })
+    for (let i = 0; i < NEBULA_DEBRIS.count; i++) {
+      const speck = new THREE.Sprite(new THREE.SpriteMaterial({
+        color: new THREE.Color(GALAXY.nebula[i % 2 === 0 ? 0 : 3]),
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        transparent: true,
+        opacity: NEBULA_DEBRIS.opacity,
+        // A speck keeps its pixel size at any distance.
+        sizeAttenuation: false,
+      }))
+      speck.scale.setScalar(NEBULA_DEBRIS.speck)
+      at(i * (360 / NEBULA_DEBRIS.count) + 15, NEBULA_DEBRIS.from + ((NEBULA_DEBRIS.to - NEBULA_DEBRIS.from) * i) / (NEBULA_DEBRIS.count - 1), speck)
+      cloud.add(speck)
+    }
     group.add(cloud)
-    group.add(sprite('remnant', GALAXY.remnant, 0.9, radius * 1.2))
+    group.add(sprite('remnant', GALAXY.remnant, NEBULA_HEART.opacity, 2 * NEBULA_HEART.size * R))
   } else {
     const banded = body === 'planet-banded' ? bandMap() : undefined
     const sphere = new THREE.Mesh(

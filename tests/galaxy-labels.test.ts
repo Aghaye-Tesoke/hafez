@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Body } from '../src/graph/client/galaxy/bodies.js'
-import { LABEL, labelShows, labelSize } from '../src/graph/client/galaxy/labels.js'
+import { HOSTED_STAR_REACH, LABEL, labelShows, labelSize } from '../src/graph/client/galaxy/labels.js'
 
 const BODIES: Body[] = ['core', 'star', 'nebula', 'planet-ringed', 'planet-banded', 'planet-rocky', 'moon', 'belt']
 const ALWAYS = new Set<Body>(['core', 'star', 'nebula'])
@@ -19,14 +19,28 @@ for (const body of BODIES) {
 
 describe('labelShows', () => {
   it.each(cases)('%s at %i, hovered=%s selected=%s -> %s', (body, distance, hovered, selected, expected) => {
-    expect(labelShows(body, distance, hovered, selected)).toBe(expected)
+    expect(labelShows(body, distance, hovered, selected, false)).toBe(expected)
   })
 
   it('uses the stated thresholds', () => {
     expect(LABEL).toEqual({ always: 3000, near: 300 })
-    expect(labelShows('star', 3000, false, false)).toBe(true)
-    expect(labelShows('moon', 300, false, false)).toBe(true)
-    expect(labelShows('moon', 301, false, false)).toBe(false)
+    expect(labelShows('star', 3000, false, false, false)).toBe(true)
+    expect(labelShows('moon', 300, false, false, false)).toBe(true)
+    expect(labelShows('moon', 301, false, false, false)).toBe(false)
+  })
+})
+
+describe('labelShows for a hosted star', () => {
+  const reach = LABEL.near * HOSTED_STAR_REACH
+  it('names a star in a galaxy only from inside it, or when hovered or selected', () => {
+    expect(labelShows('star', reach, false, false, true)).toBe(true)
+    expect(labelShows('star', reach + 1, false, false, true)).toBe(false)
+    expect(labelShows('star', LABEL.always, true, false, true)).toBe(true)
+    expect(labelShows('star', LABEL.always, false, true, true)).toBe(true)
+  })
+  it('keeps the always rule for a rogue star and for a core, hosted or not', () => {
+    expect(labelShows('star', reach + 1, false, false, false)).toBe(true)
+    expect(labelShows('core', reach + 1, false, false, true)).toBe(true)
   })
 })
 

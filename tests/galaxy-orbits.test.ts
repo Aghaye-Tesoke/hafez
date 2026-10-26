@@ -90,10 +90,13 @@ describe('positionAt', () => {
 })
 
 describe('belt and resolvePositions', () => {
-  const all = new Map<string, Orbit>([...orbitsOf(nodes, edges), ...beltOf(['b1', 'b2', 'b3'])])
+  const all = new Map<string, Orbit>([...orbitsOf(nodes, edges), ...beltOf(['b1', 'b2', 'b3'], 480)])
   it('places belt bodies on the belt ring round the origin', () => {
     const pos = resolvePositions(all, roots, 123)
-    for (const id of ['b1', 'b2', 'b3']) expect(dist(pos.get(id)!, { x: 0, y: 0, z: 0 })).toBeCloseTo(ORBIT.belt.radius, 6)
+    for (const id of ['b1', 'b2', 'b3']) expect(dist(pos.get(id)!, { x: 0, y: 0, z: 0 })).toBeCloseTo(480, 6)
+  })
+  it('the belt radius defaults to its minimum', () => {
+    expect(beltOf(['b1']).get('b1')!.radius).toBe(ORBIT.beltMin)
   })
   it('hangs a planet on a belt body', () => {
     const pos = resolvePositions(all, roots, 50)

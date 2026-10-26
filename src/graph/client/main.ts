@@ -11,7 +11,7 @@
 // - how it looks over time: one render loop for the alarm pulse, bursts in
 //   flight, commit flares (live.ts) and the label sprites.
 import ForceGraph3D, { type ForceGraph3DInstance } from '3d-force-graph'
-import { Vector2, type Group } from 'three'
+import { Vector2, Vector3, type Group } from 'three'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
 import SpriteText from 'three-spritetext'
 import { applyGraph, endId, state, type DrawLink, type DrawNode } from './state.js'
@@ -32,10 +32,10 @@ import { mountNotice } from './notice.js'
 import { reducedMotion } from './motion.js'
 import { alpha, CANVAS, FONT, GALAXY } from './tokens.js'
 import { isNebulaCore } from './galaxy/bodies.js'
-import { beltOf, orbitsOf, resolvePositions, type Orbit, type Vec3 } from './galaxy/orbits.js'
+import { beltOf, ORBIT, orbitsOf, resolvePositions, type Orbit, type Vec3 } from './galaxy/orbits.js'
 import { labelShows, labelSize } from './galaxy/labels.js'
 import { burstProgress, burstsFor, storageSeen } from './galaxy/supernova.js'
-import { burstMesh, disposeBody, makeBody, tickAlarm, tickBurst, updateBody, type BodyStyle } from './galaxy/meshes.js'
+import { burstMesh, disposeBody, makeBody, NEBULA_SPAN, tickAlarm, tickBurst, updateBody, type BodyStyle } from './galaxy/meshes.js'
 import { mountCamera, type Bounds } from './galaxy/camera.js'
 
 /** The simulation: the roots' charge, the ticks run before the first frame,
@@ -56,6 +56,11 @@ const LABEL_BACKDROP = alpha(GALAXY.space, 0.55)
  * with a floor so the smallest names still read; the backdrop's padding and
  * corner, in label heights. */
 const LABEL_PX = { perUnit: 2.4, min: 11, padding: 1 / 3 }
+/** A star or core is never drawn smaller than this radius on screen, in px:
+ * far off, its group is scaled up (its label is scaled back down). */
+const MIN_BODY_PX = 3
+/** The belt rings the roots this far beyond the farthest one. */
+const BELT_MARGIN = 1.3
 /** The overview looks down on the sky from this elevation, so orbits read as rings, not lines. */
 const OVERVIEW_ELEVATION = 0.6
 /** Every link draws at this opacity, in its relation's hue. */
@@ -77,6 +82,12 @@ let flyPending: DrawNode | null = null
 /** Supernovae in flight, by node id. */
 const bursts = new Map<string, { group: Group; start: number }>()
 let lastClick: { id: string; at: number } | null = null
+/** The belt's bodies, its radius now, and whether it is sized again on the next tick (each load's). */
+let beltIds: string[] = []
+let beltRadius: number = ORBIT.beltMin
+let beltPending = false
+/** The render loop's one scratch vector: no allocation per body per frame. */
+const scratch = new Vector3()
 
 /** The library types its constructor's node and link types on the default export's interface. */
 const Galaxy3D = ForceGraph3D as unknown as new (host: HTMLElement) => ForceGraph3DInstance<DrawNode, DrawLink>
@@ -143,6 +154,12 @@ function bodyObject(n: DrawNode): Group {
     // One size on screen at any distance; hung from its top edge, under the body.
     label.material.sizeAttenuation = false
     label.center.set(0.5, 1)
+    // A galaxy's name stays on top of its stars and their names, always strong.
+    if (n.body === 'core') {
+      label.renderOrder = 10
+      label.material.depthTest = false
+      label.color = CANVAS.labelStrong
+    }
     sizeLabel(n, label)
     // Hidden or not, a label is never picked: clicks and hover reach the bodies only.
     label.raycast = () => {}
@@ -163,10 +180,19 @@ function sizeLabel(n: DrawNode, label: SpriteText): void {
   const fov = ((graph.camera() as { fov?: number }).fov ?? 40) * Math.PI / 180
   const px = Math.max(LABEL_PX.min, labelSize(n.body) * LABEL_PX.perUnit)
   const height = px * 2 * Math.tan(fov / 2) / Math.max(1, shell.canvas.clientHeight)
-  if (Math.abs(label.textHeight - height) < 1e-9) return
-  label.textHeight = height
-  label.padding = height * LABEL_PX.padding
-  label.borderRadius = height * LABEL_PX.padding
+  if (Math.abs(label.textHeight - height) >= 1e-9) {
+    label.textHeight = height
+    label.padding = height * LABEL_PX.padding
+    label.borderRadius = height * LABEL_PX.padding
+  }
+  redrawn(label)
+}
+
+/** A label just redrew its canvas and set its own scale: keep it as the scale
+ * the render loop divides by its body's minimum-size factor. */
+function redrawn(label: SpriteText): void {
+  label.userData.width = label.scale.x
+  label.userData.height = label.scale.y
 }
 
 /** What a label says: a hovered planet or moon names what it belongs to. */
@@ -184,8 +210,27 @@ function visible3d(): { nodes: DrawNode[]; links: DrawLink[] } {
   const ids = new Set(nodes.map(n => n.id))
   const links = state.links.filter(l => ids.has(endId(l.source)) && ids.has(endId(l.target)))
   const edges = links.map(l => ({ source: endId(l.source), target: endId(l.target), relation: l.relation }))
-  orbits = new Map([...orbitsOf(nodes, edges), ...beltOf(nodes.filter(n => n.body === 'belt').map(n => n.id))])
+  beltIds = nodes.filter(n => n.body === 'belt').map(n => n.id)
+  orbits = new Map([...orbitsOf(nodes, edges), ...beltOf(beltIds, beltRadius)])
+  beltPending = true
   return { nodes, links }
+}
+
+/** Size the belt to the sky: BELT_MARGIN beyond the root farthest from the
+ * origin (the belt's centre, where the centring force keeps the roots'
+ * centroid), never under ORBIT.beltMin. False until the roots are placed. */
+function sizeBelt(): boolean {
+  let farthest = 0
+  let placed = false
+  for (const n of drawn.nodes) {
+    if (orbits.has(n.id) || n.x === undefined) continue
+    placed = true
+    farthest = Math.max(farthest, Math.hypot(n.x, n.y ?? 0, n.z ?? 0))
+  }
+  if (!placed) return false
+  beltRadius = Math.max(ORBIT.beltMin, BELT_MARGIN * farthest)
+  for (const [id, orbit] of beltOf(beltIds, beltRadius)) orbits.set(id, orbit)
+  return true
 }
 
 /** Pin every hosted body where its orbit has it at `t`, around where the roots are now. */
@@ -212,6 +257,7 @@ function unpin(n: DrawNode): void {
  * settling pins, then what waited for a placed body. */
 function onTick(): void {
   if (drawn.nodes.length === 0) return
+  if (beltPending && sizeBelt()) beltPending = false
   placeHosted(orbitTime(performance.now()))
   if (settleTicks > 0 && --settleTicks === 0) {
     for (const n of settling) if (!orbits.has(n.id)) unpin(n)
@@ -230,9 +276,10 @@ function onTick(): void {
   }
 }
 
-/** The sphere round every drawn body: the overview frames it. */
+/** The sphere round every drawn body but the belt's: the overview frames the
+ * galaxies and rogue stars, with the belt just outside. */
 function bounds(): Bounds {
-  const points = drawn.nodes.filter(n => n.x !== undefined).map(position)
+  const points = drawn.nodes.filter(n => n.x !== undefined && n.body !== 'belt').map(position)
   if (points.length === 0) return { center: { x: 0, y: 0, z: 0 }, radius: 100 }
   const k = 1 / points.length
   const center = points.reduce((c, p) => ({ x: c.x + p.x * k, y: c.y + p.y * k, z: c.z + p.z * k }), { x: 0, y: 0, z: 0 })
@@ -257,7 +304,7 @@ function flyTo(n: DrawNode): void {
  * it out to the farthest (0.75 of an orbit's radius puts it in view at the
  * camera's fly-to distance). */
 function frameRadius(n: DrawNode): number {
-  let reach = n.bodyStyle.radius
+  let reach = n.body === 'nebula' ? n.bodyStyle.radius * NEBULA_SPAN : n.bodyStyle.radius
   for (const o of orbits.values()) if (o.host === n.id) reach = Math.max(reach, o.radius * 0.75)
   return reach
 }
@@ -274,21 +321,36 @@ function onClick(n: DrawNode): void {
 /** The render loop: the alarm pulse, bursts in flight, flares and labels. */
 function frame(now: number): void {
   const reduced = reducedMotion()
+  // World units per screen px at distance 1: a body's radius r at distance d spans r / (d * perPx) px.
+  const fov = ((graph.camera() as { fov?: number }).fov ?? 40) * Math.PI / 180
+  const perPx = 2 * Math.tan(fov / 2) / Math.max(1, shell.canvas.clientHeight)
   for (const n of drawn.nodes) {
     const group = n.group
     if (!group) continue
     // Under reduced motion the alarm ring holds still at its built opacity.
     if (n.bodyStyle.alarm && !reduced) tickAlarm(group, now / 1000)
+    const distance = camera.distanceTo(scratch.set(n.x ?? 0, n.y ?? 0, n.z ?? 0))
+    const starLike = n.body === 'star' || n.body === 'core'
+    const k = starLike ? Math.max(1, MIN_BODY_PX * distance * perPx / n.bodyStyle.radius) : 1
+    if (group.scale.x !== k) group.scale.setScalar(k)
     const label = group.getObjectByName('label') as SpriteText | undefined
     if (!label) continue
     const hovered = state.hovered === n
     const selected = state.selected === n
-    label.visible = labelShows(n.body, camera.distanceTo(position(n)), hovered, selected)
+    label.visible = labelShows(n.body, distance, hovered, selected, orbits.has(n.id))
     if (!label.visible) continue
     const text = labelText(n, hovered)
-    if (label.text !== text) label.text = text
-    const color = hovered || selected ? CANVAS.labelStrong : CANVAS.label
-    if (label.color !== color) label.color = color
+    if (label.text !== text) {
+      label.text = text
+      redrawn(label)
+    }
+    const color = hovered || selected || n.body === 'core' ? CANVAS.labelStrong : CANVAS.label
+    if (label.color !== color) {
+      label.color = color
+      redrawn(label)
+    }
+    // The label keeps its own size on screen, whatever its body's scale.
+    label.scale.set(label.userData.width / k, label.userData.height / k, 1)
   }
   for (const [id, burst] of bursts) {
     const n = drawn.nodes.find(d => d.id === id)
@@ -414,7 +476,9 @@ new ResizeObserver(() => {
 void document.fonts.ready.then(() => {
   for (const n of state.nodes) {
     const label = n.group?.getObjectByName('label') as SpriteText | undefined
-    if (label) label.fontFace = FONT.display
+    if (!label) continue
+    label.fontFace = FONT.display
+    redrawn(label)
   }
 })
 
