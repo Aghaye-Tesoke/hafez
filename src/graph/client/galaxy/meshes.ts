@@ -171,6 +171,7 @@ function estimatedOutline(radius: number): THREE.LineLoop {
 export function makeBody(style: BodyStyle): THREE.Group {
   const group = new THREE.Group()
   group.userData.body = style.body
+  group.userData.radius = style.radius
   const { body, radius } = style
 
   if (body === 'nebula') {
@@ -235,20 +236,27 @@ export function updateBody(group: THREE.Group, style: BodyStyle): void {
     halo.scale.setScalar(style.glow.reach * style.radius * 2)
   }
   const core = group.getObjectByName('core') as THREE.Sprite | undefined
-  if (core) core.material.color.copy(color)
+  if (core) {
+    core.material.color.copy(color)
+    core.scale.setScalar(style.radius * 14)
+  }
 
+  // Added children are built at the build radius, then scaled with the rest.
+  const built = group.userData.radius as number
   const alarm = group.getObjectByName('alarm')
-  if (style.alarm && !alarm) group.add(alarmRing(style.radius))
+  if (style.alarm && !alarm) group.add(alarmRing(built))
   else if (!style.alarm && alarm) {
     group.remove(alarm)
     disposeObject(alarm)
   }
   const outline = group.getObjectByName('estimated')
-  if (style.estimated && !outline) group.add(estimatedOutline(style.radius))
+  if (style.estimated && !outline) group.add(estimatedOutline(built))
   else if (!style.estimated && outline) {
     group.remove(outline)
     disposeObject(outline)
   }
+  const k = style.radius / built
+  for (const name of ['sphere', 'ring', 'alarm', 'estimated']) group.getObjectByName(name)?.scale.setScalar(k)
 }
 
 /** The slow amber pulse. */

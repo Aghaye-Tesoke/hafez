@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GraphNode } from '../src/types.js'
-import { bodyStyle } from '../src/graph/client/galaxy/meshes.js'
+import { bodyStyle, makeBody, updateBody } from '../src/graph/client/galaxy/meshes.js'
 import { GALAXY } from '../src/graph/client/tokens.js'
 import { starRadius, temperatureColor } from '../src/graph/client/galaxy/temperature.js'
 
@@ -37,5 +37,12 @@ describe('bodyStyle', () => {
     expect(s.radius).toBe(2.6)
     expect(s.color).toBe(GALAXY.planet.ringed)
     expect(s.alarm).toBe(false)
+  })
+  it('updateBody rescales the sphere in place and keeps the build radius', () => {
+    const s = bodyStyle(project({ last_active: today, heat: 1 }), 'star', today)
+    const group = makeBody(s)
+    updateBody(group, { ...s, radius: s.radius * 2 })
+    expect(group.getObjectByName('sphere')!.scale.x).toBeCloseTo(2)
+    expect(group.userData.radius).toBe(s.radius)
   })
 })
