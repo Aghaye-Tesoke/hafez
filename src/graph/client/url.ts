@@ -1,6 +1,6 @@
 // src/graph/client/url.ts
 // The page's state in its URL query, so a reload or a bookmark brings the same
-// view back: focus, depth, scope and highlight (view.ts says what each holds).
+// view back: focus and scope (view.ts says what each holds).
 // Written with replaceState: a toggle is not a history step.
 import { parseView, viewSearch, type ViewParams } from './view.js'
 

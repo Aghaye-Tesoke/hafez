@@ -1,34 +1,26 @@
 // src/graph/client/activity.ts
-// Catching up on the agent (#259), built on live.ts's commit hook and pulses:
+// Catching up on the agent (#259), built on live.ts's commit hook and flares:
 // - the Activity section of the left sidebar (#278): the server's `/activity`
 //   rows (name, ×N, the agent, time ago, the write's tone), fetched on load,
 //   after each commit and on each reconnect; a click selects the note; its
 //   header says whether the page is live, reconnecting or offline, and its
 //   list is a polite live region announcing new rows;
-// - Follow (off by default): the camera eases to each commit's pulsed node;
-// - ghosts: a deleted node's last drawn object fades out where it was.
+// - Follow (off by default): the camera flies to each commit's flared body.
 import type { ActivityRow, ChangeOp, NoteChange } from '../../types.js'
-import { onCommit, onConnection, pulses, type Connection } from './live.js'
-import { state, type DrawNode } from './state.js'
-import { LABEL_COLOR } from './style.js'
+import { onCommit, onConnection, type Connection } from './live.js'
+import type { DrawNode } from './state.js'
 import { el, type Section } from './shell.js'
 
 /** What the activity needs from the graph view, handed over once by main.ts. */
 export interface ActivityView {
-  /** Ease the camera to a node. */
-  ease(node: DrawNode): void
-  /** Select a node by id, as search does (the local graph re-centres on one it leaves out). */
+  /** Fly the camera to a node's body (Camera.flyTo). */
+  flyTo(node: DrawNode): void
+  /** Select a node by id and fly to it, as search does. */
   select(id: string): void
-  /** Redraw once: ghosts change no data. */
-  redraw(): void
 }
 
 /** How often the rows' "time ago" is brought up to date, in ms. */
 const AGO_EVERY_MS = 30_000
-/** How long a deleted node takes to fade out, in ms. */
-const GHOST_MS = 2400
-/** A ghost starts at this alpha. */
-const GHOST_ALPHA = 0.7
 
 const VERB: Record<ChangeOp, string> = { create: 'created', update: 'updated', delete: 'deleted' }
 
@@ -41,8 +33,6 @@ let rows: ActivityRow[] = []
 let items = new Map<string, HTMLLIElement>()
 /** Drops a response that an earlier, slower fetch would overwrite. */
 let fetched = 0
-/** Deleted nodes fading out: the object last drawn and when its fade began. */
-const ghosts = new Map<string, { node: DrawNode; start: number }>()
 const list = document.createElement('ol')
 
 /** Fill the Activity section, with its Follow toggle, and start listening for commits. */
@@ -91,26 +81,14 @@ async function refresh(): Promise<void> {
   }
 }
 
-function commit(changes: NoteChange[]): void {
-  // A promote deletes a note and creates it again under the same slug: its
-  // node lives on, so the delete does not ghost it.
-  const kept = new Set(changes.filter(c => c.op !== 'delete').map(c => c.slug))
+function commit(changes: NoteChange[], flared: Map<string, DrawNode>): void {
+  // The last body the commit flared is the one Follow flies to.
   let followed: DrawNode | undefined
-  for (const { slug, op } of changes) {
-    const pulse = pulses.get(slug)
-    if (op === 'delete') {
-      if (kept.has(slug)) continue
-      if (pulse?.op === 'delete') ghosts.set(slug, { node: pulse.node, start: pulse.start })
-    } else {
-      ghosts.delete(slug)
-    }
-    if (pulse) followed = pulse.node
-  }
+  for (const { slug } of changes) followed = flared.get(slug) ?? followed
 
   void refresh()
 
-  if (follow && followed) view?.ease(followed)
-  view?.redraw()
+  if (follow && followed) view?.flyTo(followed)
 }
 
 function render(): void {
@@ -163,38 +141,4 @@ function ago(ms: number): string {
   if (minutes < 60) return `${minutes}m`
   if (minutes < 60 * 24) return `${Math.floor(minutes / 60)}h`
   return `${Math.floor(minutes / (60 * 24))}d`
-}
-
-const TAU = Math.PI * 2
-
-/** onRenderFramePost: each deleted node fading out where it was, its name with it. */
-export function drawGhosts(ctx: CanvasRenderingContext2D, scale: number): void {
-  if (ghosts.size > 0) {
-    const now = performance.now()
-    ctx.save()
-    ctx.font = state.font
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'top'
-    for (const [id, { node, start }] of ghosts) {
-      const t = (now - start) / GHOST_MS
-      if (t >= 1) {
-        ghosts.delete(id)
-        continue
-      }
-      const x = node.x ?? 0
-      const y = node.y ?? 0
-      const radius = node.style.radius
-      ctx.globalAlpha = GHOST_ALPHA * (1 - t)
-      ctx.fillStyle = node.style.fill
-      ctx.beginPath()
-      ctx.arc(x, y, radius, 0, TAU)
-      ctx.fill()
-      ctx.fillStyle = LABEL_COLOR
-      ctx.fillText(node.name, x, y + radius + 2 / scale)
-    }
-    ctx.restore()
-  }
-  // force-graph stops drawing once its simulation cools: ask for the next
-  // frame while a ghost or a pulse is still running.
-  if ((ghosts.size > 0 || pulses.size > 0) && view) requestAnimationFrame(view.redraw)
 }

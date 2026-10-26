@@ -1,14 +1,12 @@
 // src/graph/client/search.ts
 // The `/` search (#256, #279): a combobox in the header over every note,
-// hidden ones included, and the tags and domains (find.ts says what it
-// finds). Each note result carries its cues: kind shape, status, Stale and a
-// "hidden" mark; a tag or domain result applies its Highlight. The list says
+// hidden ones included (find.ts says what it finds). Each result carries its
+// cues: kind shape, status, Stale and a "hidden" mark. The list says
 // how many matched beyond what it shows. Enter (or a click) picks the active
 // option; Esc clears the box and leaves it, and goes no further, so an open
 // panel stays open. `/` focuses it from anywhere but a text field, a control
 // included (C5). A listbox of options with `aria-activedescendant` (K3).
 import type { DrawNode } from './state.js'
-import type { Facet } from './sidebar.js'
 import { find, foundSummary, type Found, type NoteHit } from './find.js'
 import { el } from './shell.js'
 
@@ -16,23 +14,18 @@ import { el } from './shell.js'
 export interface SearchHooks {
   /** Every note the page holds, hidden ones included. */
   notes(): DrawNode[]
-  /** The Highlight chips the Graph holds. */
-  facets(): Facet[]
   /** Whether the view draws a note now. */
   shows(node: DrawNode): boolean
-  /** Select a note by id, revealing it when hidden. */
+  /** Select a note by id, revealing it when hidden, and fly to it. */
   pick(id: string): void
-  /** Apply a tag or domain's Highlight, by its id. */
-  highlight(id: string): void
 }
 
 const LIST_ID = 'search-list'
 
-type Option = { note: NoteHit<DrawNode> } | { facet: Facet }
 
 export function mountSearch(host: HTMLElement, hooks: SearchHooks): void {
   const input = el('input', {
-    class: 'input', type: 'search', placeholder: 'Search notes, tags, domains  ( / )', 'aria-label': 'Search notes, tags and domains',
+    class: 'input', type: 'search', placeholder: 'Search notes  ( / )', 'aria-label': 'Search notes',
     spellcheck: 'false', autocomplete: 'off', role: 'combobox', 'aria-expanded': 'false', 'aria-controls': LIST_ID, 'aria-autocomplete': 'list',
   })
   const list = el('ul', { id: LIST_ID, role: 'listbox', 'aria-label': 'Search results' })
@@ -40,13 +33,13 @@ export function mountSearch(host: HTMLElement, hooks: SearchHooks): void {
   const box = el('div', { class: 'results popover', hidden: '' }, list, total)
   host.append(input, box)
 
-  let options: Option[] = []
+  let options: Array<NoteHit<DrawNode>> = []
   let on = 0
 
   function render(found: Found<DrawNode> | null): void {
-    options = found ? [...found.notes.map(note => ({ note })), ...found.facets.map(facet => ({ facet }))] : []
+    options = found ? found.notes : []
     list.replaceChildren(...options.map((o, i) => {
-      const item = 'note' in o ? noteOption(o.note) : facetOption(o.facet)
+      const item = noteOption(o)
       item.id = `${LIST_ID}-${i}`
       // mousedown, not click: it lands before the input's blur empties the list.
       item.addEventListener('mousedown', event => {
@@ -77,16 +70,15 @@ export function mountSearch(host: HTMLElement, hooks: SearchHooks): void {
     input.blur()
   }
 
-  function choose(o: Option): void {
+  function choose(o: NoteHit<DrawNode>): void {
     // Picked while the box still has focus: the panel takes it, and gives it back on close.
-    if ('note' in o) hooks.pick(o.note.node.id)
-    else hooks.highlight(o.facet.id)
+    hooks.pick(o.node.id)
     reset()
   }
 
   function search(): void {
     on = 0
-    render(input.value.trim() ? find(input.value, hooks.notes(), hooks.facets(), hooks.shows) : null)
+    render(input.value.trim() ? find(input.value, hooks.notes(), hooks.shows) : null)
   }
   input.addEventListener('input', search)
   input.addEventListener('focus', search)
@@ -125,15 +117,6 @@ function noteOption(hit: NoteHit<DrawNode>): HTMLElement {
     el('span', { class: 'name' }, node.name),
     el('span', { class: 'cues' }, ...cues),
     el('span', { class: 'slug' }, node.id))
-}
-
-/** A tag or domain option: picking it applies its Highlight. */
-function facetOption(f: Facet): HTMLElement {
-  return el('li', { class: `opt facet ${f.kind}`, role: 'option', title: `Highlight the ${f.count} notes carrying this ${f.kind}` },
-    el('span', { class: 'mark facet', 'aria-hidden': 'true' }, '#'),
-    el('span', { class: 'name' }, `Highlight ${f.name}`),
-    el('span', { class: 'cues' }, el('span', { class: 'cue' }, f.kind)),
-    el('span', { class: 'slug' }, `${f.count} note${f.count === 1 ? '' : 's'}`))
 }
 
 /** Input types that take a click or a pick, not text: `/` there is the shortcut. */

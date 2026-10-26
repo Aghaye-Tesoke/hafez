@@ -8,15 +8,12 @@
 //   go by liveness, then name.
 // - Each note carries its cues: kind shape, status, Stale (the amber ring's
 //   rule) and whether the view hides it.
-// - The tags and domains whose name matches, as Highlight suggestions.
-// - The list is capped; the totals count every match.
+// - The list is capped; the total counts every match.
 import type { GraphNode } from '../../types.js'
 import { compareLiveness, isStale } from './signals.js'
-import type { Facet } from './sidebar.js'
 
-/** How many notes, and how many tags and domains, the list shows. */
+/** How many notes the list shows. */
 export const NOTES_SHOWN = 8
-export const FACETS_SHOWN = 4
 
 /** A note found, with its cues. */
 export interface NoteHit<N extends GraphNode = GraphNode> {
@@ -33,8 +30,6 @@ export interface NoteHit<N extends GraphNode = GraphNode> {
 export interface Found<N extends GraphNode = GraphNode> {
   notes: Array<NoteHit<N>>
   noteTotal: number
-  facets: Facet[]
-  facetTotal: number
 }
 
 /** Score tiers: a name or slug holding the query, a description holding
@@ -86,11 +81,10 @@ function hit<N extends GraphNode>(node: N, hidden: boolean): NoteHit<N> {
   }
 }
 
-/** The notes and the tags and domains matching `query`; `shows` says whether
- * the view draws a note. */
-export function find<N extends GraphNode>(query: string, nodes: N[], facets: Facet[], shows: (node: N) => boolean): Found<N> {
+/** The notes matching `query`; `shows` says whether the view draws a note. */
+export function find<N extends GraphNode>(query: string, nodes: N[], shows: (node: N) => boolean): Found<N> {
   const q = query.trim().toLowerCase()
-  if (!q) return { notes: [], noteTotal: 0, facets: [], facetTotal: 0 }
+  if (!q) return { notes: [], noteTotal: 0 }
   const words = q.split(/\s+/)
 
   const notes: Array<[N, number]> = []
@@ -101,28 +95,16 @@ export function find<N extends GraphNode>(query: string, nodes: N[], facets: Fac
   }
   notes.sort((a, b) => b[1] - a[1] || compareLiveness(a[0], b[0]) || a[0].name.localeCompare(b[0].name))
 
-  const tags: Array<[Facet, number]> = []
-  for (const f of facets) {
-    const score = fuzzyScore(q, f.name.toLowerCase())
-    if (score !== null) tags.push([f, score])
-  }
-  tags.sort((a, b) => b[1] - a[1] || b[0].count - a[0].count || a[0].name.localeCompare(b[0].name))
-
   return {
     notes: notes.slice(0, NOTES_SHOWN).map(([n]) => hit(n, !shows(n))),
     noteTotal: notes.length,
-    facets: tags.slice(0, FACETS_SHOWN).map(([f]) => f),
-    facetTotal: tags.length,
   }
 }
 
 /** The count under the list: every match, and how many the cap leaves out. */
 export function foundSummary(found: Found): string {
-  const { notes, noteTotal, facets, facetTotal } = found
-  if (noteTotal + facetTotal === 0) return 'No note, tag or domain matches.'
-  const part = (shown: number, all: number, one: string, many: string): string =>
-    all === 0 ? '' : shown < all ? `${shown} of ${all} ${many}` : `${all} ${all === 1 ? one : many}`
-  const parts = [part(notes.length, noteTotal, 'note', 'notes'), part(facets.length, facetTotal, 'tag or domain', 'tags and domains')].filter(Boolean)
-  const capped = notes.length < noteTotal || facets.length < facetTotal
-  return `${parts.join(' · ')}${capped ? ': type more to narrow' : ''}`
+  const { notes, noteTotal } = found
+  if (noteTotal === 0) return 'No note matches.'
+  if (notes.length < noteTotal) return `${notes.length} of ${noteTotal} notes: type more to narrow`
+  return `${noteTotal} ${noteTotal === 1 ? 'note' : 'notes'}`
 }

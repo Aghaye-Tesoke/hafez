@@ -1,12 +1,11 @@
 // tests/graph-sidebar.test.ts
 // What the left sidebar lists (#277, spec #270 "Left sidebar", Testing seam
 // 3): a pure client module over plain Graph data, run in node. Live work's
-// Stale / Active / Paused groups and their rows, the Unlinked notes, and the
-// tag and domain chips with the notes each one highlights.
+// Stale / Active / Paused groups and their rows, and the Unlinked notes.
 import { describe, expect, it } from 'vitest'
-import type { GraphEdge, GraphNode } from '../src/types.js'
+import type { GraphNode } from '../src/types.js'
 import { isStale } from '../src/graph/client/signals.js'
-import { facetTest, facets, liveGroups, liveRow, unlinkedNotes } from '../src/graph/client/sidebar.js'
+import { liveGroups, liveRow, unlinkedNotes } from '../src/graph/client/sidebar.js'
 
 const TODAY = '2026-10-24'
 
@@ -77,37 +76,5 @@ describe('unlinkedNotes', () => {
       { id: 'tag:infra', kind: 'tag', name: 'infra' } as GraphNode,
     ]
     expect(ids(unlinkedNotes(nodes))).toEqual(['retry', 'drift', 'zebra', 'old-idea'])
-  })
-})
-
-describe('facets and facetTest', () => {
-  const nodes: GraphNode[] = [
-    entity('hub'), entity('worker'), knowledge('lesson'), knowledge('plan', { subtype: 'plan' }),
-    { id: 'tag:infra', kind: 'tag', name: 'infra' },
-    { id: 'tag:meeting', kind: 'tag', name: 'meeting' },
-    { id: 'tag:alpha', kind: 'tag', name: 'alpha' },
-    { id: 'domain:engineering', kind: 'domain', name: 'engineering' },
-  ]
-  const tag = (note: string, value: string): GraphEdge => ({ source: note, target: `tag:${value}`, relation: 'tag' })
-  const edges: GraphEdge[] = [
-    tag('hub', 'infra'), tag('lesson', 'infra'), tag('worker', 'meeting'), tag('plan', 'alpha'),
-    { source: 'hub', target: 'domain:engineering', relation: 'domain' },
-    { source: 'worker', target: 'hub', relation: 'parent' },
-  ]
-
-  it('gives a chip per domain, then per tag, each with the notes carrying it, most first, then by name', () => {
-    expect(facets(nodes, edges)).toEqual([
-      { id: 'domain:engineering', kind: 'domain', name: 'engineering', count: 1 },
-      { id: 'tag:infra', kind: 'tag', name: 'infra', count: 2 },
-      { id: 'tag:alpha', kind: 'tag', name: 'alpha', count: 1 },
-      { id: 'tag:meeting', kind: 'tag', name: 'meeting', count: 1 },
-    ])
-  })
-
-  it('a chip lights the notes carrying it and no other, with link ends swapped for nodes or not', () => {
-    const test = facetTest('tag:infra', edges)
-    expect(ids(nodes.filter(test))).toEqual(['hub', 'lesson'])
-    const drawn = edges.map(e => ({ ...e, source: { id: e.source } }))
-    expect(ids(nodes.filter(facetTest('tag:meeting', drawn)))).toEqual(['worker'])
   })
 })

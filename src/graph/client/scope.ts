@@ -1,10 +1,10 @@
 // src/graph/client/scope.ts
 // What the page draws of the Graph it holds (#274):
-// - only notes: tag, domain and Session nodes are never drawn (their data
-//   stays held, for the highlight filter);
+// - only notes: tag, domain and Session nodes are never drawn;
 // - the scope, the header's Live work / Everything switch: Live hides done
 //   work only, keeping a done parent that anchors live children
-//   (signals.ts's liveScope); it lives in the URL's `scope` param, `all`
+//   (signals.ts's liveScope), and never a finished project: its nebula stays
+//   in the sky in both scopes; it lives in the URL's `scope` param, `all`
 //   for Everything, absent for Live;
 // - the header's Knowledge toggle (on by default) hides Knowledge in either scope.
 import type { GraphNode } from '../../types.js'
@@ -12,6 +12,7 @@ import { state } from './state.js'
 import { readView, writeView } from './url.js'
 import type { Scope } from './view.js'
 import { el } from './shell.js'
+import { isNebulaCore } from './galaxy/bodies.js'
 
 let scope: Scope = readView().scope
 let knowledge = true
@@ -27,7 +28,7 @@ export const isNote = (node: GraphNode): boolean => node.kind === 'entity' || no
 export function scopeShows(node: GraphNode): boolean {
   if (!isNote(node)) return false
   if (node.kind === 'knowledge') return knowledge
-  return scope === 'all' || state.live(node)
+  return scope === 'all' || isNebulaCore(node) || state.live(node)
 }
 
 /** Bring a note the view hides into it: Knowledge back on, or Everything for

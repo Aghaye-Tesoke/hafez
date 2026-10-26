@@ -4,16 +4,18 @@
 // shell owns layout only; every other module mounts into one of its named
 // slots and never appends to <body> itself.
 //
-// - header: brand, `scope` (the Live work / Everything switch),
-//   `search`, then `tools` (Knowledge, Fit, Re-layout and the `?` legend);
-// - left sidebar: one Section per slot, Live work, Unlinked, Activity and
-//   Highlight, each hidden until a module fills it (`section.show()`);
-// - `canvas`: the force-graph host;
-// - right sidebar: `note` (the panel, its header holding the local-graph control).
+// - header: brand and the `counts` line (projects, galaxies, finished),
+//   `scope` (the Live work / Everything switch), `search`, then `tools`
+//   (Knowledge, Fit all, Fly (F) and the `?` legend);
+// - left sidebar: one Section per slot, Live work, Unlinked and Activity,
+//   each hidden until a module fills it (`section.show()`);
+// - `canvas`: the 3D graph's host, and `hint`, the line on how to move
+//   about, which main.ts puts over it once the graph has taken the host;
+// - right sidebar: `note` (the panel).
 // Both sidebars resize by dragging their grip and collapse or restore on a
 // double-click of it.
 
-export type SectionId = 'live' | 'unlinked' | 'activity' | 'highlight'
+export type SectionId = 'live' | 'unlinked' | 'activity'
 
 export interface Section {
   root: HTMLElement
@@ -28,11 +30,15 @@ export interface Section {
 export interface Shell {
   scope: HTMLElement
   search: HTMLElement
-  tools: { knowledge: HTMLButtonElement; fit: HTMLButtonElement; relayout: HTMLButtonElement; legend: HTMLButtonElement }
+  /** `N projects · M galaxies · K finished`, set by main.ts on each load. */
+  counts: HTMLElement
+  tools: { knowledge: HTMLButtonElement; fit: HTMLButtonElement; fly: HTMLButtonElement; legend: HTMLButtonElement }
   /** The legend popover under `?`: legend.ts fills it. */
   legend: HTMLElement
   sections: Record<SectionId, Section>
   canvas: HTMLElement
+  /** How to move about the sky: main.ts appends it to the canvas after the graph mounts. */
+  hint: HTMLElement
   note: HTMLElement
 }
 
@@ -40,7 +46,6 @@ const SECTIONS: Array<[SectionId, string]> = [
   ['live', 'Live work'],
   ['unlinked', 'Unlinked'],
   ['activity', 'Activity'],
-  ['highlight', 'Highlight'],
 ]
 
 /** Sidebar widths in px: the default is a share of the window within bounds. */
@@ -92,19 +97,21 @@ export function mountShell(): Shell {
   const search = el('div', { id: 'search' })
   const tools = {
     knowledge: button('Knowledge', { 'aria-pressed': 'true', title: 'Show or hide Knowledge notes' }),
-    fit: button('Fit', { title: 'Fit the graph to the view' }),
-    relayout: button('Re-layout', { title: 'Lay the graph out again' }),
+    fit: button('Fit all', { title: 'Frame the whole sky' }),
+    fly: button('Fly (F)', { 'aria-pressed': 'false', title: 'Fly freely: WASD to move, drag to look, Esc to come back' }),
     legend: button('?', { class: 'btn icon', 'aria-label': 'Legend', 'aria-expanded': 'false', 'aria-controls': 'legend', title: 'Legend' }),
   }
   const legend = el('div', { id: 'legend', class: 'popover', role: 'dialog', 'aria-label': 'Legend', hidden: '' })
+  const counts = el('div', { id: 'counts', class: 'mono' })
   const head = el('header', { id: 'head' },
     el('div', { class: 'brand' }, 'HAFEZ', el('span', {}, 'GRAPH')),
-    scope, search,
-    el('div', { id: 'tools' }, tools.knowledge, tools.fit, tools.relayout, tools.legend, legend))
+    counts, scope, search,
+    el('div', { id: 'tools' }, tools.knowledge, tools.fit, tools.fly, tools.legend, legend))
 
   const sections = Object.fromEntries(SECTIONS.map(([id, title]) => [id, section(id, title)])) as Record<SectionId, Section>
   const left = el('nav', { id: 'left', class: 'side', 'aria-label': 'Vault' }, ...SECTIONS.map(([id]) => sections[id].root))
-  const canvas = el('main', { id: 'canvas', 'aria-label': 'Graph' })
+  const canvas = el('main', { id: 'canvas', 'aria-label': 'Galaxy' })
+  const hint = el('p', { id: 'hint' }, 'Scroll to fly · drag to look around · click a star for details')
   const note = el('div', { id: 'note' })
   const right = el('aside', { id: 'right', class: 'side', 'aria-label': 'Note' }, note)
 
@@ -147,7 +154,7 @@ export function mountShell(): Shell {
   app.append(head, left, grip('left'), canvas, grip('right'), right)
   setWidths()
   document.body.append(app)
-  return { scope, search, tools, legend, sections, canvas, note }
+  return { counts, scope, search, tools, legend, sections, canvas, hint, note }
 }
 
 function defaultWidth(side: 'left' | 'right'): number {

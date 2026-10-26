@@ -1,13 +1,12 @@
 // src/graph/client/sidebar.ts
 // What the left sidebar lists (#277, spec #270 "Left sidebar"), worked out
 // from plain Graph data before any DOM: Live work's Stale / Active / Paused
-// groups and their rows, the Unlinked notes, and the tag and domain chips
-// with the notes each one highlights. Pure, so it runs in node; sections.ts
-// draws it. Who is Stale is signals.ts's one rule, the same the canvas rings.
+// groups and their rows, and the Unlinked notes. Pure, so it runs in node;
+// sections.ts draws it. Who is Stale is signals.ts's one rule, the same the canvas rings.
 import type { GraphNode } from '../../types.js'
 import { compareLiveness, isDone, isLive, isStale } from './signals.js'
 import { daysBetween } from '../../dates.js'
-import { ageText, type Link } from './note-view.js'
+import { ageText } from './note-view.js'
 
 export interface LiveGroups<N extends GraphNode> {
   /** Live work past its staleness-days: the canvas's amber rings. */
@@ -57,38 +56,4 @@ export function liveRow(node: GraphNode, today: string): LiveRow {
 export function unlinkedNotes<N extends GraphNode>(nodes: N[]): N[] {
   return nodes.filter(n => n.unlinked).sort((a, b) =>
     Number(isDone(a)) - Number(isDone(b)) || a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name))
-}
-
-/** A Highlight chip: a tag or domain the Graph's layers hold, and how many
- * notes carry it. `id` is its layer node's (`tag:<t>`, `domain:<d>`). */
-export interface Facet { id: string; kind: 'tag' | 'domain'; name: string; count: number }
-
-const endId = (end: Link['source']): string => (typeof end === 'string' ? end : end.id)
-
-/** The notes carrying each tag and domain, by its layer node's id. */
-function carriers(links: Link[]): Map<string, Set<string>> {
-  const by = new Map<string, Set<string>>()
-  for (const l of links) {
-    if (l.relation !== 'tag' && l.relation !== 'domain') continue
-    const id = endId(l.target)
-    if (!by.has(id)) by.set(id, new Set())
-    by.get(id)!.add(endId(l.source))
-  }
-  return by
-}
-
-/** The Highlight chips: domains, then tags, each most carried first, then by name. */
-export function facets(nodes: GraphNode[], links: Link[]): Facet[] {
-  const by = carriers(links)
-  const KIND_ORDER = { domain: 0, tag: 1 }
-  return nodes
-    .filter((n): n is GraphNode & { kind: Facet['kind'] } => n.kind === 'tag' || n.kind === 'domain')
-    .map(n => ({ id: n.id, kind: n.kind, name: n.name, count: by.get(n.id)?.size ?? 0 }))
-    .sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || b.count - a.count || a.name.localeCompare(b.name))
-}
-
-/** A chip's highlight: the notes carrying the tag or domain `id`. */
-export function facetTest(id: string, links: Link[]): (node: GraphNode) => boolean {
-  const lit = carriers(links).get(id) ?? new Set<string>()
-  return node => lit.has(node.id)
 }

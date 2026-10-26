@@ -3,7 +3,7 @@
 // become custom properties on :root, and every rule below reads them through
 // var(). main.ts adds it once; no other module adds a <style> or inline CSS.
 import { FONTS } from '../fonts.js'
-import { COLOR, FONT, MOTION, RADIUS, SPACE, TYPE } from './tokens.js'
+import { COLOR, FONT, GALAXY, MOTION, RADIUS, SPACE, TYPE } from './tokens.js'
 
 /** `gold` → `--gold`, `text2` → `--text2`, `scrollbarHover` → `--scrollbar-hover`. */
 const prop = (name: string): string => `--${name.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`
@@ -75,7 +75,10 @@ button, input, select { font: inherit; color: inherit; }
 .side { min-width: 0; min-height: 0; overflow: auto; background: var(--root); }
 .grip { cursor: col-resize; border-left: 1px solid var(--border); transition: background var(--fast) var(--ease); touch-action: none; }
 .grip:hover, .grip.drag { background: ${mix('gold', 18)}; }
-#canvas { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: var(--well); }
+#canvas { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: ${GALAXY.space}; }
+#counts { font-size: var(--fs-label); color: var(--muted); white-space: nowrap; }
+#hint { position: absolute; bottom: calc(var(--s) * 3); left: 50%; transform: translateX(-50%); z-index: 5; margin: 0; pointer-events: none;
+  font-size: var(--fs-base); color: var(--muted); white-space: nowrap; }
 
 /* The canvas with no graph to draw: an empty Vault, a failed load (states.ts) */
 #state { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; width: min(420px, calc(100% - 32px));
@@ -135,7 +138,6 @@ button, input, select { font: inherit; color: inherit; }
 #search li.is-stale .mark.disc { box-shadow: 0 0 0 1.5px var(--root), 0 0 0 3px var(--amber); }
 #search .mark.diamond, #search .mark.hollow { width: 8px; height: 8px; margin: 0 0.5px; transform: rotate(45deg); background: var(--wisdom); }
 #search .mark.hollow { background: none; border: 1.5px solid var(--wisdom); }
-#search .mark.facet { width: auto; height: auto; font: 600 var(--fs-label) var(--mono); color: var(--muted); }
 #search .total { margin: var(--s) calc(var(--s) * 2) 0; font: var(--fs-label) var(--mono); color: var(--muted); }
 #search .total:empty { display: none; }
 .input:focus-visible { outline: 2px solid ${mix('gold', 80)}; outline-offset: 1px; }
@@ -150,9 +152,11 @@ button, input, select { font: inherit; color: inherit; }
 #legend dl { display: grid; grid-template-columns: 22px 1fr; gap: calc(var(--s) * 1.5) calc(var(--s) * 2); align-items: center; margin: 0; }
 #legend dt { display: flex; }
 #legend dd { margin: 0; color: var(--text2); }
-#legend dd + dt.group, #legend dt.group + dd { margin-top: calc(var(--s) * 2); }
+#legend .swatches { list-style: none; display: flex; flex-wrap: wrap; gap: calc(var(--s) * 1.5) calc(var(--s) * 3); margin: 0; padding: 0; }
+#legend .swatches li { display: flex; align-items: center; gap: var(--s); color: var(--text2); font-size: var(--fs-base); white-space: nowrap; }
+#legend .sentence { margin: calc(var(--s) * 3) 0; color: var(--text); font-size: var(--fs-body); }
 
-/* Live work, Unlinked and Highlight (sections.ts) */
+/* Live work and Unlinked (sections.ts) */
 #left .hint { margin: 0 calc(var(--s) * 2) calc(var(--s) * 2); color: var(--muted); font-size: var(--fs-base); }
 #left .sub { margin: calc(var(--s) * 2) calc(var(--s) * 2) calc(var(--s) * 0.5); font: 600 var(--fs-micro) var(--display);
   text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
@@ -180,10 +184,7 @@ button, input, select { font: inherit; color: inherit; }
 #unlinked .name:focus-visible { outline: 2px solid ${mix('gold', 80)}; outline-offset: 2px; }
 #unlinked .line { display: flex; gap: calc(var(--s) * 1.5); align-items: center; margin-top: var(--s); }
 #unlinked .line .code { padding: var(--s) calc(var(--s) * 1.5); font-size: var(--fs-label); overflow: hidden; text-overflow: ellipsis; }
-#unlinked .line .btn, #highlight .chip { height: 24px; padding: 0 calc(var(--s) * 2); font-size: var(--fs-micro); }
-#highlight .chips { display: flex; flex-wrap: wrap; gap: calc(var(--s) * 1.25); padding: 0 calc(var(--s) * 2); }
-#highlight .chip { text-transform: none; letter-spacing: .02em; font-family: var(--sans); font-weight: 500; font-size: var(--fs-base); }
-#highlight .chip .n { font: var(--fs-micro) var(--mono); color: var(--muted); }
+#unlinked .line .btn { height: 24px; padding: 0 calc(var(--s) * 2); font-size: var(--fs-micro); }
 
 /* Activity */
 #activity .follow { margin: 0 calc(var(--s) * 2) calc(var(--s) * 2); height: 24px; font-size: var(--fs-micro); }
@@ -224,9 +225,10 @@ button, input, select { font: inherit; color: inherit; }
 #panel .facts b { color: var(--text2); font-weight: 500; font-family: var(--mono); }
 #panel .muted { margin: 0 0 calc(var(--s) * 1.5); color: var(--muted); font-size: var(--fs-base); }
 #panel .facts + .muted { margin: calc(var(--s) * 2) 0 0; }
-#panel .depth { display: flex; align-items: center; gap: calc(var(--s) * 1.5); margin-top: calc(var(--s) * 3); }
-#panel .depth .label { margin-right: var(--s); }
-#panel .depth .btn { height: 24px; min-width: 32px; justify-content: center; padding: 0 calc(var(--s) * 2); font-size: var(--fs-micro); }
+#panel .kind { margin: 0 0 var(--s); }
+#panel .state { margin: 0 0 var(--s); color: var(--text); }
+#panel .temp { display: flex; align-items: center; gap: calc(var(--s) * 1.5); margin: 0 0 calc(var(--s) * 2); color: var(--text2); }
+#panel .temp .label { margin-right: var(--s); }
 #panel .sec { padding: calc(var(--s) * 3.5) calc(var(--s) * 5.5); border-bottom: 1px solid var(--border); }
 #panel .sec:last-child { border-bottom: 0; }
 #panel h3 { display: flex; justify-content: space-between; align-items: baseline; margin: 0 0 calc(var(--s) * 2); }
@@ -283,6 +285,7 @@ button, input, select { font: inherit; color: inherit; }
 #panel .line { display: flex; gap: calc(var(--s) * 1.5); align-items: center; }
 #panel .finish .warn { color: var(--amber); }
 #panel .finish p { margin: 0 0 var(--s); }
+#panel .finish .caption { margin-top: calc(var(--s) * 2); }
 #panel .finish .row { display: flex; gap: calc(var(--s) * 1.5); margin-top: calc(var(--s) * 1.5); }
 #panel .finish .slug { display: block; width: 100%; margin-top: var(--s); padding: calc(var(--s) * 1.5) calc(var(--s) * 2); background: var(--inset);
   border: 1px solid var(--border); border-radius: var(--r-md); font: var(--fs-base) var(--mono); color: var(--text2); outline: none; }

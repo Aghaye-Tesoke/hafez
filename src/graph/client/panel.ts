@@ -6,13 +6,13 @@
 // from `GET /note/:slug` (`read --json` at summary depth, plus an Entity's
 // `log`). Focus moves into the panel when it opens and back when it closes;
 // closed (×, or Esc through main.ts's steps back), the sidebar shows
-// "Nothing selected" and a hint. The header holds the local-graph depth
-// control (local.ts), which belongs to the selection. Note
+// "Nothing selected" and a hint. Under the title, what the body is in the
+// sky (`STAR · <galaxy>`), its state and, for a star, its temperature. Note
 // text reaches innerHTML only through renderMarkdown; everything else is text
 // nodes. What the panel says of a note's state is note-view.ts's.
-import { state, type DrawLink, type DrawNode } from './state.js'
-import { markSelection, neighbours } from './focus.js'
+import { endId, state, type DrawLink, type DrawNode } from './state.js'
 import { renderMarkdown, type RenderOpts } from './markdown.js'
+import { COOL_DAYS, daysSince } from './galaxy/temperature.js'
 import { el } from './shell.js'
 import { localDay } from '../../dates.js'
 import { canFinish, finishUrl, finishWarning, typedMatches, type FinishStep } from './finish.js'
@@ -20,9 +20,9 @@ import { ageText, badges, childRows, linkCounts, noteFacts, placingLine } from '
 
 /** What the panel needs from the graph view, handed over once by main.ts. */
 export interface View {
-  /** Ease the camera to a node. */
+  /** Fly the camera to a node. */
   ease(node: DrawNode): void
-  /** Redraw once: the selection ring moved while the simulation may be still. */
+  /** Redraw once: the selection changed what the labels show. */
   redraw(): void
   /** What is drawn now: selectNode reaches only visible nodes. */
   drawn(): { nodes: DrawNode[]; links: DrawLink[] }
@@ -30,8 +30,6 @@ export interface View {
   selected(node: DrawNode | null): void
   /** Select any node by id, first revealing it when the view hides it (a row's click). */
   focus(id: string): void
-  /** The local-graph depth control, for the header. */
-  depthControl(): HTMLElement
   /** Refetch the Graph and redraw, as a commit event does. */
   reload(): Promise<void>
 }
@@ -90,8 +88,8 @@ export function bindPanel(host: HTMLElement, v: View): void {
   })
 }
 
-/** Select a drawn node by slug (or `tag:`/`domain:` id): ring it, ease the
- * camera to it, open its panel. False, and nothing changes, when no drawn node
+/** Select a drawn node by slug: mark it selected, fly the camera to it,
+ * open its panel. False, and nothing changes, when no drawn node
  * has that id (unknown, or hidden by the current view). `ease: false`
  * refreshes the panel and leaves the camera where it is (a commit's reload).
  * Reselecting the node already selected is no selection change: the
@@ -104,7 +102,6 @@ export function selectNode(id: string, ease = true): boolean {
   if (opening) returnTo = document.activeElement instanceof HTMLElement ? document.activeElement : null
   if (changed) finishing = null
   state.selected = node
-  markSelection(node, view.drawn().links)
   render(node, null)
   // Open before the camera moves.
   show(true)
@@ -133,7 +130,6 @@ export function closePanel(): void {
   const hadFocus = panel.contains(document.activeElement)
   show(false)
   state.selected = null
-  markSelection(null, [])
   view?.redraw()
   view?.selected(null)
   if (hadFocus && returnTo?.isConnected) returnTo.focus({ preventScroll: true })
@@ -166,10 +162,10 @@ function render(node: DrawNode, note: Note | null, problem?: string): void {
   }
   const head = el('div', { class: 'head' })
   head.append(close, badgeRow, el('h2', {}, text('name', node.name)!))
+  head.append(...skyLines(node, today, byId))
   const description = text('description', node.description)
   if (description) head.append(el('p', { class: 'desc' }, description))
   head.append(factsLine(node, note ? open.length : undefined, today, byId))
-  if (view) head.append(view.depthControl())
   if (problem) head.append(el('p', { class: 'muted' }, problem))
   panel.append(head)
 
@@ -256,7 +252,10 @@ function finishSection(node: DrawNode): void {
   }
   sec.addEventListener('keydown', escape)
 
-  if (flow.step === 'idle') sec.append(button('Mark finished', () => go('confirm')))
+  if (flow.step === 'idle') {
+    sec.append(button('Mark finished', () => go('confirm')),
+      el('p', { class: 'muted caption' }, 'Finishing turns this star into a nebula.'))
+  }
   else if (flow.step === 'confirm') {
     const next = button('Continue', () => go('type'))
     const [first, second] = finishWarning(node).split('\n')
@@ -296,6 +295,85 @@ function finishSection(node: DrawNode): void {
       el('div', { class: 'row' }, send, button('Cancel', cancel)))
     focusIn(input)
   }
+}
+
+/** The nearest galaxy core a node orbits, up its host chain; undefined for a rogue body. */
+function galaxyOf(node: DrawNode, byId: Map<string, DrawNode>): DrawNode | undefined {
+  const seen = new Set([node.id])
+  for (let at = node.host ? byId.get(node.host) : undefined; at && !seen.has(at.id); at = at.host ? byId.get(at.host) : undefined) {
+    if (at.body === 'core') return at
+    seen.add(at.id)
+  }
+  return undefined
+}
+
+/** What the body is in the sky: `STAR · <galaxy>`, `ROGUE STAR`, `PLANET · <host>`, ... */
+function kindText(node: DrawNode, byId: Map<string, DrawNode>): string {
+  const galaxy = galaxyOf(node, byId)?.name
+  const host = node.host ? byId.get(node.host)?.name : undefined
+  const with_ = (kind: string, name: string | undefined) => name ? `${kind} · ${name}` : kind
+  switch (node.body) {
+    case 'core': return with_('Galaxy core', galaxy)
+    case 'star': return galaxy ? `Star · ${galaxy}` : 'Rogue star'
+    case 'nebula': return with_('Nebula', galaxy)
+    case 'moon': return with_('Moon', host)
+    case 'belt': return 'Belt · loose idea'
+    default: return with_('Planet', host)
+  }
+}
+
+/** A star's state in words, from the cooling clock and its open work. */
+function stateText(node: DrawNode, days: number): string {
+  if (node.status === 'done') return 'Finished'
+  if (days < 7) return 'Worked on this week'
+  if ((node.open_actions ?? 0) > 0) return 'Cooling — still has open work'
+  return 'Cold'
+}
+
+/** The temperature a star shows, named. */
+function temperatureText(days: number): string {
+  if (days < 7) return 'White-blue · this week'
+  if (days < 14) return 'Yellow · 2 weeks'
+  if (days < COOL_DAYS) return 'Orange · 3 weeks'
+  return 'Red dwarf · 4 weeks or more'
+}
+
+/** The kind line, then for a star or core its state and Temperature row, for a nebula `Finished`. */
+function skyLines(node: DrawNode, today: string, byId: Map<string, DrawNode>): HTMLElement[] {
+  const lines: HTMLElement[] = [el('p', { class: 'kind label' }, kindText(node, byId))]
+  if (node.body === 'nebula') lines.push(el('p', { class: 'state' }, 'Finished'))
+  if (node.body !== 'star' && node.body !== 'core') return lines
+  const days = daysSince(node.last_active, today)
+  lines.push(el('p', { class: 'state' }, stateText(node, days)),
+    el('p', { class: 'temp' }, el('span', { class: 'label' }, 'Temperature'),
+      swatch(node.bodyStyle.color), temperatureText(days)))
+  return lines
+}
+
+/** A small disc in a body's colour, as an SVG fill (no inline CSS). */
+function swatch(color: string): SVGSVGElement {
+  const NS = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(NS, 'svg')
+  for (const [k, v] of Object.entries({ class: 'swatch', width: '10', height: '10', viewBox: '0 0 10 10', 'aria-hidden': 'true' })) svg.setAttribute(k, v)
+  const disc = document.createElementNS(NS, 'circle')
+  for (const [k, v] of Object.entries({ cx: '5', cy: '5', r: '4.5', fill: color })) disc.setAttribute(k, v)
+  svg.append(disc)
+  return svg
+}
+
+/** The nodes at the other end of a node's links of one relation, by name.
+ * Matched by id: a link never drawn still holds slugs at its ends. */
+function neighbours(node: DrawNode, links: DrawLink[], byId: Map<string, DrawNode>, relation: DrawLink['relation'], direction: 'out' | 'in' | 'both'): DrawNode[] {
+  const found = new Set<string>()
+  for (const link of links) {
+    if (link.relation !== relation) continue
+    const s = endId(link.source)
+    const t = endId(link.target)
+    if (s === node.id && direction !== 'in') found.add(t)
+    if (t === node.id && direction !== 'out') found.add(s)
+  }
+  found.delete(node.id)
+  return [...found].flatMap(id => byId.get(id) ?? []).sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /** touched · open actions · parent · N children · most-linked · N · in <parent>. */
