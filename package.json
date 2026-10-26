@@ -17,7 +17,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc && esbuild src/graph/client/main.ts --bundle --minify --format=iife --target=es2020 --log-level=warning --outfile=dist/graph/client.js && node dist/graph/copy-fonts.js && chmod +x dist/cli.js",
+    "build": "rm -rf dist && tsc && esbuild src/graph/client/main.ts --bundle --minify --format=iife --target=es2020 --log-level=warning --alias:three/webgpu=./src/graph/client/webgpu-stub.ts --outfile=dist/graph/client.js && node dist/graph/copy-fonts.js && chmod +x dist/cli.js",
     "install:local": "chmod +x \"$(pwd)/dist/cli.js\" && mkdir -p ~/.local/bin && ln -sf \"$(pwd)/dist/cli.js\" ~/.local/bin/hafez && for d in ~/.claude/skills ~/.agents/skills; do for s in hafez hafez-save; do mkdir -p \"$d/$s\" && cp \"$(pwd)/skill/$s/SKILL.md\" \"$d/$s/SKILL.md\"; done; done",
     "typecheck": "tsc -p tsconfig.test.json && tsc -p src/graph/client/tsconfig.json",
     "pretest": "npm run build && npm run typecheck",
